@@ -20,7 +20,7 @@ _THEORY: Dict[str, str] = {
     "lassaigne_n": "Lassaigne’s test for nitrogen: Fuse compound with Na → extract (Lassaigne’s extract) → add FeSO4, boil, acidify → Prussian blue color indicates nitrogen.",
     "lassaigne_s": "Lassaigne’s test for sulphur: Sodium fusion converts S → Na2S; add sodium nitroprusside → violet/purple color indicates sulphur (exam standard).",
     "lassaigne_x": "Lassaigne’s test for halogens: Sodium fusion converts X → NaX; acidify with HNO3, then add AgNO3 → AgCl (white), AgBr (pale yellow), AgI (yellow) precipitate.",
-    "tollens": "Tollens’ test: Aldehydes reduce Tollens’ reagent to give silver mirror; ketones generally do not.",
+    "tollens": "Tollens’ test: Aldehydes are oxidised to carboxylate/carboxylic acid and reduce Tollens’ reagent (ammoniacal AgNO3) to metallic silver (silver mirror); ketones generally do not react.",
     "fehling": "Fehling’s test: Aliphatic aldehydes reduce Fehling’s solution to red Cu2O precipitate; ketones generally do not.",
     "iodoform": "Iodoform test (I2/NaOH): Yellow precipitate of CHI3 indicates presence of CH3CO– (methyl ketone) or CH3CH(OH)– group (e.g., ethanol/acetaldehyde give positive).",
     "nabhco3": "Carboxylic acids react with NaHCO3 giving brisk effervescence of CO2 (acid test).",
