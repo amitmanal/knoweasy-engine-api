@@ -229,10 +229,20 @@ def solve(question: Any, **kwargs: Any) -> Dict[str, Any]:
         "mode": "DIRECT",
     }
 
-def answer_isomerism_question(*args: Any, **kwargs: Any) -> Dict[str, Any]:
-    # THEORY must stay correct
-    if len(args) == 1 and isinstance(args[0], str) and _looks_like_theory(args[0]):
-        return solve(args[0], **kwargs)
+def answer_isomerism_question(*args: Any, **kwargs: Any) -> Any:
+    """Answer isomerism questions only.
+
+    IMPORTANT: This module must NOT hijack generic reaction questions.
+    If the prompt is not about isomerism, return None so other solvers can handle it.
+    """
+    # Single-string (theory/exam) mode
+    if len(args) == 1 and isinstance(args[0], str):
+        q = args[0]
+        if not _is_isomerism_question(q):
+            return None
+        # If it looks like a normal question, solve it.
+        if _looks_like_theory(q):
+            return solve(q, **kwargs)
 
     a = b = None
     if len(args) >= 2 and isinstance(args[0], str) and isinstance(args[1], str):
@@ -244,40 +254,59 @@ def answer_isomerism_question(*args: Any, **kwargs: Any) -> Dict[str, Any]:
             b = x.get("b") or x.get("B") or x.get("right")
         elif isinstance(x, (list, tuple)) and len(x) >= 2 and isinstance(x[0], str) and isinstance(x[1], str):
             a, b = x[0], x[1]
-        elif isinstance(x, str):
-            p = _extract_pair(x)
-            if p:
-                a, b = p
 
-    if a is None or b is None:
-        a = kwargs.get("a") or kwargs.get("A") or kwargs.get("left")
-        b = kwargs.get("b") or kwargs.get("B") or kwargs.get("right")
-
+    # Pair classification mode (explicit pair only)
     if isinstance(a, str) and isinstance(b, str):
+        # If neither side indicates isomerism, don't claim it.
+        if not (_is_isomerism_question(a) or _is_isomerism_question(b) or _is_isomerism_question(f"{a} {b}")):
+            # For pair inputs like ("ethanol", "dimethyl ether") we still want to classify.
+            # That's valid even without the keyword "isomer".
+            pass
         payload = _pair_payload(a, b)
         return {
             "topic": TOPIC,
             "answer": payload["answer"],
             "kind": payload["kind"],
             "subtype": payload["subtype"],
-            "steps": [],
+            "steps": [
+                "Check if both have the same molecular formula.",
+                "If same formula, compare connectivity and functional groups to classify the isomerism type."
+            ],
             "error": None,
             "mode": "PAIR_CLASSIFICATION",
         }
 
-    # Deterministic fallback for the unit test: FUNCTIONAL pair expected
-    return {
-        "topic": TOPIC,
-        "answer": "Structural isomerism → Functional. (Example: ethanol and dimethyl ether.)",
-        "kind": "STRUCTURAL",
-        "subtype": "FUNCTIONAL",
-        "steps": [],
-        "error": None,
-        "mode": "PAIR_CLASSIFICATION",
-    }
-
+    # If we reached here, it's not an isomerism request we can safely answer
+    return None
 def solve_isomerism(question: Any, **kwargs: Any) -> Dict[str, Any]:
     return solve(question, **kwargs)
 
 def isomerism_v1(question: Any, **kwargs: Any) -> Dict[str, Any]:
     return solve(question, **kwargs)
+
+def _is_isomerism_question(text: str) -> bool:
+    """Return True only when the prompt is genuinely asking about isomerism."""
+    t = (text or "").lower()
+    # Strong keywords
+    if "isomer" in t or "isomerism" in t:
+        return True
+    # Common exam phrasings
+    keys = [
+        "metamerism",
+        "tautomerism",
+        "geometrical isomer",
+        "cis trans",
+        "e z isomer",
+        "optical isomer",
+        "enantiomer",
+        "diastereomer",
+        "racemic",
+        "conformational isomer",
+        "conformer",
+        "rotamer",
+        "resonance isomer",  # rare but safe
+        "constitutional isomer",
+        "structural isomer",
+    ]
+    return any(k in t for k in keys)
+
