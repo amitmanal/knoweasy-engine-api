@@ -626,19 +626,7 @@ def generate_answer_v1(arg1: Any, arg2: Any = None, arg3: Any = None, **kwargs: 
 
     prac = answer_practical_organic_question(cleaned_text, normalized)
     if prac and prac.get("topic") == "PRACTICAL_ORGANIC_V1":
-        steps_prac = (prac.get("steps") or prac.get("reaction") or "").strip()
-        if not steps_prac:
-            steps_prac = "Use the standard reagent test: reagent + observation → inference."
-        exam_tip_prac = (prac.get("exam_tip") or "").strip()
-        if not exam_tip_prac:
-            exam_tip_prac = "Exam tip: write reagent + observation + inference."
-        d = AnswerDraft(
-            "Practical organic question.",
-            "PRACTICAL ORGANIC (v1)",
-            steps_prac,
-            prac.get("answer", ""),
-            exam_tip_prac,
-        )
+        d = AnswerDraft("Practical organic question.", "PRACTICAL ORGANIC (v1)", prac.get("explanation", ""), prac.get("answer", ""), "Exam tip: reagent + observation + inference.")
         return apply(d, ncert=NCERT_DIRECT, footprint=FP_NEET_JM_JA, safety=SAFE_HIGH, mistake="")
 
     d = AnswerDraft(

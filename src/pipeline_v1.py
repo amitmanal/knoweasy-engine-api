@@ -95,17 +95,6 @@ def run_pipeline_v1(question: str) -> Dict[str, Any]:
         rendered = _to_dict(rendered_obj)
         result.rendered = rendered
 
-        # Ensure required contract sections are never empty (frontend + validator safety)
-        try:
-            sect = rendered.get("sections") if isinstance(rendered, dict) else None
-            if isinstance(sect, dict):
-                steps_val = sect.get("steps", "")
-                if isinstance(steps_val, str) and steps_val.strip() == "":
-                    sect["steps"] = "Apply the key concept/reagent rule and write the product/observation."
-        except Exception:
-            pass
-
-
         # ---------- 4) Structure Validator ----------
         from src import structure_validator as _validator
 
