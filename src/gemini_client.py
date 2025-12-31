@@ -1,34 +1,32 @@
 import os
-import json
 import requests
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-SOLVER_MODEL = os.getenv("GEMINI_SOLVER_MODEL", "gemini-2.5-flash").strip()
-VERIFIER_MODEL = os.getenv("GEMINI_VERIFIER_MODEL", "gemini-2.5-flash-lite").strip()
+SOLVER_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-def _endpoint(model: str) -> str:
-    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+def gemini_generate(prompt: str) -> str:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY_MISSING")
 
-def gemini_generate(model: str, text: str) -> str:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY missing in environment.")
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{SOLVER_MODEL}:generateContent?key={api_key}"
+    )
 
     payload = {
-        "contents": [{"parts": [{"text": text}]}],
+        "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.2,
-            "topP": 0.9,
-            "maxOutputTokens": 900
+            "maxOutputTokens": 1024,
         }
     }
 
-    r = requests.post(_endpoint(model), json=payload, timeout=60)
+    r = requests.post(url, json=payload, timeout=25)
     if r.status_code != 200:
-        raise RuntimeError(f"Gemini API error {r.status_code}: {r.text}")
+        raise RuntimeError(f"GEMINI_HTTP_{r.status_code}: {r.text[:200]}")
 
     data = r.json()
-    # Extract first candidate text
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception:
-        raise RuntimeError(f"Unexpected Gemini response: {json.dumps(data)[:1000]}")
+        raise RuntimeError("GEMINI_BAD_RESPONSE")
