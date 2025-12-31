@@ -53,8 +53,13 @@ def solve_benzene_directing_v1(text: str) -> Optional[DirectingResult]:
         if no recognised pattern is detected.
     """
     t = _lc(text)
-    # Basic check to avoid misfiring; require nitration/halogenation with substituted benzene
-    if not _has_any(t, ["nitration", "hno3", "hno₃", "halogenation", "br2"]):
+    # Basic check to avoid misfiring; require nitration/halogenation wording.
+    # Many exam questions say "bromination" instead of "halogenation" or "Br2".
+    if not _has_any(t, [
+        "nitration", "hno3", "hno₃",
+        "halogenation", "bromination", "chlorination", "iodination",
+        "br2", "cl2", "i2",
+    ]):
         return None
 
     # Toluene (methylbenzene) nitration

@@ -567,6 +567,39 @@ def generate_answer_v1(arg1: Any, arg2: Any = None, arg3: Any = None, **kwargs: 
         d = AnswerDraft("This is a conversion (single-step) question.", "CONVERSIONS (v1)", cv1.steps, cv1.final_answer, cv1.exam_tip)
         return apply(d, ncert=NCERT_ALIGNED, footprint=FP_NEET_JM_JA, safety=cv1.safety, mistake=cv1.common_mistake)
 
+    # 11.4) Aldehyde oxidation tests (Tollens / Fehling)
+    #
+    # If the normalized input has been flagged as a reaction question (via the
+    # hard reaction gate), attempt to solve aldehyde oxidation tests.  This
+    # covers classic qualitative tests like Tollens and Fehling, producing
+    # products and observations specific to the substrate.  Placing this before
+    # theory modules prevents misrouting to generic isomerism fallbacks.
+    try:
+        from src.oxidation_tests_v1 import solve_oxidation_tests_v1  # local import to avoid circular
+        ox_res = solve_oxidation_tests_v1(normalized)
+    except Exception:
+        ox_res = None
+
+    if ox_res and getattr(ox_res, "matched", False):
+        # Compose a concise final answer combining product and observation
+        # Example: "benzoate / benzoic acid (C6H5COO− / C6H5COOH) + silver mirror / grey Ag precipitate"
+        product = getattr(ox_res, "product", "").strip()
+        observation = getattr(ox_res, "observation", "").strip()
+        if product and observation:
+            final_ans = f"{product} + {observation}"
+        else:
+            final_ans = product or observation
+        # Include steps/explanation if available
+        # We keep steps empty here because the test modules typically focus on the outcome and observation.
+        d = AnswerDraft(
+            "This is an aldehyde oxidation test.",
+            "ALDEHYDE OXIDATION (v1)",
+            "",  # steps intentionally left blank
+            final_ans,
+            getattr(ox_res, "notes", ""),
+        )
+        return apply(d, ncert=NCERT_ALIGNED, footprint=FP_NEET_JM_JA, safety=SAFE_HIGH, mistake="")
+
     # 11.5) Additional specialised reaction solvers
     # Iterate through the additional solvers list and return on the first match.
     for _module_path, _fn_name, _concept in _ADDITIONAL_SOLVERS:
