@@ -1,3 +1,5 @@
+APP_VERSION = "v2.0.1"
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
