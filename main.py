@@ -23,8 +23,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
     allow_credentials=False,  # keep FALSE unless you are using cookies/sessions
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    # Be tolerant for web/PWA clients at scale: prevents preflight/CORS edge cases
+    # when browsers add additional headers (Accept, Cache-Control, etc.).
+    allow_methods=["*"],
+    allow_headers=["*"],
     max_age=86400,
 )
 
