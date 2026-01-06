@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Optional, Literal
 ExamMode = Literal["BOARD", "JEE", "NEET", "CET"]
 
 class SolveRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=8000)
-    clazz: str = Field(..., alias="class")  # frontend sends "class"
+    question: str = Field(..., min_length=1, max_length=12000)
+    clazz: str = Field(..., alias="class", min_length=1, max_length=20)
     board: str = Field(..., min_length=2, max_length=50)
     subject: str = Field(..., min_length=2, max_length=50)
     chapter: Optional[str] = Field(default=None, max_length=200)

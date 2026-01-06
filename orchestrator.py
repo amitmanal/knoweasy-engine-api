@@ -1,126 +1,87 @@
-import json
-import asyncio
-from config import (
-    LOW_CONFIDENCE_THRESHOLD,
-    MAX_STEPS,
-    MAX_CHARS_ANSWER,
-    MODEL_TIMEOUT_SEC,
-    AI_ENABLED,
-)
+from __future__ import annotations
+from typing import Any, Dict, List
+
 from models import GeminiClient
+from schemas import SolveRequest, SolveResponse
 from verifier import basic_verify
 
-def build_prompt(payload: dict) -> str:
-    """Forces strict JSON output with a stable schema."""
-    question = payload["question"]
-    clazz = payload["class"]
-    board = payload["board"]
-    subject = payload["subject"]
-    chapter = payload.get("chapter") or ""
-    exam_mode = payload.get("exam_mode", "BOARD")
-    language = payload.get("language", "en")
-    answer_mode = payload.get("answer_mode", "step_by_step")
+_SYSTEM_RULES = """You are Luma from KnowEasy.
+Return ONLY valid JSON with keys:
+final_answer (string),
+steps (array of strings),
+assumptions (array of strings),
+confidence (number 0..1),
+safe_note (string or null).
+No extra text. No markdown.
+"""
 
-    schema = {
-        "final_answer": "string",
-        "steps": ["string"],
-        "assumptions": ["string"],
-        "confidence": "number 0..1",
-        "flags": ["string"],
-        "safe_note": "string|null",
-    }
-
-    return f"""
-You are KnowEasy AI, a syllabus-aligned tutor for India.
-You MUST output ONLY valid JSON (no markdown, no backticks, no extra text).
+def _build_prompt(req: SolveRequest) -> str:
+    return f"""{_SYSTEM_RULES}
 
 Context:
-- Class: {clazz}
-- Board: {board}
-- Subject: {subject}
-- Chapter: {chapter}
-- Exam mode overlay: {exam_mode}
-- Language: {language}
-- Answer mode: {answer_mode}
+- Class: {req.clazz}
+- Board: {req.board}
+- Subject: {req.subject}
+- Chapter: {req.chapter or "N/A"}
+- Exam mode: {req.exam_mode}
+- Language: {req.language}
+- Answer mode: {req.answer_mode}
 
-Rules:
-1) If question is ambiguous or missing conditions, do NOT guess confidently.
-   Add a flag and put the assumption clearly.
-2) For CBSE/BOARD: keep the explanation simple, correct, and exam-appropriate.
-3) Keep steps concise (max {MAX_STEPS} bullets).
-4) final_answer must be short and direct (max {MAX_CHARS_ANSWER} chars).
-5) Provide confidence from 0 to 1.
+User question:
+{req.question}
 
-Return JSON in this schema:
-{json.dumps(schema)}
+Now return JSON only.
+"""
 
-Question:
-{question}
-""".strip()
+def _normalize_list(x: Any) -> List[str]:
+    if isinstance(x, list):
+        return [str(i) for i in x if str(i).strip()]
+    if isinstance(x, str) and x.strip():
+        return [x.strip()]
+    return []
 
-async def _call_model_with_timeout(client: GeminiClient, prompt: str) -> dict:
-    # google-genai client is sync; run in a thread so we can enforce timeout.
-    return await asyncio.wait_for(asyncio.to_thread(client.generate_json, prompt), timeout=MODEL_TIMEOUT_SEC)
+def _clamp01(v: Any, default: float = 0.5) -> float:
+    try:
+        f = float(v)
+    except Exception:
+        return default
+    if f < 0: return 0.0
+    if f > 1: return 1.0
+    return f
 
-async def solve(payload: dict) -> dict:
-    if not AI_ENABLED:
-        return {
-            "final_answer": "AI is temporarily paused for stability. Please try again in a little while 😊",
-            "steps": [],
-            "assumptions": [],
-            "confidence": 0.2,
-            "flags": ["AI_DISABLED"],
-            "safe_note": "You can still study chapters, notes, and tests while AI is paused.",
-        }
-
+async def solve(req: SolveRequest) -> SolveResponse:
     client = GeminiClient()
 
-    prompt = build_prompt(payload)
-    out = await _call_model_with_timeout(client, prompt)
+    prompt = _build_prompt(req)
+    data: Dict[str, Any] = client.generate_json(prompt) or {}
 
-    # Normalize missing keys defensively
-    out.setdefault("final_answer", "")
-    out.setdefault("steps", [])
-    out.setdefault("assumptions", [])
-    out.setdefault("confidence", 0.5)
-    out.setdefault("flags", [])
-    out.setdefault("safe_note", None)
+    final_answer = str(data.get("final_answer", "")).strip()
+    steps = _normalize_list(data.get("steps"))
+    assumptions = _normalize_list(data.get("assumptions"))
+    confidence = _clamp01(data.get("confidence", 0.6), default=0.6)
+    safe_note = data.get("safe_note", None)
+    safe_note = str(safe_note).strip() if safe_note not in (None, "") else None
 
-    # Basic verification adjustments
-    adj, flags2, assumptions2 = basic_verify(payload["question"], out["final_answer"], out["steps"])
-    out["flags"] = list(dict.fromkeys(out["flags"] + flags2))
-    out["assumptions"] = list(dict.fromkeys(out["assumptions"] + assumptions2))
-    out["confidence"] = max(0.0, min(1.0, float(out["confidence"]) + adj))
+    # Verification
+    adj, flags, verify_assumptions = basic_verify(req.question, final_answer, steps)
+    confidence = _clamp01(confidence + adj, default=0.5)
+    assumptions.extend([a for a in verify_assumptions if a not in assumptions])
 
-    # Second pass if low confidence
-    if out["confidence"] < LOW_CONFIDENCE_THRESHOLD:
-        repair_prompt = (
-            build_prompt(payload)
-            + "\n\nYour previous answer had low confidence. Re-check carefully and improve correctness. Output ONLY JSON."
-        )
-        try:
-            out2 = await _call_model_with_timeout(client, repair_prompt)
-        except Exception:
-            out2 = {}
+    # Fallback if model returned nothing
+    if not final_answer:
+        flags = list(set(flags + ["MODEL_EMPTY_OUTPUT"]))
+        final_answer = "Sorry, I could not generate an answer right now. Please try again."
+        confidence = min(confidence, 0.4)
 
-        # choose better of the two by confidence (still bounded)
-        try:
-            c2 = float(out2.get("confidence", 0.0))
-        except Exception:
-            c2 = 0.0
-
-        if c2 > out["confidence"]:
-            out = out2
-            out.setdefault("final_answer", "")
-            out.setdefault("steps", [])
-            out.setdefault("assumptions", [])
-            out.setdefault("confidence", 0.5)
-            out.setdefault("flags", [])
-            out.setdefault("safe_note", None)
-
-            adj, flags2, assumptions2 = basic_verify(payload["question"], out["final_answer"], out["steps"])
-            out["flags"] = list(dict.fromkeys(out["flags"] + flags2))
-            out["assumptions"] = list(dict.fromkeys(out["assumptions"] + assumptions2))
-            out["confidence"] = max(0.0, min(1.0, float(out["confidence"]) + adj))
-
-    return out
+    return SolveResponse(
+        final_answer=final_answer,
+        steps=steps,
+        assumptions=assumptions,
+        confidence=confidence,
+        flags=sorted(list(set(flags))),
+        safe_note=safe_note,
+        meta={
+            "engine": "knoweasy-orchestrator-phase1",
+            "model": "gemini-1.5-flash",
+        },
+    )

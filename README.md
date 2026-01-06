@@ -1,22 +1,20 @@
-# KnowEasy Engine API – Phase 1 (Stability Foundation)
+# KnowEasy Engine API (Phase-1 Clean)
 
-This is the backend engine for KnowEasy OS.
+FastAPI backend service for KnowEasy OS Phase-1.
+- `/health` : service health
+- `/solve`  : main orchestration endpoint (Gemini-backed, safe guards, verified output)
 
-## Features
-- AI orchestration (Gemini)
-- Server-side rate limiting
-- Request guards & payload limits
-- AI cost governor
-- Timeout & safety controls
-- Production-ready architecture (dev on free tier)
+## Local run
+```bash
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+pip install -r requirements.txt
+set GEMINI_API_KEY=your_key
+uvicorn main:app --reload --port 8000
+```
 
-## Endpoints
-- POST /solve
-- GET /health
-
-## Deployment
-- Python backend
-- Hosted on Render
-- Frontend served separately (Hostinger)
-
-Status: Phase 1 – Stable
+## Render
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Set env var: `GEMINI_API_KEY`

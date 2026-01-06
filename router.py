@@ -1,57 +1,25 @@
-import asyncio
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from schemas import SolveRequest, SolveResponse
 from orchestrator import solve
+from guards import enforce_body_limit, rate_limit
 
 router = APIRouter()
 
-def _safe_failure(message: str, code: str) -> SolveResponse:
-    return SolveResponse(
-        final_answer=message,
-        steps=[],
-        assumptions=[],
-        confidence=0.2,
-        flags=[code],
-        safe_note="Try adding chapter/topic or any given options/conditions.",
-        meta={"engine": "knoweasy-orchestrator-phase1"},
-    )
+@router.get("/health")
+def health():
+    return {"ok": True, "service": "knoweasy-orchestrator-phase1"}
 
 @router.post("/solve", response_model=SolveResponse)
-async def solve_route(req: SolveRequest, request: Request):
+async def solve_api(req: SolveRequest, request: Request):
     try:
-        payload = req.model_dump(by_alias=True)
-        out = await solve(payload)
-
-        # Guard against empty outputs
-        if not str(out.get("final_answer") or "").strip():
-            return _safe_failure(
-                "I’m not confident enough to answer this correctly. Please rephrase or add missing conditions/details.",
-                "EMPTY_MODEL_OUTPUT",
-            )
-
-        return SolveResponse(
-            final_answer=str(out.get("final_answer", "")).strip(),
-            steps=[str(s).strip() for s in (out.get("steps") or []) if str(s).strip()][:8],
-            assumptions=[str(a).strip() for a in (out.get("assumptions") or []) if str(a).strip()][:8],
-            confidence=max(0.0, min(1.0, float(out.get("confidence", 0.5)))),
-            flags=[str(f).strip() for f in (out.get("flags") or []) if str(f).strip()][:12],
-            safe_note=out.get("safe_note"),
-            meta={"engine": "knoweasy-orchestrator-phase1"},
-        )
-
-    except asyncio.TimeoutError:
-        return _safe_failure(
-            "Luma is thinking a bit longer than usual. Please try again in a few seconds 😊",
-            "MODEL_TIMEOUT",
-        )
-    except Exception:
-        # Don't leak raw errors to the student UI; keep response stable + CORS-safe.
-        return _safe_failure(
-            "Luma had a small hiccup while solving. Please try again in a few seconds 😊",
-            "SERVER_ERROR",
-        )
-
-# Backward-compatible alias (some older frontends may call /ask)
-@router.post("/ask", response_model=SolveResponse)
-async def ask_route(req: SolveRequest, request: Request):
-    return await solve_route(req, request)
+        enforce_body_limit(req.question)
+        # Simple rate limit by IP (later: Redis)
+        ip = request.client.host if request.client else "unknown"
+        rate_limit(ip)
+        return await solve(req)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {e}")
