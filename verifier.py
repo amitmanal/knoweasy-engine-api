@@ -1,28 +1,21 @@
-from typing import List, Tuple
+from __future__ import annotations
 
-def basic_verify(question: str, final_answer: str, steps: List[str]) -> Tuple[float, List[str], List[str]]:
-    """Very light checks (Phase-1). Returns (confidence_adjustment, flags, assumptions)."""
-    flags: List[str] = []
-    assumptions: List[str] = []
-    adj = 0.0
+from dataclasses import dataclass
 
+
+@dataclass
+class VerifyVerdict:
+    ok: bool
+    message: str = ""
+
+
+def basic_verify(question: str, exam_mode: str = "BOARD") -> VerifyVerdict:
     q = (question or "").strip()
-    a = (final_answer or "").strip()
-
     if not q:
-        flags.append("EMPTY_QUESTION")
-        adj -= 0.3
-
-    if not a:
-        flags.append("EMPTY_FINAL_ANSWER")
-        adj -= 0.4
-
-    if steps and not a:
-        flags.append("STEPS_WITHOUT_FINAL")
-        adj -= 0.2
-
-    if len(a) < 3:
-        flags.append("VERY_SHORT_ANSWER")
-        adj -= 0.1
-
-    return adj, flags, assumptions
+        return VerifyVerdict(ok=False, message="Please type a question.")
+    # Phase-1 minimal safety: block obvious harmful content (keep simple)
+    lowered = q.lower()
+    blocked = ["how to make a bomb", "buy drugs", "kill myself"]
+    if any(b in lowered for b in blocked):
+        return VerifyVerdict(ok=False, message="Sorry, I can't help with that.")
+    return VerifyVerdict(ok=True)
