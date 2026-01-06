@@ -176,3 +176,8 @@ class Timer:
 
     def ms(self) -> int:
         return int((time.time() - self._t0) * 1000)
+
+# Backward-compatible name used by router.py
+def db_log_solve(req, out, latency_ms=None, error=None):
+    """Alias for safe_log_solve (kept for compatibility with older imports)."""
+    return safe_log_solve(req=req, out=out, latency_ms=latency_ms, error=error)
