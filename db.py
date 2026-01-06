@@ -5,11 +5,16 @@ This module is intentionally defensive:
 - If DB is disabled or DATABASE_URL is missing, all DB calls become no-ops.
 - On startup, db_init() creates the 'ask_logs' table if it does not exist.
 - db_log_solve() writes one row per /ask call (best-effort; failures never crash the API).
+
+PHASE-1C / C-1 hardening:
+- db_log_solve() now accepts dict OR Pydantic objects (v1/v2) and never silently fails.
+- On failure, we log exceptions to stdout/stderr (Render logs) for observability.
 """
 
 from __future__ import annotations
 
 import os
+import logging
 from typing import Any, Dict, Optional
 
 from sqlalchemy import create_engine, text
@@ -17,40 +22,27 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 
+logger = logging.getLogger(__name__)
+
 # -----------------------------
 # Env helpers
 # -----------------------------
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+def _db_enabled() -> bool:
+    # Allow disabling DB entirely via env (useful for local dev).
+    return (os.getenv("DB_ENABLED", "true") or "true").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _env_int(name: str, default: int) -> int:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    try:
-        return int(str(v).strip())
-    except Exception:
-        return default
-
-
-DB_ENABLED: bool = _env_bool("DB_ENABLED", default=False)
-DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
-
-# Render Postgres often needs SSL (especially external URL).
-# Keep default as 'require' unless you know you don't need it.
-DB_SSLMODE: str = os.getenv("DB_SSLMODE", "require").strip() or "require"
-
-# Bound how long a DB connect can block (seconds). Keeps /health fast and avoids request hangs.
-DB_CONNECT_TIMEOUT_SECONDS: int = _env_int("DB_CONNECT_TIMEOUT_SECONDS", default=3)
+def _database_url() -> Optional[str]:
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        return None
+    return url.strip() or None
 
 
 # -----------------------------
-# Engine (lazy singleton)
+# Engine (cached)
 # -----------------------------
 
 _ENGINE: Optional[Engine] = None
@@ -59,78 +51,69 @@ _ENGINE: Optional[Engine] = None
 def _get_engine() -> Optional[Engine]:
     global _ENGINE
 
-    if not DB_ENABLED:
+    if not _db_enabled():
         return None
 
-    if not DATABASE_URL:
+    url = _database_url()
+    if not url:
         return None
 
     if _ENGINE is not None:
         return _ENGINE
 
-    connect_args: Dict[str, Any] = {}
-    if DB_SSLMODE:
-        connect_args["sslmode"] = DB_SSLMODE
+    # Render Postgres usually needs SSL.
+    # If DATABASE_URL already includes sslmode, that's fine.
+    connect_args = {}
+    sslmode = os.getenv("DB_SSLMODE")
+    if sslmode:
+        connect_args = {"sslmode": sslmode}
 
-    # psycopg2 supports connect_timeout (seconds). Safe to pass even if unused by driver.
-    if DB_CONNECT_TIMEOUT_SECONDS and DB_CONNECT_TIMEOUT_SECONDS > 0:
-        connect_args["connect_timeout"] = int(DB_CONNECT_TIMEOUT_SECONDS)
-
-    # Tiny pool for free tiers; pre_ping avoids stale connections.
-    _ENGINE = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,
-        pool_size=2,
-        max_overflow=3,
-        pool_recycle=300,
-        connect_args=connect_args,
-    )
-    return _ENGINE
+    try:
+        _ENGINE = create_engine(url, pool_pre_ping=True, connect_args=connect_args)
+        return _ENGINE
+    except Exception:
+        # Do not crash app startup if engine cannot be created.
+        logger.exception("Failed to create DB engine")
+        return None
 
 
 # -----------------------------
-# Public API used by main.py/router.py
+# Init / Health
 # -----------------------------
+
 
 def db_init() -> Dict[str, Any]:
-    """Initialize DB (create tables). Safe to call multiple times."""
+    """Create tables if needed (best-effort)."""
     engine = _get_engine()
     if engine is None:
-        return {
-            "enabled": False,
-            "ok": False,
-            "reason": "DB is disabled or DATABASE_URL is missing",
-        }
+        return {"ok": True, "enabled": False, "reason": "DB is disabled or DATABASE_URL is missing"}
 
-    ddl = text(
-        """
-        CREATE TABLE IF NOT EXISTS ask_logs (
-            id BIGSERIAL PRIMARY KEY,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            board TEXT,
-            class_level TEXT,
-            subject TEXT,
-            question TEXT,
-            answer TEXT,
-            latency_ms INTEGER,
-            error TEXT
-        );
-        """
-    )
+    create_sql = """
+    CREATE TABLE IF NOT EXISTS ask_logs (
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        board TEXT,
+        class_level TEXT,
+        subject TEXT,
+        question TEXT NOT NULL,
+        answer TEXT,
+        latency_ms INTEGER,
+        error TEXT
+    );
+    """
 
     try:
         with engine.begin() as conn:
-            conn.execute(ddl)
-        return {"enabled": True, "ok": True}
-    except SQLAlchemyError as e:
-        # Never crash the API on DB issues.
-        return {"enabled": True, "ok": False, "reason": str(e)}
+            conn.execute(text(create_sql))
+        return {"ok": True, "enabled": True}
     except Exception as e:
-        return {"enabled": True, "ok": False, "reason": f"{e.__class__.__name__}: {e}"}
+        # Do not crash startup; return status for logging.
+        logger.exception("db_init failed")
+        return {"ok": False, "enabled": True, "reason": str(e)}
 
 
 def db_health() -> Dict[str, Any]:
-    """Lightweight health probe for DB. Must never raise."""
+    """Lightweight health probe for DB."""
     engine = _get_engine()
     if engine is None:
         return {
@@ -145,42 +128,77 @@ def db_health() -> Dict[str, Any]:
         return {"enabled": True, "connected": True}
     except SQLAlchemyError as e:
         return {"enabled": True, "connected": False, "reason": str(e)}
-    except Exception as e:
-        return {"enabled": True, "connected": False, "reason": f"{e.__class__.__name__}: {e}"}
 
 
-def db_log_solve(req: Dict[str, Any], out: Dict[str, Any], latency_ms: int, error: Optional[str]) -> None:
+# -----------------------------
+# Logging (ask_logs)
+# -----------------------------
+
+
+def _coerce_mapping(obj: Any) -> Dict[str, Any]:
+    """Convert common request/response objects to a plain dict.
+
+    Supports:
+    - dict
+    - Pydantic v2 models (model_dump)
+    - Pydantic v1 models (dict)
+    - objects with __dict__ (best-effort)
+    """
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+
+    # Pydantic v2
+    if hasattr(obj, "model_dump") and callable(getattr(obj, "model_dump")):
+        try:
+            return obj.model_dump()
+        except Exception:
+            pass
+
+    # Pydantic v1
+    if hasattr(obj, "dict") and callable(getattr(obj, "dict")):
+        try:
+            return obj.dict()
+        except Exception:
+            pass
+
+    # Best-effort fallback
+    try:
+        return dict(getattr(obj, "__dict__", {}) or {})
+    except Exception:
+        return {}
+
+
+def db_log_solve(req: Any, out: Any, latency_ms: int, error: Optional[str]) -> None:
     """Best-effort insert into ask_logs. Never raises."""
     engine = _get_engine()
     if engine is None:
         return
 
-    board = (req.get("board") or "").strip() or None
-    class_level = (str(req.get("class") or req.get("class_level") or "")).strip() or None
-    subject = (req.get("subject") or "").strip() or None
+    req_d = _coerce_mapping(req)
+    out_d = _coerce_mapping(out)
 
-    question = req.get("question") or req.get("prompt") or ""
-    question = question.strip() if isinstance(question, str) else str(question)
+    board = (req_d.get("board") or "").strip() or None
+    class_level = (str(req_d.get("class") or req_d.get("class_level") or "")).strip() or None
+    subject = (req_d.get("subject") or "").strip() or None
 
-    # Try common output shapes
-    answer = out.get("answer")
-    if answer is None:
-        answer = out.get("final_answer")
-    if answer is None:
-        answer = out.get("result")
-    answer = answer.strip() if isinstance(answer, str) else (str(answer) if answer is not None else None)
+    question = req_d.get("question") or req_d.get("prompt") or ""
+    question = question if isinstance(question, str) else str(question)
 
-    insert_sql = text(
-        """
-        INSERT INTO ask_logs (board, class_level, subject, question, answer, latency_ms, error)
-        VALUES (:board, :class_level, :subject, :question, :answer, :latency_ms, :error);
-        """
-    )
+    # Try common answer fields
+    answer = out_d.get("answer") or out_d.get("text") or out_d.get("output") or ""
+    answer = answer if isinstance(answer, str) else str(answer)
+
+    insert_sql = """
+    INSERT INTO ask_logs (board, class_level, subject, question, answer, latency_ms, error)
+    VALUES (:board, :class_level, :subject, :question, :answer, :latency_ms, :error);
+    """
 
     try:
         with engine.begin() as conn:
             conn.execute(
-                insert_sql,
+                text(insert_sql),
                 {
                     "board": board,
                     "class_level": class_level,
@@ -192,5 +210,13 @@ def db_log_solve(req: Dict[str, Any], out: Dict[str, Any], latency_ms: int, erro
                 },
             )
     except Exception:
-        # Never crash request path due to DB.
+        # Never crash request path due to DB, but do log it for Phase-1C observability.
+        logger.exception("db_log_solve failed")
         return
+
+
+# -----------------------------
+# Explicit exports (Render import stability)
+# -----------------------------
+
+__all__ = ["db_init", "db_health", "db_log_solve"]
