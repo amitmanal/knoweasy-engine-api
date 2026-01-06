@@ -84,7 +84,7 @@ def solve_route(
         )
 
     try:
-        out = solve(req.model_dump())
+        out = solve(req.model_dump(by_alias=True))
         return SolveResponse(
             final_answer=out.get("final_answer", ""),
             steps=out.get("steps", []),
