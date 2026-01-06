@@ -1,4 +1,6 @@
 import os
+import json
+import re
 import google.generativeai as genai
 
 class GeminiClient:
@@ -10,6 +12,28 @@ class GeminiClient:
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel("gemini-1.5-flash")
 
-    def generate(self, prompt: str) -> str:
-        response = self.model.generate_content(prompt)
-        return response.text.strip()
+    def generate_text(self, prompt: str) -> str:
+        resp = self.model.generate_content(prompt)
+        return (resp.text or "").strip()
+
+    def generate_json(self, prompt: str) -> dict:
+        """
+        Forces JSON parsing. If model returns extra text, we try to extract JSON object safely.
+        """
+        text = self.generate_text(prompt)
+
+        # Try direct JSON first
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+        # Try to extract first {...} block
+        m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return {}
+
+        return {}
