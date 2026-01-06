@@ -18,3 +18,13 @@ uvicorn main:app --reload --port 8000
 - Build command: `pip install -r requirements.txt`
 - Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 - Set env var: `GEMINI_API_KEY`
+
+
+## Env
+- `GEMINI_API_KEY` (required)
+- `GEMINI_MODEL` (optional, default `gemini-2.5-flash`)
+- `GEMINI_API_VERSION` (optional, default `v1`)
+
+## Endpoints
+- `GET /health`
+- `POST /solve`
