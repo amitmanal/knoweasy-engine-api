@@ -43,3 +43,16 @@ RATE_LIMIT_BURST = int(os.getenv("RATE_LIMIT_BURST", "10"))
 # Optional shared secret to reduce random abuse (NOT true security, but a helpful guardrail).
 # If empty -> disabled.
 KE_API_KEY = os.getenv("KE_API_KEY", "").strip()
+
+# =========================
+# Database (optional)
+# =========================
+# If DATABASE_URL is not set, DB logging/features are disabled.
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip() or None
+
+# Render Postgres often needs sslmode=require for external URLs.
+# We auto-append this if sslmode is not present.
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require").strip() or "require"
+
+# A switch to hard-disable DB usage (even if DATABASE_URL is present)
+DB_ENABLED = os.getenv("DB_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")

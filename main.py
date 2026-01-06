@@ -5,6 +5,7 @@ import os
 
 from config import MAX_REQUEST_BYTES
 from router import router
+from db import db_init, db_health
 
 app = FastAPI(title="KnowEasy Orchestrator API", version="0.2.0-phase1")
 
@@ -62,6 +63,23 @@ async def limit_request_size(request: Request, call_next):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "knoweasy-orchestrator-phase1", "version": "0.2.0"}
+    return {
+        "ok": True,
+        "service": "knoweasy-orchestrator-phase1",
+        "version": "0.3.0",
+        "db": db_health(),
+    }
+
+
+@app.on_event("startup")
+def _startup():
+    # DB is optional; init is safe even when DATABASE_URL is missing.
+    db_init()
 
 app.include_router(router)
+
+
+@app.on_event("startup")
+def _startup():
+    # Safe DB init (no-op if DATABASE_URL not provided)
+    db_init()

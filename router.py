@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from config import RATE_LIMIT_PER_MINUTE, RATE_LIMIT_BURST, KE_API_KEY
 from schemas import SolveRequest, SolveResponse
 from orchestrator import solve
+from db import db_log_solve
 
 router = APIRouter()
 
@@ -84,7 +85,13 @@ def solve_route(
         )
 
     try:
-        out = solve(req.model_dump(by_alias=True))
+        t0 = time.perf_counter()
+        out = solve(req.model_dump())
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+
+        # Best-effort DB log (never breaks the response)
+        db_log_solve(req=req, out=out, latency_ms=latency_ms, error=None)
+
         return SolveResponse(
             final_answer=out.get("final_answer", ""),
             steps=out.get("steps", []),
@@ -95,8 +102,9 @@ def solve_route(
             meta={"engine": "knoweasy-orchestrator-phase1"},
         )
 
-    except Exception:
+    except Exception as e:
         # Don't leak raw errors to the student UI; keep response stable + CORS-safe.
+        db_log_solve(req=req, out=None, latency_ms=None, error=str(e))
         return _safe_failure(
             "Luma had a small hiccup while solving. Please try again in a few seconds 😊",
             "SERVER_ERROR",

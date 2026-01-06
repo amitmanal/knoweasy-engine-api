@@ -13,10 +13,10 @@ def build_prompt(payload: dict) -> str:
     """
     Forces strict JSON output with a stable schema.
     """
-    question = payload.get("question","")
-    clazz = payload.get("class") or payload.get("class_")
-    board = payload.get("board","")
-    subject = payload.get("subject","")
+    question = payload["question"]
+    clazz = payload["class"]
+    board = payload["board"]
+    subject = payload["subject"]
     chapter = payload.get("chapter") or ""
     exam_mode = payload.get("exam_mode", "BOARD")
     language = payload.get("language", "en")
