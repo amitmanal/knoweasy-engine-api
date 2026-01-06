@@ -1,183 +1,173 @@
-"""DB helper (Phase-1)
+"""
+db.py - Postgres helpers for KnowEasy Engine API (Render)
 
-Goal:
-- Optional Postgres logging for /solve requests
-- Never break the app if DB is down or misconfigured
-
-We intentionally avoid migrations for now.
+This module is intentionally defensive:
+- If DB is disabled or DATABASE_URL is missing, all DB calls become no-ops.
+- On startup, db_init() creates the 'ask_logs' table if it does not exist.
+- db_log_solve() writes one row per /ask call (best-effort; failures never crash the API).
 """
 
 from __future__ import annotations
 
-import json
-import time
-import uuid
-from dataclasses import dataclass
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+import os
+from typing import Any, Dict, Optional
 
-from sqlalchemy import (
-    JSON,
-    Column,
-    DateTime,
-    MetaData,
-    String,
-    Table,
-    Text,
-    create_engine,
-    func,
-    text,
-)
-
-from config import DATABASE_URL, DB_ENABLED, DB_SSLMODE
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 
-def _add_sslmode_if_missing(db_url: str, sslmode: str) -> str:
-    """Append sslmode if not already present."""
-    parsed = urlparse(db_url)
-    q = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    if "sslmode" not in q and sslmode:
-        q["sslmode"] = sslmode
-        parsed = parsed._replace(query=urlencode(q))
-        return urlunparse(parsed)
-    return db_url
+# -----------------------------
+# Env helpers
+# -----------------------------
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-_engine = None
-_metadata = MetaData()
+DB_ENABLED: bool = _env_bool("DB_ENABLED", default=False)
+DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
+
+# Render Postgres often needs SSL (especially external URL).
+# Keep default as 'require' unless you know you don't need it.
+DB_SSLMODE: str = os.getenv("DB_SSLMODE", "require").strip() or "require"
 
 
-ask_logs = Table(
-    "ask_logs",
-    _metadata,
-    Column("id", String(36), primary_key=True),
-    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
-    Column("board", String(32)),
-    Column("class_level", String(8)),
-    Column("subject", String(64)),
-    Column("question", Text),
-    Column("final_answer", Text),
-    Column("confidence", String(16)),
-    Column("provider", String(32)),
-    Column("model", String(64)),
-    Column("latency_ms", String(16)),
-    Column("error", Text),
-    Column("meta", JSON, nullable=True),
-)
+# -----------------------------
+# Engine (lazy singleton)
+# -----------------------------
+
+_ENGINE: Optional[Engine] = None
 
 
-@dataclass
-class DBStatus:
-    enabled: bool
-    ok: bool
-    details: str
+def _get_engine() -> Optional[Engine]:
+    global _ENGINE
 
-
-def get_engine():
-    global _engine
-    if _engine is not None:
-        return _engine
-
-    if not DB_ENABLED or not DATABASE_URL:
-        _engine = None
+    if not DB_ENABLED:
         return None
 
-    url = _add_sslmode_if_missing(DATABASE_URL, DB_SSLMODE)
-    # Conservative pool values for free tier
-    _engine = create_engine(
-        url,
+    if not DATABASE_URL:
+        return None
+
+    if _ENGINE is not None:
+        return _ENGINE
+
+    connect_args = {"sslmode": DB_SSLMODE} if DB_SSLMODE else {}
+
+    # Tiny pool for free tiers; pre_ping avoids stale connections.
+    _ENGINE = create_engine(
+        DATABASE_URL,
         pool_pre_ping=True,
-        pool_size=3,
-        max_overflow=2,
-        pool_timeout=30,
-        pool_recycle=1800,
+        pool_size=2,
+        max_overflow=3,
+        pool_recycle=300,
+        connect_args=connect_args,
     )
-    return _engine
+    return _ENGINE
 
 
-def init_db() -> DBStatus:
-    """Create tables if DB is configured. Never raises."""
-    if not DB_ENABLED:
-        return DBStatus(enabled=False, ok=False, details="DB disabled")
-    if not DATABASE_URL:
-        return DBStatus(enabled=False, ok=False, details="DATABASE_URL not set")
+# -----------------------------
+# Public API used by main.py/router.py
+# -----------------------------
 
-    try:
-        eng = get_engine()
-        if eng is None:
-            return DBStatus(enabled=False, ok=False, details="DB not initialized")
-        _metadata.create_all(eng)
-        # Lightweight ping
-        with eng.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return DBStatus(enabled=True, ok=True, details="ok")
-    except Exception as e:
-        return DBStatus(enabled=True, ok=False, details=f"{type(e).__name__}: {e}")
-
-
-def db_health() -> DBStatus:
-    if not DB_ENABLED:
-        return DBStatus(enabled=False, ok=False, details="DB disabled")
-    if not DATABASE_URL:
-        return DBStatus(enabled=False, ok=False, details="DATABASE_URL not set")
-    try:
-        eng = get_engine()
-        if eng is None:
-            return DBStatus(enabled=True, ok=False, details="engine not ready")
-        with eng.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return DBStatus(enabled=True, ok=True, details="ok")
-    except Exception as e:
-        return DBStatus(enabled=True, ok=False, details=f"{type(e).__name__}: {e}")
-
-
-def safe_log_solve(
-    *,
-    board: str | None,
-    class_level: str | None,
-    subject: str | None,
-    question: str,
-    final_answer: str | None,
-    confidence: float | None,
-    provider: str | None,
-    model: str | None,
-    latency_ms: int | None,
-    error: str | None,
-    meta: dict | None = None,
-):
-    """Best-effort DB logging. Never raises."""
-    try:
-        eng = get_engine()
-        if eng is None:
-            return
-        payload = {
-            "id": str(uuid.uuid4()),
-            "board": board,
-            "class_level": class_level,
-            "subject": subject,
-            "question": (question or "")[:20000],
-            "final_answer": (final_answer or "")[:50000],
-            "confidence": "" if confidence is None else f"{confidence:.2f}",
-            "provider": provider,
-            "model": model,
-            "latency_ms": "" if latency_ms is None else str(int(latency_ms)),
-            "error": error,
-            "meta": meta or {},
+def db_init() -> Dict[str, Any]:
+    """Initialize DB (create tables). Safe to call multiple times."""
+    engine = _get_engine()
+    if engine is None:
+        return {
+            "enabled": False,
+            "ok": False,
+            "reason": "DB is disabled or DATABASE_URL is missing",
         }
-        with eng.begin() as conn:
-            conn.execute(ask_logs.insert().values(**payload))
-    except Exception:
-        # Silent by design for Phase-1 (no DB should ever break solving)
+
+    ddl = text(
+        """
+        CREATE TABLE IF NOT EXISTS ask_logs (
+            id BIGSERIAL PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            board TEXT,
+            class_level TEXT,
+            subject TEXT,
+            question TEXT,
+            answer TEXT,
+            latency_ms INTEGER,
+            error TEXT
+        );
+        """
+    )
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(ddl)
+        return {"enabled": True, "ok": True}
+    except SQLAlchemyError as e:
+        # Never crash the API on DB issues.
+        return {"enabled": True, "ok": False, "reason": str(e)}
+
+
+def db_health() -> Dict[str, Any]:
+    """Lightweight health probe for DB."""
+    engine = _get_engine()
+    if engine is None:
+        return {
+            "enabled": False,
+            "connected": False,
+            "reason": "DB is disabled or DATABASE_URL is missing",
+        }
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"enabled": True, "connected": True}
+    except SQLAlchemyError as e:
+        return {"enabled": True, "connected": False, "reason": str(e)}
+
+
+def db_log_solve(req: Dict[str, Any], out: Dict[str, Any], latency_ms: int, error: Optional[str]) -> None:
+    """Best-effort insert into ask_logs. Never raises."""
+    engine = _get_engine()
+    if engine is None:
         return
 
+    board = (req.get("board") or "").strip() or None
+    class_level = (str(req.get("class") or req.get("class_level") or "")).strip() or None
+    subject = (req.get("subject") or "").strip() or None
 
-class Timer:
-    def __init__(self):
-        self._t0 = time.time()
+    question = req.get("question") or req.get("prompt") or ""
+    question = question.strip() if isinstance(question, str) else str(question)
 
-    def ms(self) -> int:
-        return int((time.time() - self._t0) * 1000)
+    # Try common output shapes
+    answer = out.get("answer")
+    if answer is None:
+        answer = out.get("final_answer")
+    if answer is None:
+        answer = out.get("result")
+    answer = answer.strip() if isinstance(answer, str) else (str(answer) if answer is not None else None)
 
-# Backward-compatible name used by router.py
-def db_log_solve(req, out, latency_ms=None, error=None):
-    """Alias for safe_log_solve (kept for compatibility with older imports)."""
-    return safe_log_solve(req=req, out=out, latency_ms=latency_ms, error=error)
+    insert_sql = text(
+        """
+        INSERT INTO ask_logs (board, class_level, subject, question, answer, latency_ms, error)
+        VALUES (:board, :class_level, :subject, :question, :answer, :latency_ms, :error);
+        """
+    )
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                insert_sql,
+                {
+                    "board": board,
+                    "class_level": class_level,
+                    "subject": subject,
+                    "question": question,
+                    "answer": answer,
+                    "latency_ms": int(latency_ms) if latency_ms is not None else None,
+                    "error": error,
+                },
+            )
+    except Exception:
+        # Never crash request path due to DB.
+        return
