@@ -28,12 +28,25 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return default
+
+
 DB_ENABLED: bool = _env_bool("DB_ENABLED", default=False)
 DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
 
 # Render Postgres often needs SSL (especially external URL).
 # Keep default as 'require' unless you know you don't need it.
 DB_SSLMODE: str = os.getenv("DB_SSLMODE", "require").strip() or "require"
+
+# Bound how long a DB connect can block (seconds). Keeps /health fast and avoids request hangs.
+DB_CONNECT_TIMEOUT_SECONDS: int = _env_int("DB_CONNECT_TIMEOUT_SECONDS", default=3)
 
 
 # -----------------------------
@@ -55,7 +68,13 @@ def _get_engine() -> Optional[Engine]:
     if _ENGINE is not None:
         return _ENGINE
 
-    connect_args = {"sslmode": DB_SSLMODE} if DB_SSLMODE else {}
+    connect_args: Dict[str, Any] = {}
+    if DB_SSLMODE:
+        connect_args["sslmode"] = DB_SSLMODE
+
+    # psycopg2 supports connect_timeout (seconds). Safe to pass even if unused by driver.
+    if DB_CONNECT_TIMEOUT_SECONDS and DB_CONNECT_TIMEOUT_SECONDS > 0:
+        connect_args["connect_timeout"] = int(DB_CONNECT_TIMEOUT_SECONDS)
 
     # Tiny pool for free tiers; pre_ping avoids stale connections.
     _ENGINE = create_engine(
@@ -106,10 +125,12 @@ def db_init() -> Dict[str, Any]:
     except SQLAlchemyError as e:
         # Never crash the API on DB issues.
         return {"enabled": True, "ok": False, "reason": str(e)}
+    except Exception as e:
+        return {"enabled": True, "ok": False, "reason": f"{e.__class__.__name__}: {e}"}
 
 
 def db_health() -> Dict[str, Any]:
-    """Lightweight health probe for DB."""
+    """Lightweight health probe for DB. Must never raise."""
     engine = _get_engine()
     if engine is None:
         return {
@@ -124,6 +145,8 @@ def db_health() -> Dict[str, Any]:
         return {"enabled": True, "connected": True}
     except SQLAlchemyError as e:
         return {"enabled": True, "connected": False, "reason": str(e)}
+    except Exception as e:
+        return {"enabled": True, "connected": False, "reason": f"{e.__class__.__name__}: {e}"}
 
 
 def db_log_solve(req: Dict[str, Any], out: Dict[str, Any], latency_ms: int, error: Optional[str]) -> None:
