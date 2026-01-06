@@ -1,4 +1,5 @@
-from fastapi import APIRouter
+import asyncio
+from fastapi import APIRouter, Request
 from schemas import SolveRequest, SolveResponse
 from orchestrator import solve
 
@@ -16,12 +17,12 @@ def _safe_failure(message: str, code: str) -> SolveResponse:
     )
 
 @router.post("/solve", response_model=SolveResponse)
-def solve_route(req: SolveRequest):
+async def solve_route(req: SolveRequest, request: Request):
     try:
         payload = req.model_dump(by_alias=True)
-        out = solve(payload)
+        out = await solve(payload)
 
-        # Hard safety: if model gave empty answer, return safe response
+        # Guard against empty outputs
         if not str(out.get("final_answer") or "").strip():
             return _safe_failure(
                 "I’m not confident enough to answer this correctly. Please rephrase or add missing conditions/details.",
@@ -38,6 +39,11 @@ def solve_route(req: SolveRequest):
             meta={"engine": "knoweasy-orchestrator-phase1"},
         )
 
+    except asyncio.TimeoutError:
+        return _safe_failure(
+            "Luma is thinking a bit longer than usual. Please try again in a few seconds 😊",
+            "MODEL_TIMEOUT",
+        )
     except Exception:
         # Don't leak raw errors to the student UI; keep response stable + CORS-safe.
         return _safe_failure(
@@ -47,5 +53,5 @@ def solve_route(req: SolveRequest):
 
 # Backward-compatible alias (some older frontends may call /ask)
 @router.post("/ask", response_model=SolveResponse)
-def ask_route(req: SolveRequest):
-    return solve_route(req)
+async def ask_route(req: SolveRequest, request: Request):
+    return await solve_route(req, request)

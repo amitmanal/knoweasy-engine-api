@@ -1,12 +1,17 @@
 import json
-from config import LOW_CONFIDENCE_THRESHOLD, MAX_STEPS, MAX_CHARS_ANSWER
+import asyncio
+from config import (
+    LOW_CONFIDENCE_THRESHOLD,
+    MAX_STEPS,
+    MAX_CHARS_ANSWER,
+    MODEL_TIMEOUT_SEC,
+    AI_ENABLED,
+)
 from models import GeminiClient
 from verifier import basic_verify
 
 def build_prompt(payload: dict) -> str:
-    """
-    Forces strict JSON output with a stable schema.
-    """
+    """Forces strict JSON output with a stable schema."""
     question = payload["question"]
     clazz = payload["class"]
     board = payload["board"]
@@ -16,14 +21,13 @@ def build_prompt(payload: dict) -> str:
     language = payload.get("language", "en")
     answer_mode = payload.get("answer_mode", "step_by_step")
 
-    # Output schema demanded from model
     schema = {
         "final_answer": "string",
         "steps": ["string"],
         "assumptions": ["string"],
         "confidence": "number 0..1",
         "flags": ["string"],
-        "safe_note": "string|null"
+        "safe_note": "string|null",
     }
 
     return f"""
@@ -54,11 +58,25 @@ Question:
 {question}
 """.strip()
 
-def solve(payload: dict) -> dict:
+async def _call_model_with_timeout(client: GeminiClient, prompt: str) -> dict:
+    # google-genai client is sync; run in a thread so we can enforce timeout.
+    return await asyncio.wait_for(asyncio.to_thread(client.generate_json, prompt), timeout=MODEL_TIMEOUT_SEC)
+
+async def solve(payload: dict) -> dict:
+    if not AI_ENABLED:
+        return {
+            "final_answer": "AI is temporarily paused for stability. Please try again in a little while 😊",
+            "steps": [],
+            "assumptions": [],
+            "confidence": 0.2,
+            "flags": ["AI_DISABLED"],
+            "safe_note": "You can still study chapters, notes, and tests while AI is paused.",
+        }
+
     client = GeminiClient()
 
     prompt = build_prompt(payload)
-    out = client.generate_json(prompt)
+    out = await _call_model_with_timeout(client, prompt)
 
     # Normalize missing keys defensively
     out.setdefault("final_answer", "")
@@ -76,8 +94,15 @@ def solve(payload: dict) -> dict:
 
     # Second pass if low confidence
     if out["confidence"] < LOW_CONFIDENCE_THRESHOLD:
-        repair_prompt = build_prompt(payload) + "\n\nYou gave a low-confidence answer earlier. Re-check carefully and improve correctness. Output ONLY JSON."
-        out2 = client.generate_json(repair_prompt)
+        repair_prompt = (
+            build_prompt(payload)
+            + "\n\nYour previous answer had low confidence. Re-check carefully and improve correctness. Output ONLY JSON."
+        )
+        try:
+            out2 = await _call_model_with_timeout(client, repair_prompt)
+        except Exception:
+            out2 = {}
+
         # choose better of the two by confidence (still bounded)
         try:
             c2 = float(out2.get("confidence", 0.0))
