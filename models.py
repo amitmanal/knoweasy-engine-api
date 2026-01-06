@@ -1,34 +1,37 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
-
+import json
 from google import genai
+from config import GEMINI_API_KEY, GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL
 
-from config import GEMINI_API_KEY, GENAI_MODEL
-
-
-@dataclass
 class GeminiClient:
-    api_key: str
-    model: str = GENAI_MODEL
+    def __init__(self) -> None:
+        if not GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY is missing. Set it in Render env vars.")
+        self.client = genai.Client(api_key=GEMINI_API_KEY)
 
-    def __post_init__(self) -> None:
-        if not self.api_key:
-            raise RuntimeError(
-                "Missing GEMINI_API_KEY / GOOGLE_API_KEY. Set it in Render Environment."
-            )
-        self.client = genai.Client(api_key=self.api_key)
-
-    def generate(self, prompt: str) -> str:
-        # google-genai: https://ai.google.dev/
+    def generate_json(self, prompt: str, model: str | None = None) -> dict:
+        use_model = model or GEMINI_PRIMARY_MODEL
         resp = self.client.models.generate_content(
-            model=self.model,
+            model=use_model,
             contents=prompt,
         )
-        # SDK returns .text convenience
-        text = getattr(resp, "text", None)
-        return (text or "").strip()
+        text = (resp.text or "").strip()
 
+        # Hard defense: extract JSON if the model wraps it.
+        # We look for first '{' and last '}'.
+        if "{" in text and "}" in text:
+            text = text[text.find("{"):text.rfind("}") + 1]
 
-def get_gemini_client() -> GeminiClient:
-    return GeminiClient(api_key=GEMINI_API_KEY, model=GENAI_MODEL)
+        try:
+            return json.loads(text)
+        except Exception:
+            # fallback model attempt
+            if use_model != GEMINI_FALLBACK_MODEL:
+                resp2 = self.client.models.generate_content(
+                    model=GEMINI_FALLBACK_MODEL,
+                    contents=prompt,
+                )
+                text2 = (resp2.text or "").strip()
+                if "{" in text2 and "}" in text2:
+                    text2 = text2[text2.find("{"):text2.rfind("}") + 1]
+                return json.loads(text2)
+            raise

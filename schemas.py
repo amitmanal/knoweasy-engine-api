@@ -1,33 +1,45 @@
-from __future__ import annotations
+from typing import List, Optional, Literal, Union
+import re
+from pydantic import BaseModel, Field, field_validator
 
-from typing import Any, Dict, Optional
+ExamMode = Literal["BOARD", "JEE", "NEET", "CET", "OTHER"]
 
-from pydantic import BaseModel, Field, AliasChoices, ConfigDict
-
+def _normalize_class(v) -> int:
+    """Accept int or strings like '11', '11+12', 'Integrated (11+12)' and return a safe int 5..12."""
+    if v is None:
+        raise ValueError("class is required")
+    if isinstance(v, int):
+        n = v
+    else:
+        s = str(v).strip()
+        m = re.search(r"(\d{1,2})", s)
+        if not m:
+            raise ValueError("class must contain a number like 5..12")
+        n = int(m.group(1))
+    if n < 5 or n > 12:
+        raise ValueError("class must be between 5 and 12")
+    return n
 
 class SolveRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+    question: str = Field(..., min_length=3, max_length=4000)
+    class_: Union[int, str] = Field(..., alias="class")
+    board: str = Field(..., min_length=2, max_length=40)
+    subject: str = Field(..., min_length=2, max_length=40)
+    chapter: Optional[str] = Field(None, max_length=120)
+    exam_mode: ExamMode = "BOARD"
+    language: str = Field("en", description="en / hi / mr etc.")
+    answer_mode: str = Field("step_by_step", description="one_liner / cbse_board / step_by_step / hint_only")
 
-    question: str = Field(..., min_length=1, max_length=2000)
-    clazz: str = Field(
-        ...,
-        validation_alias=AliasChoices("class", "class_level", "clazz"),
-        serialization_alias="class",
-        description="Class level like '11', '12', or '11+12'.",
-    )
-    board: str = Field(..., min_length=2, max_length=50)
-    subject: str = Field(..., min_length=2, max_length=50)
-
-    chapter: Optional[str] = None
-    exam_mode: str = "BOARD"          # BOARD / JEE / NEET etc (overlay)
-    language: str = "en"
-    answer_mode: str = "step_by_step" # step_by_step / direct / key_points
-    meta: Dict[str, Any] = Field(default_factory=dict)
-
+    @field_validator("class_")
+    @classmethod
+    def validate_class(cls, v):
+        return _normalize_class(v)
 
 class SolveResponse(BaseModel):
-    ok: bool = True
-    answer: str
-    steps: list[str] = Field(default_factory=list)
-    model: str | None = None
-    usage: Dict[str, Any] = Field(default_factory=dict)
+    final_answer: str
+    steps: List[str] = []
+    assumptions: List[str] = []
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    flags: List[str] = []
+    safe_note: Optional[str] = None
+    meta: dict = {}
