@@ -1,133 +1,83 @@
+# config.py
+# Centralized runtime configuration for KnowEasy Engine API
 from __future__ import annotations
 
 import os
-from typing import List
-from dotenv import load_dotenv
-
-load_dotenv()
+from typing import List, Optional
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def _get_str(key: str, default: str = "") -> str:
-    v = os.getenv(key)
-    return default if v is None else str(v).strip()
-
-
-def _get_int(key: str, default: int) -> int:
+def _get_int(name: str, default: int) -> int:
+    v = os.getenv(name)
+    if v is None or v == "":
+        return default
     try:
-        return int(os.getenv(key, default))
+        return int(v)
     except Exception:
         return default
 
 
-def _get_float(key: str, default: float) -> float:
+def _get_float(name: str, default: float) -> float:
+    v = os.getenv(name)
+    if v is None or v == "":
+        return default
     try:
-        return float(os.getenv(key, default))
+        return float(v)
     except Exception:
         return default
 
 
-def _get_bool(key: str, default: bool = False) -> bool:
-    v = os.getenv(key)
-    if v is None:
+def _get_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None or v == "":
         return default
-    return str(v).strip().lower() in ("1", "true", "yes", "on")
+    return v.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
-def _get_csv(key: str, default: List[str]) -> List[str]:
-    v = os.getenv(key)
-    if not v:
-        return default
-    return [x.strip() for x in v.split(",") if x.strip()]
+# --- Service identity ---
+SERVICE_NAME: str = os.getenv("SERVICE_NAME", "knoweasy-engine-api")
+ENV: str = os.getenv("ENV", os.getenv("RENDER_ENV", "prod"))
 
+# --- Security (optional shared key) ---
+KE_API_KEY: Optional[str] = os.getenv("KE_API_KEY")  # if set, require X-KE-KEY header
 
-# -----------------------------
-# App identity
-# -----------------------------
-ENV = _get_str("ENV", "production")
-APP_NAME = "knoweasy-engine-api"
+# --- CORS (keep permissive in code for Phase-1; can be tightened later) ---
+# If you later want strict origins, you can use this list in main.py.
+ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "*")
+ALLOWED_ORIGINS: List[str] = ["*"] if ALLOWED_ORIGINS_RAW.strip() == "*" else [
+    s.strip() for s in ALLOWED_ORIGINS_RAW.split(",") if s.strip()
+]
 
+# --- Rate limiting (router.py expects these names) ---
+RATE_LIMIT_PER_MINUTE: int = _get_int("RATE_LIMIT_PER_MINUTE", 30)
+RATE_LIMIT_BURST: int = _get_int("RATE_LIMIT_BURST", 10)
 
-# -----------------------------
-# AI control (Phase-1C)
-# -----------------------------
-AI_ENABLED = _get_bool("AI_ENABLED", True)
-AI_MODE = _get_str("AI_MODE", "production")
-AI_PROVIDER = _get_str("AI_PROVIDER", "gemini")
-AI_TIMEOUT_SECONDS = _get_int("AI_TIMEOUT_SECONDS", 25)
+# --- AI core knobs (orchestrator.py expects these names) ---
+AI_ENABLED: bool = _get_bool("AI_ENABLED", True)
+AI_PROVIDER: str = os.getenv("AI_PROVIDER", "gemini")  # future: openai / anthropic
+AI_MODE: str = os.getenv("AI_MODE", "exam_safe")
+AI_TIMEOUT_SECONDS: int = _get_int("AI_TIMEOUT_SECONDS", 25)
 
+# Output shaping
+LOW_CONFIDENCE_THRESHOLD: float = _get_float("LOW_CONFIDENCE_THRESHOLD", 0.45)
+MAX_STEPS: int = _get_int("MAX_STEPS", 8)
+MAX_CHARS_ANSWER: int = _get_int("MAX_CHARS_ANSWER", 6000)
 
-# -----------------------------
-# API / security
-# -----------------------------
-KE_API_KEY = _get_str("KE_API_KEY", "")
+# --- Gemini provider settings (models.py expects these names) ---
+# Accept either GEMINI_API_KEY (preferred) or legacy GENAI_API_KEY
+GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY") or os.getenv("GENAI_API_KEY")
 
+# Provide safe defaults. These are *model ids*; you can override in Render env.
+GEMINI_PRIMARY_MODEL: str = os.getenv("GEMINI_PRIMARY_MODEL", "gemini-2.5-flash")
+GEMINI_FALLBACK_MODEL: str = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 
-# -----------------------------
-# Gemini config
-# -----------------------------
-GEMINI_API_KEY = _get_str("GEMINI_API_KEY", "")
-GEMINI_MODEL = _get_str("GEMINI_MODEL", "gemini-2.0-flash")
-GEMINI_TEMPERATURE = _get_float("GEMINI_TEMPERATURE", 0.2)
-GEMINI_MAX_OUTPUT_TOKENS = _get_int("GEMINI_MAX_OUTPUT_TOKENS", 1200)
+# Backward-compat name some code may use
+GEMINI_TIMEOUT_S: int = _get_int("GEMINI_TIMEOUT_S", AI_TIMEOUT_SECONDS)
 
-# --- Future providers (Phase-2 ready): OpenAI + Claude ---
-# Keep installed-code minimal: we use HTTPS calls via stdlib urllib. Just add keys to enable.
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+# Circuit breaker (models.py expects these names)
+CB_FAILURE_THRESHOLD: int = _get_int("CB_FAILURE_THRESHOLD", 3)
+CB_COOLDOWN_S: int = _get_int("CB_COOLDOWN_S", 60)
 
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "").strip()
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20240620").strip()
-
-
-
-# -----------------------------
-# Solver behavior (THIS FIXES THE CRASH)
-# -----------------------------
-MAX_STEPS = _get_int("MAX_STEPS", 8)
-MAX_CHARS_ANSWER = int(os.getenv("MAX_CHARS_ANSWER", "3500"))
-LOW_CONFIDENCE_THRESHOLD = _get_float("LOW_CONFIDENCE_THRESHOLD", 0.55)
-
-
-# -----------------------------
-# Rate limiting
-# -----------------------------
-RATE_LIMIT_PER_MINUTE = _get_int("RATE_LIMIT_PER_MINUTE", 60)
-RATE_LIMIT_WINDOW_SECONDS = _get_int("RATE_LIMIT_WINDOW_SECONDS", 60)
-RATE_LIMIT_BURST = _get_int("RATE_LIMIT_BURST", 30)
-
-
-# -----------------------------
-# Cache
-# -----------------------------
-SOLVE_CACHE_ENABLED = _get_bool("SOLVE_CACHE_ENABLED", True)
-SOLVE_CACHE_TTL_SECONDS = _get_int("SOLVE_CACHE_TTL_SECONDS", 300)
-
-
-# -----------------------------
-# Database / Redis
-# -----------------------------
-DATABASE_URL = _get_str("DATABASE_URL", "")
-DB_ENABLED = bool(DATABASE_URL)
-
-REDIS_URL = _get_str("REDIS_URL", "")
-REDIS_ENABLED = bool(REDIS_URL)
-
-
-# -----------------------------
-# CORS
-# -----------------------------
-ALLOW_ORIGINS = _get_csv(
-    "ALLOW_ORIGINS",
-    [
-        "https://knoweasylearning.com",
-        "https://www.knoweasylearning.com",
-        "http://localhost",
-        "http://localhost:3000",
-    ],
-)
-ALLOW_METHODS = ["*"]
-ALLOW_HEADERS = ["*"]
-ALLOW_CREDENTIALS = True
+# --- Persistence / cache (optional) ---
+DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")
+DB_SSLMODE: str = os.getenv("DB_SSLMODE", "require")
+REDIS_URL: Optional[str] = os.getenv("REDIS_URL")
