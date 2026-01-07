@@ -1,11 +1,13 @@
-# src/config.py
+# config.py
 """
 Central configuration for KnowEasy Engine API.
 
-Goals:
-- Never crash on missing env vars (safe defaults)
-- Export stable names used across app (router/main/orchestrator/db)
-- Keep parsing/typing consistent
+Goal:
+- Never crash on missing env vars
+- Provide safe defaults
+- Export a stable set of names that router/main/orchestrator can import
+
+All values are read from environment variables (Render -> Environment).
 """
 
 from __future__ import annotations
@@ -14,10 +16,10 @@ import os
 from typing import Optional
 
 
-# ----------------------------
+# -------------------------
 # helpers
-# ----------------------------
-def _env(key: str, default: Optional[str] = None) -> Optional[str]:
+# -------------------------
+def _get_env(key: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(key)
     if v is None:
         return default
@@ -25,116 +27,107 @@ def _env(key: str, default: Optional[str] = None) -> Optional[str]:
     return v if v != "" else default
 
 
-def _env_bool(key: str, default: bool = False) -> bool:
-    v = _env(key, None)
+def _as_bool(v: Optional[str], default: bool = False) -> bool:
     if v is None:
         return default
-    return v.lower() in {"1", "true", "yes", "y", "on"}
+    s = v.strip().lower()
+    if s in ("1", "true", "yes", "y", "on", "enabled"):
+        return True
+    if s in ("0", "false", "no", "n", "off", "disabled"):
+        return False
+    return default
 
 
-def _env_int(key: str, default: int) -> int:
-    v = _env(key, None)
-    if v is None:
-        return default
+def _as_int(v: Optional[str], default: int) -> int:
     try:
-        return int(v)
+        return int(str(v).strip())
     except Exception:
         return default
 
 
-# ----------------------------
-# app metadata
-# ----------------------------
-APP_NAME: str = _env("APP_NAME", "knoweasy-engine-api") or "knoweasy-engine-api"
-ENV: str = _env("ENV", _env("RENDER_ENV", "production")) or "production"
-APP_VERSION: str = _env("APP_VERSION", _env("VERSION", "1.0.0")) or "1.0.0"
-LOG_LEVEL: str = _env("LOG_LEVEL", "INFO") or "INFO"
+# -------------------------
+# basic app config
+# -------------------------
+APP_NAME: str = _get_env("APP_NAME", "knoweasy-engine-api") or "knoweasy-engine-api"
+ENV: str = _get_env("ENV", "production") or "production"
+LOG_LEVEL: str = _get_env("LOG_LEVEL", "INFO") or "INFO"
+
+# CORS (if you use it elsewhere)
+ALLOWED_ORIGINS: str = _get_env("ALLOWED_ORIGINS", "*") or "*"
 
 
-# ----------------------------
+# -------------------------
 # AI config
-# ----------------------------
-# NOTE: Your Render screenshot shows AI_* env vars exist; still keep defaults safe.
-AI_ENABLED: bool = _env_bool("AI_ENABLED", False)
-AI_MODE: str = _env("AI_MODE", "safe") or "safe"          # e.g. safe / pro / debug
-AI_PROVIDER: str = _env("AI_PROVIDER", "gemini") or "gemini"
-AI_TIMEOUT_SECONDS: int = _env_int("AI_TIMEOUT_SECONDS", 25)
+# -------------------------
+AI_ENABLED: bool = _as_bool(_get_env("AI_ENABLED"), default=False)
+AI_MODE: str = _get_env("AI_MODE", "exam_safe") or "exam_safe"
+AI_PROVIDER: str = _get_env("AI_PROVIDER", "gemini") or "gemini"
+AI_TIMEOUT_SECONDS: int = _as_int(_get_env("AI_TIMEOUT_SECONDS"), default=25)
 
-# Provider keys (optional)
-GEMINI_API_KEY: Optional[str] = _env("GEMINI_API_KEY", None)
-OPENAI_API_KEY: Optional[str] = _env("OPENAI_API_KEY", None)
+# Gemini (your env shows GEMINI_API_KEY exists)
+GEMINI_API_KEY: Optional[str] = _get_env("GEMINI_API_KEY", None)
 
 
-# ----------------------------
-# database config (Postgres)
-# ----------------------------
-# Render usually provides DATABASE_URL, but you also created your own DATABASE_URL env.
-DATABASE_URL: Optional[str] = _env("DATABASE_URL", _env("POSTGRES_URL", None))
-DB_SSLMODE: str = _env("DB_SSLMODE", "require") or "require"
+# -------------------------
+# DB config (Postgres)
+# -------------------------
+# On Render: set DATABASE_URL (external/internal), and optionally DB_SSLMODE=require
+DATABASE_URL: Optional[str] = _get_env("DATABASE_URL", None)
+DB_SSLMODE: str = _get_env("DB_SSLMODE", "require") or "require"
 
-# Enable DB only if URL exists and doesn't look invalid
-DB_ENABLED: bool = _env_bool("DB_ENABLED", True) and bool(DATABASE_URL)
-
-
-# ----------------------------
-# redis config
-# ----------------------------
-REDIS_URL: Optional[str] = _env("REDIS_URL", None)
-REDIS_ENABLED: bool = _env_bool("REDIS_ENABLED", True) and bool(REDIS_URL)
+# Optional flag if your code checks it
+DB_ENABLED: bool = _as_bool(_get_env("DB_ENABLED"), default=True)
 
 
-# ----------------------------
-# rate limiting config
-# ----------------------------
-# These names MUST exist because router.py imports them.
-RATE_LIMIT_ENABLED: bool = _env_bool("RATE_LIMIT_ENABLED", True)
-
-# Requests per minute per IP (basic token-bucket/rolling window style)
-RATE_LIMIT_PER_MINUTE: int = _env_int("RATE_LIMIT_PER_MINUTE", 60)
-
-# Burst capacity (your missing symbol)
-RATE_LIMIT_BURST: int = _env_int("RATE_LIMIT_BURST", 20)
-
-# Optional: allow local/dev bypass
-RATE_LIMIT_TRUST_PROXY_HEADERS: bool = _env_bool("RATE_LIMIT_TRUST_PROXY_HEADERS", True)
+# -------------------------
+# Redis config
+# -------------------------
+REDIS_URL: Optional[str] = _get_env("REDIS_URL", None)
+REDIS_ENABLED: bool = _as_bool(_get_env("REDIS_ENABLED"), default=True)
 
 
-# ----------------------------
-# caching config (solve cache)
-# ----------------------------
-SOLVE_CACHE_ENABLED: bool = _env_bool("SOLVE_CACHE_ENABLED", True) and (REDIS_ENABLED or False)
-SOLVE_CACHE_TTL_SECONDS: int = _env_int("SOLVE_CACHE_TTL_SECONDS", 600)
+# -------------------------
+# Rate limiting config (router imports these)
+# -------------------------
+RATE_LIMIT_ENABLED: bool = _as_bool(_get_env("RATE_LIMIT_ENABLED"), default=True)
+
+# Window size in seconds (required by router import)
+RATE_LIMIT_WINDOW_SECONDS: int = _as_int(_get_env("RATE_LIMIT_WINDOW_SECONDS"), default=60)
+
+# Max requests allowed per window
+RATE_LIMIT_MAX_REQUESTS: int = _as_int(_get_env("RATE_LIMIT_MAX_REQUESTS"), default=30)
+
+# Extra burst tokens allowed temporarily
+RATE_LIMIT_BURST: int = _as_int(_get_env("RATE_LIMIT_BURST"), default=10)
 
 
-# ----------------------------
-# CORS / security basics
-# ----------------------------
-# Comma separated list. Keep permissive default ONLY if you already handle it elsewhere.
-CORS_ALLOW_ORIGINS_RAW: str = _env("CORS_ALLOW_ORIGINS", "*") or "*"
-CORS_ALLOW_ORIGINS = [o.strip() for o in CORS_ALLOW_ORIGINS_RAW.split(",") if o.strip()]
-
-# Used by some deployments / middleware
-TRUST_PROXY_HEADERS: bool = _env_bool("TRUST_PROXY_HEADERS", True)
+# -------------------------
+# Solve cache config (optional)
+# -------------------------
+SOLVE_CACHE_ENABLED: bool = _as_bool(_get_env("SOLVE_CACHE_ENABLED"), default=True)
+SOLVE_CACHE_TTL_SECONDS: int = _as_int(_get_env("SOLVE_CACHE_TTL_SECONDS"), default=300)
 
 
-# ----------------------------
-# convenience dict (optional)
-# ----------------------------
-def as_dict() -> dict:
-    return {
-        "APP_NAME": APP_NAME,
-        "ENV": ENV,
-        "APP_VERSION": APP_VERSION,
-        "LOG_LEVEL": LOG_LEVEL,
-        "AI_ENABLED": AI_ENABLED,
-        "AI_MODE": AI_MODE,
-        "AI_PROVIDER": AI_PROVIDER,
-        "AI_TIMEOUT_SECONDS": AI_TIMEOUT_SECONDS,
-        "DB_ENABLED": DB_ENABLED,
-        "REDIS_ENABLED": REDIS_ENABLED,
-        "RATE_LIMIT_ENABLED": RATE_LIMIT_ENABLED,
-        "RATE_LIMIT_PER_MINUTE": RATE_LIMIT_PER_MINUTE,
-        "RATE_LIMIT_BURST": RATE_LIMIT_BURST,
-        "SOLVE_CACHE_ENABLED": SOLVE_CACHE_ENABLED,
-        "SOLVE_CACHE_TTL_SECONDS": SOLVE_CACHE_TTL_SECONDS,
-    }
+# Make sure star-imports / explicit imports remain stable
+__all__ = [
+    "APP_NAME",
+    "ENV",
+    "LOG_LEVEL",
+    "ALLOWED_ORIGINS",
+    "AI_ENABLED",
+    "AI_MODE",
+    "AI_PROVIDER",
+    "AI_TIMEOUT_SECONDS",
+    "GEMINI_API_KEY",
+    "DATABASE_URL",
+    "DB_SSLMODE",
+    "DB_ENABLED",
+    "REDIS_URL",
+    "REDIS_ENABLED",
+    "RATE_LIMIT_ENABLED",
+    "RATE_LIMIT_WINDOW_SECONDS",
+    "RATE_LIMIT_MAX_REQUESTS",
+    "RATE_LIMIT_BURST",
+    "SOLVE_CACHE_ENABLED",
+    "SOLVE_CACHE_TTL_SECONDS",
+]
