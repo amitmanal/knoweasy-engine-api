@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """Central configuration for KnowEasy Engine API.
 
 LOCKED INTENT:
@@ -11,8 +12,14 @@ from __future__ import annotations
 
 import os
 from typing import Optional
+=======
+import os
+from dotenv import load_dotenv
+>>>>>>> 0eedd13 (Fix: export RATE_LIMIT_BURST + stabilize config constants)
 
+load_dotenv()
 
+<<<<<<< HEAD
 def _env_str(name: str, default: str = "") -> str:
     v = os.getenv(name)
     if v is None:
@@ -128,3 +135,109 @@ REQUEST_TIMEOUT_SECONDS = _env_int("REQUEST_TIMEOUT_SECONDS", 30)
 # Aliases to avoid future ImportError if older code imports these.
 SOLVE_CACHE_TTL = SOLVE_CACHE_TTL_SECONDS
 REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_SECONDS * 1000
+=======
+# -----------------------------
+# helpers
+# -----------------------------
+def _env_str(key: str, default: str = "") -> str:
+    v = os.getenv(key)
+    return default if v is None else str(v).strip()
+
+def _env_int(key: str, default: int) -> int:
+    v = os.getenv(key)
+    if v is None or str(v).strip() == "":
+        return int(default)
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return int(default)
+
+def _env_bool(key: str, default: bool = False) -> bool:
+    v = os.getenv(key)
+    if v is None or str(v).strip() == "":
+        return bool(default)
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+# -----------------------------
+# service basics
+# -----------------------------
+SERVICE_NAME = _env_str("SERVICE_NAME", "knoweasy-engine-api")
+ENV = _env_str("ENV", "prod")  # dev/prod
+LOG_LEVEL = _env_str("LOG_LEVEL", "INFO")
+
+# request guard
+MAX_REQUEST_BYTES = _env_int("MAX_REQUEST_BYTES", 200_000)
+
+# -----------------------------
+# security / auth (Phase-1)
+# -----------------------------
+# Optional key: if set, router may enforce it (depends on your router.py logic).
+KE_API_KEY = _env_str("KE_API_KEY", "")
+
+# -----------------------------
+# rate limit (router.py expects these names)
+# -----------------------------
+RATE_LIMIT_PER_MINUTE = _env_int("RATE_LIMIT_PER_MINUTE", 30)
+# IMPORTANT: router.py imports RATE_LIMIT_BURST — must exist at module level.
+RATE_LIMIT_BURST = _env_int("RATE_LIMIT_BURST", 10)
+
+# (optional extra, safe to expose)
+RATE_LIMIT_WINDOW_SECONDS = _env_int("RATE_LIMIT_WINDOW_SECONDS", 60)
+
+# -----------------------------
+# AI settings (orchestrator.py expects these names)
+# -----------------------------
+AI_ENABLED = _env_bool("AI_ENABLED", True)
+
+# provider wiring (safe defaults)
+AI_PROVIDER = _env_str("AI_PROVIDER", "gemini")  # "gemini"
+AI_MODE = _env_str("AI_MODE", "auto")            # "auto" / "require" / "off"
+
+# Orchestrator-level constraints
+MAX_STEPS = _env_int("MAX_STEPS", 6)
+MAX_CHARS_ANSWER = _env_int("MAX_CHARS_ANSWER", 2500)
+LOW_CONFIDENCE_THRESHOLD = float(_env_str("LOW_CONFIDENCE_THRESHOLD", "0.35"))
+
+# Timeout used by models.py as GEMINI_TIMEOUT_S
+GEMINI_TIMEOUT_S = _env_int("AI_TIMEOUT_SECONDS", 18)
+
+# Gemini env var (Render screenshot shows GEMINI_API_KEY exists)
+GEMINI_API_KEY = _env_str("GEMINI_API_KEY", "")
+
+# Models (you said these worked earlier)
+GEMINI_PRIMARY_MODEL = _env_str("GEMINI_PRIMARY_MODEL", "gemini-2.5-flash")
+GEMINI_FALLBACK_MODEL = _env_str("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
+
+# Circuit breaker (models.py imports these)
+CB_FAILURE_THRESHOLD = _env_int("CB_FAILURE_THRESHOLD", 3)
+CB_COOLDOWN_S = _env_int("CB_COOLDOWN_S", 30)
+
+# Auto-disable AI if no key (LOCKED INTENT)
+if not GEMINI_API_KEY:
+    AI_ENABLED = False
+    # keep AI_MODE unchanged; orchestrator can decide how to respond
+
+# Explicit export list (optional but keeps things predictable)
+__all__ = [
+    "SERVICE_NAME",
+    "ENV",
+    "LOG_LEVEL",
+    "MAX_REQUEST_BYTES",
+    "KE_API_KEY",
+    "RATE_LIMIT_PER_MINUTE",
+    "RATE_LIMIT_BURST",
+    "RATE_LIMIT_WINDOW_SECONDS",
+    "AI_ENABLED",
+    "AI_PROVIDER",
+    "AI_MODE",
+    "MAX_STEPS",
+    "MAX_CHARS_ANSWER",
+    "LOW_CONFIDENCE_THRESHOLD",
+    "GEMINI_TIMEOUT_S",
+    "GEMINI_API_KEY",
+    "GEMINI_PRIMARY_MODEL",
+    "GEMINI_FALLBACK_MODEL",
+    "CB_FAILURE_THRESHOLD",
+    "CB_COOLDOWN_S",
+]
+>>>>>>> 0eedd13 (Fix: export RATE_LIMIT_BURST + stabilize config constants)
