@@ -15,6 +15,19 @@ GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro").str
 # Feature flag / emergency stop (CEO kill-switch)
 AI_ENABLED = os.getenv("AI_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 
+# Optional (kept for roadmap / logging)
+AI_MODE = os.getenv("AI_MODE", "production").strip()
+AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").strip()
+
+# Single source of truth timeout (Render env)
+# If not set, fallback to legacy GEMINI_TIMEOUT_S, then 18.
+AI_TIMEOUT_SECONDS = float(
+    (os.getenv("AI_TIMEOUT_SECONDS") or os.getenv("GEMINI_TIMEOUT_S") or "18").strip()
+)
+
+# Backward-compatible alias (models.py still imports GEMINI_TIMEOUT_S)
+GEMINI_TIMEOUT_S = AI_TIMEOUT_SECONDS
+
 # When confidence is below this, we do a second pass
 LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE_THRESHOLD", "0.70"))
 
@@ -27,9 +40,6 @@ MAX_CHARS_ANSWER = int(os.getenv("MAX_CHARS_ANSWER", "2500"))
 # =========================
 # Max request body size (bytes) - protects against abuse / accidental huge payloads
 MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", str(64 * 1024)))  # 64KB default
-
-# Gemini call timeout (seconds). Prevents "hanging" requests from piling up.
-GEMINI_TIMEOUT_S = float(os.getenv("GEMINI_TIMEOUT_S", "18"))
 
 # Circuit breaker: if Gemini fails too often, pause calls temporarily (auto self-protection)
 CB_FAILURE_THRESHOLD = int(os.getenv("CB_FAILURE_THRESHOLD", "6"))
@@ -51,7 +61,6 @@ KE_API_KEY = os.getenv("KE_API_KEY", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip() or None
 
 # Render Postgres often needs sslmode=require for external URLs.
-# We auto-append this if sslmode is not present.
 DB_SSLMODE = os.getenv("DB_SSLMODE", "require").strip() or "require"
 
 # A switch to hard-disable DB usage (even if DATABASE_URL is present)
