@@ -2,17 +2,12 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import os
-import time
-from datetime import datetime, timezone
 
 from config import MAX_REQUEST_BYTES
 from router import router
 from db import db_init, db_health
 
 app = FastAPI(title="KnowEasy Orchestrator API", version="0.2.0-phase1")
-
-# Process start time for uptime (seconds)
-_PROCESS_START = time.time()
 
 # ---- CORS (production-safe) ----
 # Comma-separated list in env: KE_ALLOWED_ORIGINS="https://knoweasylearning.com,https://www.knoweasylearning.com"
@@ -61,34 +56,18 @@ async def limit_request_size(request: Request, call_next):
                     },
                 )
         except Exception:
-            # Never crash due to a malformed header
             pass
 
     # If content-length missing, we still proceed (most browsers send it).
     return await call_next(request)
 
-
 @app.get("/health")
 def health():
-    """Fast, non-crashing health probe used by frontend + Render health checks."""
-    now = datetime.now(timezone.utc).isoformat()
-
-    db_t0 = time.perf_counter()
-    try:
-        db = db_health()
-    except Exception as e:
-        # Health endpoint must never crash even if DB code misbehaves.
-        db = {"enabled": True, "connected": False, "reason": f"db_health_error: {e.__class__.__name__}"}
-    db_ms = int((time.perf_counter() - db_t0) * 1000)
-
     return {
         "ok": True,
         "service": "knoweasy-orchestrator-phase1",
-        "version": "0.3.1",
-        "time_utc": now,
-        "uptime_s": int(time.time() - _PROCESS_START),
-        "db": db,
-        "timings_ms": {"db_health": db_ms},
+        "version": "0.3.0",
+        "db": db_health(),
     }
 
 
@@ -97,5 +76,10 @@ def _startup():
     # DB is optional; init is safe even when DATABASE_URL is missing.
     db_init()
 
-
 app.include_router(router)
+
+
+@app.on_event("startup")
+def _startup():
+    # Safe DB init (no-op if DATABASE_URL not provided)
+    db_init()
