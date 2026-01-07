@@ -1,34 +1,37 @@
 # router.py
+import hashlib
 import json
 import time
 from typing import Dict, Tuple
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Request, Header
 from fastapi.responses import JSONResponse
 
-from config import KE_API_KEY, RATE_LIMIT_BURST, RATE_LIMIT_PER_MINUTE
-from db import db_log_solve
-from orchestrator import solve
+from config import (
+    RATE_LIMIT_PER_MINUTE,
+    RATE_LIMIT_BURST,
+    RATE_LIMIT_WINDOW_SECONDS,
+    KE_API_KEY,
+    SOLVE_CACHE_TTL_SECONDS,
+)
 from schemas import SolveRequest, SolveResponse
+from orchestrator import solve
+from db import db_log_solve
+
+from redis_store import get_json as redis_get_json
+from redis_store import setex_json as redis_setex_json
+from redis_store import incr_with_ttl as redis_incr_with_ttl
 
 router = APIRouter()
 
 # In-memory rate limit buckets: {ip: (window_start_epoch, count)}
-# Phase-1: single-instance friendly. Later we move this to Redis/Cloudflare with same interface.
+# Used ONLY if Redis is not enabled.
 _BUCKETS: Dict[str, Tuple[float, int]] = {}
-_WINDOW_S = 60.0
-
-
-def _req_id(request: Request) -> str:
-    rid = getattr(request.state, "req_id", None)
-    return rid or "unknown"
 
 
 def _client_ip(req: Request) -> str:
-    # If behind a proxy/CDN, X-Forwarded-For may exist.
     xff = req.headers.get("x-forwarded-for")
     if xff:
-        # first ip in list
         return xff.split(",")[0].strip()
     if req.client:
         return req.client.host or "unknown"
@@ -36,13 +39,29 @@ def _client_ip(req: Request) -> str:
 
 
 def _rate_limit_ok(ip: str) -> bool:
+    """
+    Rate limit priority:
+    1) Redis (distributed)
+    2) In-memory fallback (single-instance)
+    """
+    limit = RATE_LIMIT_PER_MINUTE + RATE_LIMIT_BURST
+    window_s = int(RATE_LIMIT_WINDOW_SECONDS)
+
+    # ---- Redis path (distributed) ----
+    # key rotates per minute-window; we still set TTL = window_s
+    # Use integer window bucket (floor(now/window_s)).
     now = time.time()
+    bucket = int(now // window_s)
+    redis_key = f"rl:{ip}:{bucket}"
+    rc = redis_incr_with_ttl(redis_key, window_s)
+    if rc is not None:
+        return rc <= limit
+
+    # ---- In-memory fallback ----
     start, count = _BUCKETS.get(ip, (now, 0))
-    if now - start >= _WINDOW_S:
+    if now - start >= window_s:
         start, count = now, 0
 
-    # Allow burst on top of base per-minute limit
-    limit = RATE_LIMIT_PER_MINUTE + RATE_LIMIT_BURST
     if count >= limit:
         _BUCKETS[ip] = (start, count)
         return False
@@ -51,7 +70,7 @@ def _rate_limit_ok(ip: str) -> bool:
     return True
 
 
-def _safe_failure(message: str, code: str, rid: str) -> SolveResponse:
+def _safe_failure(message: str, code: str) -> SolveResponse:
     return SolveResponse(
         final_answer=message,
         steps=[],
@@ -59,24 +78,24 @@ def _safe_failure(message: str, code: str, rid: str) -> SolveResponse:
         confidence=0.2,
         flags=[code],
         safe_note="Try adding chapter/topic or any given options/conditions.",
-        meta={"engine": "knoweasy-orchestrator-phase1", "req_id": rid, "outcome": "error"},
+        meta={"engine": "knoweasy-orchestrator-phase1"},
     )
 
 
-def _classify_outcome(flags: list) -> str:
-    # Keep very defensive + minimal; we only log it.
-    s = set(str(f) for f in (flags or []))
-    if "AI_TIMEOUT" in s or "TIMEOUT" in s:
-        return "ai_timeout"
-    if "AI_ERROR" in s:
-        return "ai_error"
-    if "UNAUTHORIZED" in s:
-        return "unauthorized"
-    if "RATE_LIMITED" in s:
-        return "rate_limited"
-    if "BAD_INPUT" in s or "VALIDATION_ERROR" in s:
-        return "bad_input"
-    return "ok"
+def _cache_key(payload: dict) -> str:
+    """
+    Stable cache key for same user question+context.
+    We only use relevant fields so UI noise won't bust cache.
+    """
+    normalized = {
+        "board": (payload.get("board") or "").strip(),
+        "class_level": (payload.get("class_level") or "").strip(),
+        "subject": (payload.get("subject") or "").strip(),
+        "question": (payload.get("question") or "").strip(),
+    }
+    blob = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+    h = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+    return f"cache:solve:{h}"
 
 
 @router.post("/solve", response_model=SolveResponse)
@@ -85,138 +104,84 @@ def solve_route(
     request: Request,
     x_ke_key: str | None = Header(default=None, alias="X-KE-KEY"),
 ):
-    rid = _req_id(request)
-
     # Optional shared key guardrail (not security, but reduces random abuse).
     if KE_API_KEY:
         if not x_ke_key or x_ke_key.strip() != KE_API_KEY:
-            payload = _safe_failure(
-                "Unauthorized request. Please open the app from the official KnowEasy website.",
-                "UNAUTHORIZED",
-                rid,
+            return JSONResponse(
+                status_code=401,
+                content=_safe_failure(
+                    "Unauthorized request. Please open the app from the official KnowEasy website.",
+                    "UNAUTHORIZED",
+                ).model_dump(),
             )
-
-            # Log (structured, single-line)
-            print(
-                json.dumps(
-                    {
-                        "event": "solve",
-                        "req_id": rid,
-                        "outcome": "unauthorized",
-                        "ip": _client_ip(request),
-                        "board": getattr(req, "board", None),
-                        "class_level": getattr(req, "class_level", None),
-                        "subject": getattr(req, "subject", None),
-                        "input_len": len((req.question or "").strip()) if getattr(req, "question", None) else 0,
-                        "latency_ms": 0,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-
-            return JSONResponse(status_code=401, content=payload.model_dump())
 
     ip = _client_ip(request)
     if not _rate_limit_ok(ip):
-        payload = _safe_failure(
-            "Too many requests right now. Please try again in a minute 😊",
-            "RATE_LIMITED",
-            rid,
+        return JSONResponse(
+            status_code=429,
+            content=_safe_failure(
+                "Too many requests right now. Please try again in a minute 😊",
+                "RATE_LIMITED",
+            ).model_dump(),
         )
 
-        print(
-            json.dumps(
-                {
-                    "event": "solve",
-                    "req_id": rid,
-                    "outcome": "rate_limited",
-                    "ip": ip,
-                    "board": getattr(req, "board", None),
-                    "class_level": getattr(req, "class_level", None),
-                    "subject": getattr(req, "subject", None),
-                    "input_len": len((req.question or "").strip()) if getattr(req, "question", None) else 0,
-                    "latency_ms": 0,
-                },
-                ensure_ascii=False,
-            )
+    # -------- Cache (best-effort) --------
+    payload = req.model_dump()
+    cache_key = _cache_key(payload)
+
+    cached = redis_get_json(cache_key)
+    if cached:
+        # Still log "served from cache" as best effort
+        try:
+            db_log_solve(req=req, out=cached, latency_ms=0, error=None)
+        except Exception:
+            pass
+
+        return SolveResponse(
+            final_answer=cached.get("final_answer", ""),
+            steps=cached.get("steps", []),
+            assumptions=cached.get("assumptions", []),
+            confidence=float(cached.get("confidence", 0.5)),
+            flags=cached.get("flags", []) + ["CACHED"],
+            safe_note=cached.get("safe_note"),
+            meta={"engine": "knoweasy-orchestrator-phase1"},
         )
 
-        return JSONResponse(status_code=429, content=payload.model_dump())
-
-    t0 = time.perf_counter()
     try:
-        out = solve(req.model_dump())
+        t0 = time.perf_counter()
+        out = solve(payload)
         latency_ms = int((time.perf_counter() - t0) * 1000)
-
-        flags = out.get("flags", []) if isinstance(out, dict) else []
-        outcome = _classify_outcome(flags)
 
         # Best-effort DB log (never breaks the response)
         db_log_solve(req=req, out=out, latency_ms=latency_ms, error=None)
 
-        # Structured log line (Render-friendly)
-        print(
-            json.dumps(
-                {
-                    "event": "solve",
-                    "req_id": rid,
-                    "outcome": outcome,
-                    "ip": ip,
-                    "board": getattr(req, "board", None),
-                    "class_level": getattr(req, "class_level", None),
-                    "subject": getattr(req, "subject", None),
-                    "input_len": len((req.question or "").strip()) if getattr(req, "question", None) else 0,
-                    "latency_ms": latency_ms,
-                    "flags": flags,
-                },
-                ensure_ascii=False,
-            )
-        )
+        # Cache successful output (best-effort)
+        if isinstance(out, dict) and out.get("final_answer"):
+            try:
+                redis_setex_json(cache_key, SOLVE_CACHE_TTL_SECONDS, out)
+            except Exception:
+                pass
 
         return SolveResponse(
             final_answer=out.get("final_answer", ""),
             steps=out.get("steps", []),
             assumptions=out.get("assumptions", []),
             confidence=float(out.get("confidence", 0.5)),
-            flags=flags,
+            flags=out.get("flags", []),
             safe_note=out.get("safe_note"),
-            meta={
-                "engine": "knoweasy-orchestrator-phase1",
-                "req_id": rid,
-                "latency_ms": latency_ms,
-                "outcome": outcome,
-            },
+            meta={"engine": "knoweasy-orchestrator-phase1"},
         )
 
     except Exception as e:
-        latency_ms = int((time.perf_counter() - t0) * 1000)
-
         # Don't leak raw errors to the student UI; keep response stable + CORS-safe.
-        db_log_solve(req=req, out=None, latency_ms=latency_ms, error=str(e))
-
-        # Structured log line
-        print(
-            json.dumps(
-                {
-                    "event": "solve",
-                    "req_id": rid,
-                    "outcome": "server_error",
-                    "ip": ip,
-                    "board": getattr(req, "board", None),
-                    "class_level": getattr(req, "class_level", None),
-                    "subject": getattr(req, "subject", None),
-                    "input_len": len((req.question or "").strip()) if getattr(req, "question", None) else 0,
-                    "latency_ms": latency_ms,
-                    "error_type": type(e).__name__,
-                },
-                ensure_ascii=False,
-            )
-        )
+        try:
+            db_log_solve(req=req, out=None, latency_ms=None, error=str(e))
+        except Exception:
+            pass
 
         return _safe_failure(
             "Luma had a small hiccup while solving. Please try again in a few seconds 😊",
             "SERVER_ERROR",
-            rid,
         )
 
 
