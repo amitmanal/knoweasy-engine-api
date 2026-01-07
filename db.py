@@ -1,14 +1,10 @@
 """
 db.py - Postgres helpers for KnowEasy Engine API (Render)
 
-This module is intentionally defensive:
-- If DB is disabled or DATABASE_URL is missing, all DB calls become no-ops.
-- On startup, db_init() creates the 'ask_logs' table if it does not exist.
-- db_log_solve() writes one row per /ask call (best-effort; failures never crash the API).
-
 PHASE-1C / C-1 hardening:
-- db_log_solve() now accepts dict OR Pydantic objects (v1/v2) and never silently fails.
-- On failure, we log exceptions to stdout/stderr (Render logs) for observability.
+- db_log_solve() accepts dict OR Pydantic objects (v1/v2).
+- DB failures never crash API, BUT are visible in Render logs (no silent failures).
+- FIX: sanitize DB_SSLMODE to avoid psycopg2 'invalid sslmode value: "require "' errors.
 """
 
 from __future__ import annotations
@@ -30,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 
 def _db_enabled() -> bool:
-    # Allow disabling DB entirely via env (useful for local dev).
     return (os.getenv("DB_ENABLED", "true") or "true").strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -38,7 +33,34 @@ def _database_url() -> Optional[str]:
     url = os.getenv("DATABASE_URL")
     if not url:
         return None
-    return url.strip() or None
+    url = url.strip()
+    return url or None
+
+
+def _clean_sslmode(raw: Optional[str]) -> Optional[str]:
+    """Return a safe sslmode string or None."""
+    if not raw:
+        return None
+    v = str(raw).strip()
+
+    # Remove accidental wrapping quotes (common copy/paste issue)
+    v = v.strip('"').strip("'").strip()
+
+    # psycopg2 allowed values
+    allowed = {
+        "disable",
+        "allow",
+        "prefer",
+        "require",
+        "verify-ca",
+        "verify-full",
+    }
+    if v in allowed:
+        return v
+
+    # If it's invalid, ignore it rather than crash DB connection attempts
+    logger.warning("Ignoring invalid DB_SSLMODE value: %r", raw)
+    return None
 
 
 # -----------------------------
@@ -61,18 +83,20 @@ def _get_engine() -> Optional[Engine]:
     if _ENGINE is not None:
         return _ENGINE
 
-    # Render Postgres usually needs SSL.
-    # If DATABASE_URL already includes sslmode, that's fine.
+    # If DATABASE_URL already contains sslmode=, do NOT override it.
+    url_lower = url.lower()
+    has_sslmode_in_url = "sslmode=" in url_lower
+
     connect_args = {}
-    sslmode = os.getenv("DB_SSLMODE")
-    if sslmode:
-        connect_args = {"sslmode": sslmode}
+    if not has_sslmode_in_url:
+        sslmode = _clean_sslmode(os.getenv("DB_SSLMODE"))
+        if sslmode:
+            connect_args = {"sslmode": sslmode}
 
     try:
         _ENGINE = create_engine(url, pool_pre_ping=True, connect_args=connect_args)
         return _ENGINE
     except Exception:
-        # Do not crash app startup if engine cannot be created.
         logger.exception("Failed to create DB engine")
         return None
 
@@ -83,10 +107,9 @@ def _get_engine() -> Optional[Engine]:
 
 
 def db_init() -> Dict[str, Any]:
-    """Create tables if needed (best-effort)."""
     engine = _get_engine()
     if engine is None:
-        return {"ok": True, "enabled": False, "reason": "DB is disabled or DATABASE_URL is missing"}
+        return {"ok": True, "enabled": False, "reason": "DB disabled or DATABASE_URL missing/invalid"}
 
     create_sql = """
     CREATE TABLE IF NOT EXISTS ask_logs (
@@ -107,20 +130,14 @@ def db_init() -> Dict[str, Any]:
             conn.execute(text(create_sql))
         return {"ok": True, "enabled": True}
     except Exception as e:
-        # Do not crash startup; return status for logging.
         logger.exception("db_init failed")
         return {"ok": False, "enabled": True, "reason": str(e)}
 
 
 def db_health() -> Dict[str, Any]:
-    """Lightweight health probe for DB."""
     engine = _get_engine()
     if engine is None:
-        return {
-            "enabled": False,
-            "connected": False,
-            "reason": "DB is disabled or DATABASE_URL is missing",
-        }
+        return {"enabled": False, "connected": False, "reason": "DB disabled or DATABASE_URL missing/invalid"}
 
     try:
         with engine.connect() as conn:
@@ -186,7 +203,6 @@ def db_log_solve(req: Any, out: Any, latency_ms: int, error: Optional[str]) -> N
     question = req_d.get("question") or req_d.get("prompt") or ""
     question = question if isinstance(question, str) else str(question)
 
-    # Try common answer fields
     answer = out_d.get("answer") or out_d.get("text") or out_d.get("output") or ""
     answer = answer if isinstance(answer, str) else str(answer)
 
@@ -210,13 +226,8 @@ def db_log_solve(req: Any, out: Any, latency_ms: int, error: Optional[str]) -> N
                 },
             )
     except Exception:
-        # Never crash request path due to DB, but do log it for Phase-1C observability.
         logger.exception("db_log_solve failed")
         return
 
-
-# -----------------------------
-# Explicit exports (Render import stability)
-# -----------------------------
 
 __all__ = ["db_init", "db_health", "db_log_solve"]
