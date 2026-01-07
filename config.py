@@ -2,12 +2,10 @@
 """
 Central configuration for KnowEasy Engine API.
 
-Goal:
+Goals:
 - Never crash on missing env vars
 - Provide safe defaults
 - Export a stable set of names that router/main/orchestrator can import
-
-All values are read from environment variables (Render -> Environment).
 """
 
 from __future__ import annotations
@@ -51,8 +49,6 @@ def _as_int(v: Optional[str], default: int) -> int:
 APP_NAME: str = _get_env("APP_NAME", "knoweasy-engine-api") or "knoweasy-engine-api"
 ENV: str = _get_env("ENV", "production") or "production"
 LOG_LEVEL: str = _get_env("LOG_LEVEL", "INFO") or "INFO"
-
-# CORS (if you use it elsewhere)
 ALLOWED_ORIGINS: str = _get_env("ALLOWED_ORIGINS", "*") or "*"
 
 
@@ -63,19 +59,14 @@ AI_ENABLED: bool = _as_bool(_get_env("AI_ENABLED"), default=False)
 AI_MODE: str = _get_env("AI_MODE", "exam_safe") or "exam_safe"
 AI_PROVIDER: str = _get_env("AI_PROVIDER", "gemini") or "gemini"
 AI_TIMEOUT_SECONDS: int = _as_int(_get_env("AI_TIMEOUT_SECONDS"), default=25)
-
-# Gemini (your env shows GEMINI_API_KEY exists)
 GEMINI_API_KEY: Optional[str] = _get_env("GEMINI_API_KEY", None)
 
 
 # -------------------------
 # DB config (Postgres)
 # -------------------------
-# On Render: set DATABASE_URL (external/internal), and optionally DB_SSLMODE=require
 DATABASE_URL: Optional[str] = _get_env("DATABASE_URL", None)
 DB_SSLMODE: str = _get_env("DB_SSLMODE", "require") or "require"
-
-# Optional flag if your code checks it
 DB_ENABLED: bool = _as_bool(_get_env("DB_ENABLED"), default=True)
 
 
@@ -87,17 +78,19 @@ REDIS_ENABLED: bool = _as_bool(_get_env("REDIS_ENABLED"), default=True)
 
 
 # -------------------------
-# Rate limiting config (router imports these)
+# Rate limiting config
+# router.py is importing these names, so we MUST export them.
 # -------------------------
 RATE_LIMIT_ENABLED: bool = _as_bool(_get_env("RATE_LIMIT_ENABLED"), default=True)
 
-# Window size in seconds (required by router import)
+# Simple "per minute" knob (some router versions use this)
+RATE_LIMIT_PER_MINUTE: int = _as_int(_get_env("RATE_LIMIT_PER_MINUTE"), default=30)
+
+# Window model knobs (other router versions use these)
 RATE_LIMIT_WINDOW_SECONDS: int = _as_int(_get_env("RATE_LIMIT_WINDOW_SECONDS"), default=60)
+RATE_LIMIT_MAX_REQUESTS: int = _as_int(_get_env("RATE_LIMIT_MAX_REQUESTS"), default=RATE_LIMIT_PER_MINUTE)
 
-# Max requests allowed per window
-RATE_LIMIT_MAX_REQUESTS: int = _as_int(_get_env("RATE_LIMIT_MAX_REQUESTS"), default=30)
-
-# Extra burst tokens allowed temporarily
+# Burst tokens
 RATE_LIMIT_BURST: int = _as_int(_get_env("RATE_LIMIT_BURST"), default=10)
 
 
@@ -108,7 +101,6 @@ SOLVE_CACHE_ENABLED: bool = _as_bool(_get_env("SOLVE_CACHE_ENABLED"), default=Tr
 SOLVE_CACHE_TTL_SECONDS: int = _as_int(_get_env("SOLVE_CACHE_TTL_SECONDS"), default=300)
 
 
-# Make sure star-imports / explicit imports remain stable
 __all__ = [
     "APP_NAME",
     "ENV",
@@ -125,6 +117,7 @@ __all__ = [
     "REDIS_URL",
     "REDIS_ENABLED",
     "RATE_LIMIT_ENABLED",
+    "RATE_LIMIT_PER_MINUTE",
     "RATE_LIMIT_WINDOW_SECONDS",
     "RATE_LIMIT_MAX_REQUESTS",
     "RATE_LIMIT_BURST",
