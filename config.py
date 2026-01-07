@@ -53,6 +53,13 @@ ALLOWED_ORIGINS: str = _get_env("ALLOWED_ORIGINS", "*") or "*"
 
 
 # -------------------------
+# API key (optional app-level auth)
+# -------------------------
+# Some router versions expect this name to exist.
+KE_API_KEY: Optional[str] = _get_env("KE_API_KEY", None)
+
+
+# -------------------------
 # AI config
 # -------------------------
 AI_ENABLED: bool = _as_bool(_get_env("AI_ENABLED"), default=False)
@@ -106,6 +113,7 @@ __all__ = [
     "ENV",
     "LOG_LEVEL",
     "ALLOWED_ORIGINS",
+    "KE_API_KEY",
     "AI_ENABLED",
     "AI_MODE",
     "AI_PROVIDER",
