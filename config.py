@@ -1,142 +1,130 @@
-from __future__ import annotations
-
-"""
-KnowEasy Engine API - Central Configuration (Single Source of Truth)
+"""Central configuration for KnowEasy Engine API.
 
 LOCKED INTENT:
-- Missing ENV vars must NOT crash app.
-- AI must auto-disable if the AI key is missing.
-- DB & Redis are optional (handled in their own modules).
-- Rate limiting & cache must have safe defaults.
-
-This module MUST export every constant imported by:
-- router.py
-- orchestrator.py
-- models.py
-- redis_store.py
+- This module must export ALL constants imported by router.py / orchestrator.py / redis_store.py / db.py.
+- Missing env vars MUST NOT crash startup.
+- AI auto-disables if GEMINI_API_KEY is missing.
+- DB & Redis are optional.
 """
 
+from __future__ import annotations
+
 import os
+from typing import Optional
 
 
-# -----------------------------
-# Safe env getters (never crash)
-# -----------------------------
-def _env_str(key: str, default: str = "") -> str:
-    v = os.getenv(key)
+def _env_str(name: str, default: str = "") -> str:
+    v = os.getenv(name)
     if v is None:
         return default
     return str(v).strip()
 
 
-def _env_int(key: str, default: int) -> int:
+def _env_int(name: str, default: int) -> int:
+    v = os.getenv(name)
+    if v is None or str(v).strip() == "":
+        return default
     try:
-        return int(str(os.getenv(key, "")).strip() or default)
+        return int(str(v).strip())
     except Exception:
         return default
 
 
-def _env_float(key: str, default: float) -> float:
+def _env_float(name: str, default: float) -> float:
+    v = os.getenv(name)
+    if v is None or str(v).strip() == "":
+        return default
     try:
-        return float(str(os.getenv(key, "")).strip() or default)
+        return float(str(v).strip())
     except Exception:
         return default
 
 
-def _env_bool(key: str, default: bool) -> bool:
-    v = os.getenv(key)
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
     if v is None:
         return default
     s = str(v).strip().lower()
-    if s in ("1", "true", "yes", "y", "on"):
+    if s in {"1", "true", "yes", "y", "on"}:
         return True
-    if s in ("0", "false", "no", "n", "off"):
+    if s in {"0", "false", "no", "n", "off"}:
         return False
     return default
 
 
-# ------------------------------------
-# Frontend/API auth (optional soft-gate)
-# ------------------------------------
-# If set, /solve expects header: X-KE-KEY == KE_API_KEY
-KE_API_KEY: str = _env_str("KE_API_KEY", "")
+# =========================
+# Service identity
+# =========================
+SERVICE_NAME = _env_str("SERVICE_NAME", "knoweasy-engine-api")
+ENV = _env_str("ENV", _env_str("RENDER_ENV", "dev"))
+LOG_LEVEL = _env_str("LOG_LEVEL", "INFO")
 
-# -----------------------------
-# Redis (redis_store.py)
-# -----------------------------
-# Optional. If empty, redis features auto-disable.
-# Render usually provides REDIS_URL if you attach a Redis service.
-REDIS_URL: str = _env_str("REDIS_URL", "")
+# =========================
+# API security / auth (optional)
+# =========================
+# Kept for backward compatibility with older code paths.
+KE_API_KEY = _env_str("KE_API_KEY", "")  # optional API auth
 
-# -----------------------------
-# Rate limiting (router.py)
-# -----------------------------
-RATE_LIMIT_PER_MINUTE: int = _env_int("RATE_LIMIT_PER_MINUTE", 60)
-RATE_LIMIT_BURST: int = _env_int("RATE_LIMIT_BURST", 20)
-RATE_LIMIT_WINDOW_SECONDS: int = _env_int("RATE_LIMIT_WINDOW_SECONDS", 60)
+# =========================
+# AI configuration
+# =========================
+AI_PROVIDER = _env_str("AI_PROVIDER", "gemini")
+AI_MODE = _env_str("AI_MODE", "default")
 
-# -----------------------------
-# Solve caching (router.py)
-# -----------------------------
-SOLVE_CACHE_TTL_SECONDS: int = _env_int("SOLVE_CACHE_TTL_SECONDS", 300)
+# Primary key used by google-genai client
+GEMINI_API_KEY = _env_str("GEMINI_API_KEY", "")
 
-# -----------------------------
-# AI Orchestrator controls
-# -----------------------------
-AI_PROVIDER: str = _env_str("AI_PROVIDER", "gemini").lower()
-AI_MODE: str = _env_str("AI_MODE", "mentor").lower()
-AI_TIMEOUT_SECONDS: int = _env_int("AI_TIMEOUT_SECONDS", 20)
+# NOTE: You said Gemini 2.5 Flash/Pro were working for you before.
+# So defaults are set to those. You can override via Render env vars.
+GEMINI_PRIMARY_MODEL = _env_str("GEMINI_PRIMARY_MODEL", "gemini-2.5-flash")
+GEMINI_FALLBACK_MODEL = _env_str("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 
-MAX_STEPS: int = _env_int("MAX_STEPS", 8)
-MAX_CHARS_ANSWER: int = _env_int("MAX_CHARS_ANSWER", 1800)
-LOW_CONFIDENCE_THRESHOLD: float = _env_float("LOW_CONFIDENCE_THRESHOLD", 0.45)
+# Timeouts and output constraints
+AI_TIMEOUT_SECONDS = _env_int("AI_TIMEOUT_SECONDS", 20)
+MAX_STEPS = _env_int("MAX_STEPS", 8)
+MAX_CHARS_ANSWER = _env_int("MAX_CHARS_ANSWER", 900)
+LOW_CONFIDENCE_THRESHOLD = _env_float("LOW_CONFIDENCE_THRESHOLD", 0.45)
 
-# -----------------------------
-# Gemini client config (models.py)
-# -----------------------------
-GEMINI_API_KEY: str = (
-    _env_str("GEMINI_API_KEY", "")
-    or _env_str("GOOGLE_API_KEY", "")
-    or _env_str("GOOGLE_GENAI_API_KEY", "")
-)
+# AI is enabled only if:
+# - AI_ENABLED env is true (or default true)
+# - and we actually have a Gemini API key present
+AI_ENABLED = _env_bool("AI_ENABLED", True) and bool(GEMINI_API_KEY)
 
-GEMINI_PRIMARY_MODEL: str = _env_str("GEMINI_PRIMARY_MODEL", "gemini-2.0-flash")
-GEMINI_FALLBACK_MODEL: str = _env_str("GEMINI_FALLBACK_MODEL", "gemini-1.5-flash")
+# =========================
+# Rate limit (router + optional Redis)
+# =========================
+RATE_LIMIT_PER_MINUTE = _env_int("RATE_LIMIT_PER_MINUTE", 20)
+RATE_LIMIT_WINDOW_SECONDS = _env_int("RATE_LIMIT_WINDOW_SECONDS", 60)
 
-GEMINI_TIMEOUT_S: int = _env_int("GEMINI_TIMEOUT_S", AI_TIMEOUT_SECONDS)
+# In-memory per-process safety limit (kept modest for free tier)
+MAX_REQUESTS_INFLIGHT = _env_int("MAX_REQUESTS_INFLIGHT", 30)
 
-CB_FAILURE_THRESHOLD: int = _env_int("CB_FAILURE_THRESHOLD", 3)
-CB_COOLDOWN_S: int = _env_int("CB_COOLDOWN_S", 30)
+# =========================
+# Solve cache (optional Redis)
+# =========================
+SOLVE_CACHE_TTL_SECONDS = _env_int("SOLVE_CACHE_TTL_SECONDS", 3600)
 
-# -----------------------------
-# AI enabled (auto-disable if key missing)
-# -----------------------------
-_ai_enabled_flag: bool = _env_bool("AI_ENABLED", True)
-AI_ENABLED: bool = bool(_ai_enabled_flag and GEMINI_API_KEY)
+# =========================
+# Redis (optional)
+# =========================
+REDIS_URL = _env_str("REDIS_URL", "")  # empty => Redis disabled
 
-# Safety: if provider is unknown, keep AI disabled (prevents half-configured boot)
-if AI_PROVIDER not in ("gemini", "google-genai", "google_genai"):
-    AI_ENABLED = False
+# =========================
+# Database (optional)
+# =========================
+DATABASE_URL = _env_str("DATABASE_URL", _env_str("DATABASE_URL_INTERNAL", ""))
+DB_SSLMODE = _env_str("DB_SSLMODE", "require")
 
+# =========================
+# HTTP / CORS
+# =========================
+# Comma-separated list. "*" allows all.
+CORS_ALLOW_ORIGINS = _env_str("CORS_ALLOW_ORIGINS", "*")
+REQUEST_TIMEOUT_SECONDS = _env_int("REQUEST_TIMEOUT_SECONDS", 30)
 
-__all__ = [
-    "KE_API_KEY",
-    "REDIS_URL",
-    "RATE_LIMIT_PER_MINUTE",
-    "RATE_LIMIT_BURST",
-    "RATE_LIMIT_WINDOW_SECONDS",
-    "SOLVE_CACHE_TTL_SECONDS",
-    "AI_ENABLED",
-    "AI_PROVIDER",
-    "AI_MODE",
-    "AI_TIMEOUT_SECONDS",
-    "MAX_STEPS",
-    "MAX_CHARS_ANSWER",
-    "LOW_CONFIDENCE_THRESHOLD",
-    "GEMINI_API_KEY",
-    "GEMINI_PRIMARY_MODEL",
-    "GEMINI_FALLBACK_MODEL",
-    "GEMINI_TIMEOUT_S",
-    "CB_FAILURE_THRESHOLD",
-    "CB_COOLDOWN_S",
-]
+# =========================
+# Compatibility exports (some older names referenced in logs)
+# =========================
+# Aliases to avoid future ImportError if older code imports these.
+SOLVE_CACHE_TTL = SOLVE_CACHE_TTL_SECONDS
+REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_SECONDS * 1000
