@@ -10,7 +10,8 @@ from config import (
     AI_PROVIDER,
     AI_MODE,
 )
-from models import GeminiClient, GeminiCircuitOpen
+from models import GeminiClient
+from ai_router import generate_json
 from verifier import basic_verify
 
 logger = logging.getLogger(__name__)
@@ -128,10 +129,8 @@ def solve(payload: dict) -> dict:
         )
 
     prompt = build_prompt(payload)
-    client = GeminiClient()
-
     try:
-        out = client.generate_json(prompt)
+        out = generate_json(prompt)
     except TimeoutError:
         # Deterministic timeout behavior (uses AI_TIMEOUT_SECONDS via config)
         logger.warning("AI timeout (%ss) provider=%s mode=%s", AI_TIMEOUT_SECONDS, AI_PROVIDER, AI_MODE)

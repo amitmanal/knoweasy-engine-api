@@ -1,131 +1,133 @@
-# config.py — SINGLE SOURCE OF TRUTH (Render-safe)
-# Full replacement. No missing env var should crash the app.
+from __future__ import annotations
 
 import os
+from typing import List
 from dotenv import load_dotenv
 
 load_dotenv()
 
+
 # -----------------------------
-# helpers
+# Helpers
 # -----------------------------
-def _env_str(key: str, default: str = "") -> str:
+def _get_str(key: str, default: str = "") -> str:
     v = os.getenv(key)
     return default if v is None else str(v).strip()
 
-def _env_int(key: str, default: int) -> int:
-    v = os.getenv(key)
-    if v is None or str(v).strip() == "":
-        return int(default)
+
+def _get_int(key: str, default: int) -> int:
     try:
-        return int(str(v).strip())
+        return int(os.getenv(key, default))
     except Exception:
-        return int(default)
+        return default
 
-def _env_float(key: str, default: float) -> float:
-    v = os.getenv(key)
-    if v is None or str(v).strip() == "":
-        return float(default)
+
+def _get_float(key: str, default: float) -> float:
     try:
-        return float(str(v).strip())
+        return float(os.getenv(key, default))
     except Exception:
-        return float(default)
+        return default
 
-def _env_bool(key: str, default: bool = False) -> bool:
+
+def _get_bool(key: str, default: bool = False) -> bool:
     v = os.getenv(key)
-    if v is None or str(v).strip() == "":
-        return bool(default)
-    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _get_csv(key: str, default: List[str]) -> List[str]:
+    v = os.getenv(key)
+    if not v:
+        return default
+    return [x.strip() for x in v.split(",") if x.strip()]
+
 
 # -----------------------------
-# service basics
+# App identity
 # -----------------------------
-SERVICE_NAME = _env_str("SERVICE_NAME", "knoweasy-engine-api")
-ENV = _env_str("ENV", "production")  # "development" / "production"
-LOG_LEVEL = _env_str("LOG_LEVEL", "INFO")
+ENV = _get_str("ENV", "production")
+APP_NAME = "knoweasy-engine-api"
 
-# request safety
-MAX_REQUEST_BYTES = _env_int("MAX_REQUEST_BYTES", 200_000)
 
 # -----------------------------
-# auth / api key (optional)
+# AI control (Phase-1C)
 # -----------------------------
-KE_API_KEY = _env_str("KE_API_KEY", "")  # optional guard
+AI_ENABLED = _get_bool("AI_ENABLED", True)
+AI_MODE = _get_str("AI_MODE", "production")
+AI_PROVIDER = _get_str("AI_PROVIDER", "gemini")
+AI_TIMEOUT_SECONDS = _get_int("AI_TIMEOUT_SECONDS", 25)
 
-# -----------------------------
-# rate limiting (router imports these)
-# -----------------------------
-RATE_LIMIT_PER_MINUTE = _env_int("RATE_LIMIT_PER_MINUTE", 60)
-RATE_LIMIT_BURST = _env_int("RATE_LIMIT_BURST", 20)
-RATE_LIMIT_WINDOW_SECONDS = _env_int("RATE_LIMIT_WINDOW_SECONDS", 60)
 
 # -----------------------------
-# Redis (optional)
+# API / security
 # -----------------------------
-REDIS_URL = _env_str("REDIS_URL", "")
+KE_API_KEY = _get_str("KE_API_KEY", "")
 
-# Solve cache (optional)
-SOLVE_CACHE_TTL_SECONDS = _env_int("SOLVE_CACHE_TTL_SECONDS", 300)
 
 # -----------------------------
-# AI settings (orchestrator/models import these)
+# Gemini config
 # -----------------------------
-AI_ENABLED = _env_bool("AI_ENABLED", True)
-AI_PROVIDER = _env_str("AI_PROVIDER", "gemini")  # gemini
-AI_MODE = _env_str("AI_MODE", "auto")            # auto / require / off
-AI_TIMEOUT_SECONDS = _env_int("AI_TIMEOUT_SECONDS", 18)
+GEMINI_API_KEY = _get_str("GEMINI_API_KEY", "")
+GEMINI_MODEL = _get_str("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_TEMPERATURE = _get_float("GEMINI_TEMPERATURE", 0.2)
+GEMINI_MAX_OUTPUT_TOKENS = _get_int("GEMINI_MAX_OUTPUT_TOKENS", 1200)
 
-MAX_STEPS = _env_int("MAX_STEPS", 6)
-MAX_CHARS_ANSWER = _env_int("MAX_CHARS_ANSWER", 2500)
-LOW_CONFIDENCE_THRESHOLD = _env_float("LOW_CONFIDENCE_THRESHOLD", 0.35)
+# --- Future providers (Phase-2 ready): OpenAI + Claude ---
+# Keep installed-code minimal: we use HTTPS calls via stdlib urllib. Just add keys to enable.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 
-# Gemini configuration
-GEMINI_API_KEY = _env_str("GEMINI_API_KEY", "")
-GEMINI_PRIMARY_MODEL = _env_str("GEMINI_PRIMARY_MODEL", "gemini-2.5-flash")
-GEMINI_FALLBACK_MODEL = _env_str("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "").strip()
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20240620").strip()
 
-# models.py expects this name
-GEMINI_TIMEOUT_S = AI_TIMEOUT_SECONDS
 
-# Circuit breaker (models.py expects these)
-CB_FAILURE_THRESHOLD = _env_int("CB_FAILURE_THRESHOLD", 3)
-CB_COOLDOWN_S = _env_int("CB_COOLDOWN_S", 30)
-
-# Auto-disable AI if key missing (LOCKED INTENT)
-if not GEMINI_API_KEY:
-    AI_ENABLED = False
 
 # -----------------------------
-# Database (optional)
+# Solver behavior (THIS FIXES THE CRASH)
 # -----------------------------
-DATABASE_URL = _env_str("DATABASE_URL", "")
-DB_SSLMODE = _env_str("DB_SSLMODE", "require")
+MAX_STEPS = _get_int("MAX_STEPS", 8)
+MAX_CHARS_ANSWER = int(os.getenv("MAX_CHARS_ANSWER", "3500"))
+LOW_CONFIDENCE_THRESHOLD = _get_float("LOW_CONFIDENCE_THRESHOLD", 0.55)
 
-# predictable exports
-__all__ = [
-    "SERVICE_NAME",
-    "ENV",
-    "LOG_LEVEL",
-    "MAX_REQUEST_BYTES",
-    "KE_API_KEY",
-    "RATE_LIMIT_PER_MINUTE",
-    "RATE_LIMIT_BURST",
-    "RATE_LIMIT_WINDOW_SECONDS",
-    "REDIS_URL",
-    "SOLVE_CACHE_TTL_SECONDS",
-    "AI_ENABLED",
-    "AI_PROVIDER",
-    "AI_MODE",
-    "AI_TIMEOUT_SECONDS",
-    "MAX_STEPS",
-    "MAX_CHARS_ANSWER",
-    "LOW_CONFIDENCE_THRESHOLD",
-    "GEMINI_API_KEY",
-    "GEMINI_PRIMARY_MODEL",
-    "GEMINI_FALLBACK_MODEL",
-    "GEMINI_TIMEOUT_S",
-    "CB_FAILURE_THRESHOLD",
-    "CB_COOLDOWN_S",
-    "DATABASE_URL",
-    "DB_SSLMODE",
-]
+
+# -----------------------------
+# Rate limiting
+# -----------------------------
+RATE_LIMIT_PER_MINUTE = _get_int("RATE_LIMIT_PER_MINUTE", 60)
+RATE_LIMIT_WINDOW_SECONDS = _get_int("RATE_LIMIT_WINDOW_SECONDS", 60)
+RATE_LIMIT_BURST = _get_int("RATE_LIMIT_BURST", 30)
+
+
+# -----------------------------
+# Cache
+# -----------------------------
+SOLVE_CACHE_ENABLED = _get_bool("SOLVE_CACHE_ENABLED", True)
+SOLVE_CACHE_TTL_SECONDS = _get_int("SOLVE_CACHE_TTL_SECONDS", 300)
+
+
+# -----------------------------
+# Database / Redis
+# -----------------------------
+DATABASE_URL = _get_str("DATABASE_URL", "")
+DB_ENABLED = bool(DATABASE_URL)
+
+REDIS_URL = _get_str("REDIS_URL", "")
+REDIS_ENABLED = bool(REDIS_URL)
+
+
+# -----------------------------
+# CORS
+# -----------------------------
+ALLOW_ORIGINS = _get_csv(
+    "ALLOW_ORIGINS",
+    [
+        "https://knoweasylearning.com",
+        "https://www.knoweasylearning.com",
+        "http://localhost",
+        "http://localhost:3000",
+    ],
+)
+ALLOW_METHODS = ["*"]
+ALLOW_HEADERS = ["*"]
+ALLOW_CREDENTIALS = True
