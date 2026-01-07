@@ -1,122 +1,185 @@
-# config.py
-# =========================================================
-# KnowEasy Engine API — Phase-1 Stable + Track-B Safe Config
-# Goal: NEVER crash on missing env vars / future imports
-# =========================================================
+"""
+KnowEasy Engine API — configuration (superset, backward-compatible)
+
+Goals:
+- Define every config symbol that any module might import from `config`.
+- Never crash at import-time if env vars are missing.
+- Keep Gemini as primary now; make OpenAI/Claude easy to add later via env vars.
+"""
+
+from __future__ import annotations
 
 import os
+from typing import List, Optional
 
-def _bool(name: str, default: str = "0") -> bool:
-    return os.getenv(name, default).strip() == "1"
 
-def _int(name: str, default: str) -> int:
+# -----------------------------
+# helpers
+# -----------------------------
+def _env(key: str, default: str = "") -> str:
+    v = os.getenv(key)
+    return default if v is None else str(v).strip()
+
+
+def _env_bool(key: str, default: bool = False) -> bool:
+    v = os.getenv(key)
+    if v is None or str(v).strip() == "":
+        return default
+    s = str(v).strip().lower()
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(key: str, default: int) -> int:
+    v = os.getenv(key)
+    if v is None or str(v).strip() == "":
+        return default
     try:
-        return int(os.getenv(name, default))
+        return int(str(v).strip())
     except Exception:
-        return int(default)
+        return default
 
-# =========================================================
-# ENVIRONMENT / SERVICE
-# =========================================================
-ENV = os.getenv("ENV", "production")
-SERVICE_NAME = os.getenv("SERVICE_NAME", "knoweasy-engine-api")
-SERVICE_VERSION = os.getenv("SERVICE_VERSION", "phase-1-stable")
 
-# =========================================================
-# CORS (optional; your main.py may configure separately)
-# =========================================================
-CORS_ALLOW_ORIGINS = [
-    x.strip()
-    for x in os.getenv(
-        "CORS_ALLOW_ORIGINS",
-        "https://knoweasylearning.com,https://www.knoweasylearning.com,http://localhost:5500,http://127.0.0.1:5500",
-    ).split(",")
-    if x.strip()
-]
+def _env_float(key: str, default: float) -> float:
+    v = os.getenv(key)
+    if v is None or str(v).strip() == "":
+        return default
+    try:
+        return float(str(v).strip())
+    except Exception:
+        return default
 
-# =========================================================
-# API KEY GUARD (optional)
-# =========================================================
-KE_API_KEY = os.getenv("KE_API_KEY", "")  # if empty => guard off
 
-# =========================================================
-# AI PROVIDERS — KEYS (safe if empty)
-# =========================================================
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "")
+def _env_list(key: str, default: Optional[List[str]] = None, sep: str = ",") -> List[str]:
+    if default is None:
+        default = []
+    v = os.getenv(key)
+    if v is None or str(v).strip() == "":
+        return list(default)
+    return [s.strip() for s in str(v).split(sep) if s.strip()]
 
-# =========================================================
-# AI MODELS (safe defaults)
-# =========================================================
-GEMINI_PRIMARY_MODEL = os.getenv("GEMINI_PRIMARY_MODEL", "gemini-1.5-flash")
-OPENAI_PRIMARY_MODEL = os.getenv("OPENAI_PRIMARY_MODEL", "gpt-4o-mini")
-CLAUDE_PRIMARY_MODEL = os.getenv("CLAUDE_PRIMARY_MODEL", "claude-3-haiku")
 
-# (Optional) routing defaults (Track-B)
-AI_PROVIDER_DEFAULT = os.getenv("AI_PROVIDER_DEFAULT", "gemini")  # gemini|openai|claude
-AI_PROVIDER_FALLBACKS = [
-    x.strip()
-    for x in os.getenv("AI_PROVIDER_FALLBACKS", "gemini,openai,claude").split(",")
-    if x.strip()
-]
+# -----------------------------
+# Environment / mode
+# -----------------------------
+ENV: str = _env("ENV", _env("APP_ENV", "production"))
+DEBUG: bool = _env_bool("DEBUG", False)
+LOG_LEVEL: str = _env("LOG_LEVEL", "INFO")
 
-# =========================================================
-# AI ENABLE FLAGS (THIS FIXES YOUR CURRENT CRASH)
-# =========================================================
-# Primary flag expected by your orchestrator imports
-AI_ENABLED = _bool("AI_ENABLED", "1")
+# CORS
+ALLOWED_ORIGINS: List[str] = _env_list("ALLOWED_ORIGINS", default=["*"])
+ALLOW_CREDENTIALS: bool = _env_bool("ALLOW_CREDENTIALS", False)
+ALLOWED_METHODS: List[str] = _env_list("ALLOWED_METHODS", default=["*"])
+ALLOWED_HEADERS: List[str] = _env_list("ALLOWED_HEADERS", default=["*"])
 
-# Provider-specific flags (future)
-ENABLE_GEMINI = _bool("ENABLE_GEMINI", "1")
-ENABLE_OPENAI = _bool("ENABLE_OPENAI", "1")
-ENABLE_CLAUDE = _bool("ENABLE_CLAUDE", "1")
+# Render / uvicorn
+HOST: str = _env("HOST", "0.0.0.0")
+PORT: int = _env_int("PORT", 10000)  # Render supplies PORT; default is safe
+UVICORN_WORKERS: int = _env_int("UVICORN_WORKERS", 1)
 
-# Compatibility aliases (in case older code imports these)
-GEMINI_ENABLED = ENABLE_GEMINI
-OPENAI_ENABLED = ENABLE_OPENAI
-CLAUDE_ENABLED = ENABLE_CLAUDE
+# Security / API keys
+API_KEY: str = _env("API_KEY", "")  # optional: if you gate endpoints later
 
-# =========================================================
-# AI TIMEOUTS / RETRIES
-# =========================================================
-AI_TIMEOUT_SECONDS = _int("AI_TIMEOUT_SECONDS", "25")
-MAX_AI_RETRIES = _int("MAX_AI_RETRIES", "2")
+# -----------------------------
+# AI Provider keys (Gemini primary)
+# -----------------------------
+# Gemini
+GEMINI_API_KEY: str = _env("GEMINI_API_KEY", _env("GOOGLE_API_KEY", ""))
+GEMINI_PRIMARY_MODEL: str = _env("GEMINI_PRIMARY_MODEL", _env("GEMINI_MODEL", "gemini-2.0-flash"))
+GEMINI_FALLBACK_MODELS: List[str] = _env_list(
+    "GEMINI_FALLBACK_MODELS", default=["gemini-2.0-flash", "gemini-1.5-flash"]
+)
+GEMINI_TEMPERATURE: float = _env_float("GEMINI_TEMPERATURE", 0.2)
+GEMINI_MAX_OUTPUT_TOKENS: int = _env_int("GEMINI_MAX_OUTPUT_TOKENS", 1024)
+GEMINI_TIMEOUT_SECONDS: int = _env_int("GEMINI_TIMEOUT_SECONDS", 40)
 
-# =========================================================
-# INPUT LIMITS (abuse safety)
-# =========================================================
-MAX_QUESTION_CHARS = _int("MAX_QUESTION_CHARS", "3000")
-MAX_CONTEXT_CHARS = _int("MAX_CONTEXT_CHARS", "6000")
+# OpenAI (future)
+OPENAI_API_KEY: str = _env("OPENAI_API_KEY", "")
+OPENAI_ORG_ID: str = _env("OPENAI_ORG_ID", "")
+OPENAI_PRIMARY_MODEL: str = _env("OPENAI_PRIMARY_MODEL", "gpt-4o-mini")  # unused unless enabled
+OPENAI_TEMPERATURE: float = _env_float("OPENAI_TEMPERATURE", 0.2)
+OPENAI_TIMEOUT_SECONDS: int = _env_int("OPENAI_TIMEOUT_SECONDS", 40)
 
-# =========================================================
-# RATE LIMITING (Phase-1 in-memory)
-# =========================================================
-RATE_LIMIT_WINDOW_SECONDS = _int("RATE_LIMIT_WINDOW_SECONDS", "60")
-RATE_LIMIT_PER_MINUTE = _int("RATE_LIMIT_PER_MINUTE", "30")
-RATE_LIMIT_BURST = _int("RATE_LIMIT_BURST", "10")
+# Claude (Anthropic, future)
+CLAUDE_API_KEY: str = _env("CLAUDE_API_KEY", _env("ANTHROPIC_API_KEY", ""))
+CLAUDE_PRIMARY_MODEL: str = _env("CLAUDE_PRIMARY_MODEL", "claude-3-5-sonnet-latest")
+CLAUDE_TEMPERATURE: float = _env_float("CLAUDE_TEMPERATURE", 0.2)
+CLAUDE_TIMEOUT_SECONDS: int = _env_int("CLAUDE_TIMEOUT_SECONDS", 40)
 
-# Compatibility alias (some files may import this name)
-RATE_LIMIT_WINDOW = RATE_LIMIT_WINDOW_SECONDS
+# AI toggle
+AI_ENABLED: bool = _env_bool("AI_ENABLED", True)
 
-# =========================================================
-# REDIS (optional; shared rate limit / cache later)
-# =========================================================
-REDIS_URL = os.getenv("REDIS_URL", "")
-ENABLE_REDIS_RATE_LIMIT = _bool("ENABLE_REDIS_RATE_LIMIT", "0")
+# Provider routing (Track‑B later; safe to exist now)
+AI_PROVIDER_PRIMARY: str = _env("AI_PROVIDER_PRIMARY", "gemini")  # gemini|openai|claude
+AI_PROVIDER_FALLBACKS: List[str] = _env_list("AI_PROVIDER_FALLBACKS", default=["gemini"])
+AI_PROVIDER_STRICT: bool = _env_bool("AI_PROVIDER_STRICT", False)  # if True, no fallback
 
-# =========================================================
-# SOLVE CACHE (optional; router.py expects TTL constant)
-# =========================================================
-ENABLE_SOLVE_CACHE = _bool("ENABLE_SOLVE_CACHE", "0")
-SOLVE_CACHE_TTL_SECONDS = _int("SOLVE_CACHE_TTL_SECONDS", "900")  # 15 min
+# -----------------------------
+# Rate limiting / abuse protection
+# -----------------------------
+RATE_LIMIT_ENABLED: bool = _env_bool("RATE_LIMIT_ENABLED", True)
+RATE_LIMIT_REQUESTS: int = _env_int("RATE_LIMIT_REQUESTS", 60)
+RATE_LIMIT_WINDOW_SECONDS: int = _env_int("RATE_LIMIT_WINDOW_SECONDS", 60)
+RATE_LIMIT_TRUST_PROXY_HEADERS: bool = _env_bool("RATE_LIMIT_TRUST_PROXY_HEADERS", True)
 
-# =========================================================
-# DATABASE (optional best-effort logging)
-# =========================================================
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+# -----------------------------
+# Caching (in-memory / optional external later)
+# -----------------------------
+SOLVE_CACHE_ENABLED: bool = _env_bool("SOLVE_CACHE_ENABLED", True)
+SOLVE_CACHE_TTL_SECONDS: int = _env_int("SOLVE_CACHE_TTL_SECONDS", 3600)
+SOLVE_CACHE_MAX_ITEMS: int = _env_int("SOLVE_CACHE_MAX_ITEMS", 500)
 
-# =========================================================
-# LOGGING
-# =========================================================
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+# -----------------------------
+# Database logging (must never crash app if DB missing)
+# -----------------------------
+DATABASE_URL: str = _env("DATABASE_URL", "")
+DB_LOGGING_ENABLED: bool = _env_bool("DB_LOGGING_ENABLED", False)
+DB_CONNECT_TIMEOUT_SECONDS: int = _env_int("DB_CONNECT_TIMEOUT_SECONDS", 5)
+DB_STATEMENT_TIMEOUT_MS: int = _env_int("DB_STATEMENT_TIMEOUT_MS", 5000)
+
+# Backward-compat aliases (older names that might exist in code)
+DB_URL: str = DATABASE_URL
+ENABLE_DB_LOGGING: bool = DB_LOGGING_ENABLED
+
+# -----------------------------
+# Request handling / timeouts
+# -----------------------------
+REQUEST_TIMEOUT_SECONDS: int = _env_int("REQUEST_TIMEOUT_SECONDS", 60)
+MAX_REQUEST_BODY_BYTES: int = _env_int("MAX_REQUEST_BODY_BYTES", 2_000_000)
+
+# -----------------------------
+# Misc feature flags (safe placeholders)
+# -----------------------------
+ENABLE_METRICS: bool = _env_bool("ENABLE_METRICS", False)
+ENABLE_TRACING: bool = _env_bool("ENABLE_TRACING", False)
+
+
+def summarize_config_for_logs() -> dict:
+    """Return a safe summary (no secrets) that can be printed at startup."""
+
+    def _mask(s: str) -> str:
+        if not s:
+            return ""
+        if len(s) <= 6:
+            return "***"
+        return s[:3] + "***" + s[-2:]
+
+    return {
+        "ENV": ENV,
+        "DEBUG": DEBUG,
+        "LOG_LEVEL": LOG_LEVEL,
+        "AI_ENABLED": AI_ENABLED,
+        "AI_PROVIDER_PRIMARY": AI_PROVIDER_PRIMARY,
+        "GEMINI_PRIMARY_MODEL": GEMINI_PRIMARY_MODEL,
+        "OPENAI_PRIMARY_MODEL": OPENAI_PRIMARY_MODEL,
+        "CLAUDE_PRIMARY_MODEL": CLAUDE_PRIMARY_MODEL,
+        "GEMINI_API_KEY": _mask(GEMINI_API_KEY),
+        "OPENAI_API_KEY": _mask(OPENAI_API_KEY),
+        "CLAUDE_API_KEY": _mask(CLAUDE_API_KEY),
+        "RATE_LIMIT_ENABLED": RATE_LIMIT_ENABLED,
+        "RATE_LIMIT_REQUESTS": RATE_LIMIT_REQUESTS,
+        "RATE_LIMIT_WINDOW_SECONDS": RATE_LIMIT_WINDOW_SECONDS,
+        "SOLVE_CACHE_ENABLED": SOLVE_CACHE_ENABLED,
+        "SOLVE_CACHE_TTL_SECONDS": SOLVE_CACHE_TTL_SECONDS,
+        "DB_LOGGING_ENABLED": DB_LOGGING_ENABLED,
+        "DATABASE_URL_SET": bool(DATABASE_URL),
+    }
