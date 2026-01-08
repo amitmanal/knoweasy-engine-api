@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from router import router as api_router
+from auth_router import router as auth_router
 from redis_store import redis_health
 from db import db_health
 
@@ -79,6 +80,7 @@ async def limit_request_body_size(request: Request, call_next):
 # Routes
 # -----------------------------
 app.include_router(api_router)
+app.include_router(auth_router)
 
 # -----------------------------
 # Health & version endpoints (Render + monitoring)
