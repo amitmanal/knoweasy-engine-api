@@ -10,7 +10,8 @@ from config import (
     AI_PROVIDER,
     AI_MODE,
 )
-from models import GeminiClient, GeminiCircuitOpen
+from models import GeminiClient
+from ai_router import generate_json
 from verifier import basic_verify
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,8 @@ Rules:
 - Language: {language}
 - Keep final_answer under {MAX_CHARS_ANSWER} characters.
 - Keep steps <= {MAX_STEPS}.
-- If question is unclear, ask 1-2 short clarifying questions inside final_answer.
+- If question is unclear / too short / typo-like: FIRST give a short NCERT-style overview or definition relevant to the subject (2–5 lines), THEN ask exactly 1 clarifying question at the end of final_answer.
+- If there is a likely typo in a key term (e.g., 'benxzene'), correct it and proceed with the overview.
 - Do not include markdown fences. Output ONLY JSON.
 
 Question:
@@ -128,10 +130,8 @@ def solve(payload: dict) -> dict:
         )
 
     prompt = build_prompt(payload)
-    client = GeminiClient()
-
     try:
-        out = client.generate_json(prompt)
+        out = generate_json(prompt)
     except TimeoutError:
         # Deterministic timeout behavior (uses AI_TIMEOUT_SECONDS via config)
         logger.warning("AI timeout (%ss) provider=%s mode=%s", AI_TIMEOUT_SECONDS, AI_PROVIDER, AI_MODE)
@@ -199,7 +199,7 @@ def solve(payload: dict) -> dict:
     # Low-confidence second pass (kept, but bounded)
     if out["confidence"] < LOW_CONFIDENCE_THRESHOLD:
         try:
-            out2 = client.generate_json(prompt)
+            out2 = generate_json(prompt)
             out2 = _normalize_output(out2)
             adj2, flags2, assumptions2 = basic_verify(question, out2["final_answer"], out2["steps"])
             out2["flags"] = list(dict.fromkeys((out2.get("flags") or []) + flags2))

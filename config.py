@@ -1,27 +1,32 @@
-"""Central configuration for KnowEasy Engine API.
+"""KnowEasy Engine API — Superset config (anti-ImportError)
 
-LOCKED INTENT:
-- This module must export ALL constants imported by router.py / orchestrator.py / redis_store.py / db.py.
-- Missing env vars MUST NOT crash startup.
-- AI auto-disables if GEMINI_API_KEY is missing.
-- DB & Redis are optional.
+This file intentionally defines *all* names that other modules import from `config`,
+with safe defaults so Render never crash-loops due to missing env vars.
+
+Gemini-only execution is the default. OpenAI/Claude are future-ready via env keys.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Optional
+import logging
+from typing import List, Optional
 
+# -----------------------------
+# helpers
+# -----------------------------
+def _env(key: str, default: str = "") -> str:
+    v = os.getenv(key)
+    return default if v is None else str(v).strip()
 
-def _env_str(name: str, default: str = "") -> str:
-    v = os.getenv(name)
-    if v is None:
+def _env_bool(key: str, default: bool = False) -> bool:
+    v = os.getenv(key)
+    if v is None or str(v).strip() == "":
         return default
-    return str(v).strip()
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
-
-def _env_int(name: str, default: int) -> int:
-    v = os.getenv(name)
+def _env_int(key: str, default: int) -> int:
+    v = os.getenv(key)
     if v is None or str(v).strip() == "":
         return default
     try:
@@ -29,9 +34,8 @@ def _env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
-
-def _env_float(name: str, default: float) -> float:
-    v = os.getenv(name)
+def _env_float(key: str, default: float) -> float:
+    v = os.getenv(key)
     if v is None or str(v).strip() == "":
         return default
     try:
@@ -39,92 +43,90 @@ def _env_float(name: str, default: float) -> float:
     except Exception:
         return default
 
-
-def _env_bool(name: str, default: bool) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    s = str(v).strip().lower()
-    if s in {"1", "true", "yes", "y", "on"}:
-        return True
-    if s in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
+def _env_list(key: str, default: Optional[List[str]] = None, sep: str = ",") -> List[str]:
+    if default is None:
+        default = []
+    v = os.getenv(key)
+    if v is None or str(v).strip() == "":
+        return list(default)
+    return [s.strip() for s in str(v).split(sep) if s.strip()]
 
 
-# =========================
-# Service identity
-# =========================
-SERVICE_NAME = _env_str("SERVICE_NAME", "knoweasy-engine-api")
-ENV = _env_str("ENV", _env_str("RENDER_ENV", "dev"))
-LOG_LEVEL = _env_str("LOG_LEVEL", "INFO")
+# -----------------------------
+# logging (must exist for imports)
+# -----------------------------
+LOG_LEVEL = _env("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
+logger = logging.getLogger("knoweasy-engine-api")
 
-# =========================
-# API security / auth (optional)
-# =========================
-# Kept for backward compatibility with older code paths.
-KE_API_KEY = _env_str("KE_API_KEY", "")  # optional API auth
 
-# =========================
-# AI configuration
-# =========================
-AI_PROVIDER = _env_str("AI_PROVIDER", "gemini")
-AI_MODE = _env_str("AI_MODE", "default")
+# -----------------------------
+# core app env
+# -----------------------------
+ENV = _env("ENV", _env("APP_ENV", "production"))
+DEBUG = _env_bool("DEBUG", False)
 
-# Primary key used by google-genai client
-GEMINI_API_KEY = _env_str("GEMINI_API_KEY", "")
+HOST = _env("HOST", "0.0.0.0")
+PORT = _env_int("PORT", 10000)
+UVICORN_WORKERS = _env_int("UVICORN_WORKERS", 1)
 
-# NOTE: You said Gemini 2.5 Flash/Pro were working for you before.
-# So defaults are set to those. You can override via Render env vars.
-GEMINI_PRIMARY_MODEL = _env_str("GEMINI_PRIMARY_MODEL", "gemini-2.5-flash")
-GEMINI_FALLBACK_MODEL = _env_str("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
+# Optional API key to protect endpoints later
+KE_API_KEY = _env("KE_API_KEY", _env("API_KEY", ""))
 
-# Timeouts and output constraints
-AI_TIMEOUT_SECONDS = _env_int("AI_TIMEOUT_SECONDS", 20)
-MAX_STEPS = _env_int("MAX_STEPS", 8)
-MAX_CHARS_ANSWER = _env_int("MAX_CHARS_ANSWER", 900)
-LOW_CONFIDENCE_THRESHOLD = _env_float("LOW_CONFIDENCE_THRESHOLD", 0.45)
 
-# AI is enabled only if:
-# - AI_ENABLED env is true (or default true)
-# - and we actually have a Gemini API key present
-AI_ENABLED = _env_bool("AI_ENABLED", True) and bool(GEMINI_API_KEY)
+# -----------------------------
+# AI control (names expected by repo)
+# -----------------------------
+AI_ENABLED = _env_bool("AI_ENABLED", True)
 
-# =========================
-# Rate limit (router + optional Redis)
-# =========================
-RATE_LIMIT_PER_MINUTE = _env_int("RATE_LIMIT_PER_MINUTE", 20)
+# Keep both names to avoid breaking older imports
+AI_PROVIDER = _env("AI_PROVIDER", _env("AI_PROVIDER_PRIMARY", "gemini"))   # gemini|openai|claude
+AI_MODE = _env("AI_MODE", "stable")  # placeholder: stable|debug|strict etc
+AI_TIMEOUT_SECONDS = _env_int("AI_TIMEOUT_SECONDS", _env_int("REQUEST_TIMEOUT_SECONDS", 60))
+
+# Gemini
+GEMINI_API_KEY = _env("GEMINI_API_KEY", _env("GOOGLE_API_KEY", ""))
+GEMINI_PRIMARY_MODEL = _env("GEMINI_PRIMARY_MODEL", _env("GEMINI_MODEL", "gemini-2.0-flash"))
+GEMINI_FALLBACK_MODEL = _env("GEMINI_FALLBACK_MODEL", "gemini-1.5-flash")
+GEMINI_TIMEOUT_S = _env_int("GEMINI_TIMEOUT_S", _env_int("GEMINI_TIMEOUT_SECONDS", 40))
+
+# OpenAI (future)
+OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
+OPENAI_MODEL = _env("OPENAI_MODEL", _env("OPENAI_PRIMARY_MODEL", "gpt-4o-mini"))
+
+# Claude (future)
+CLAUDE_API_KEY = _env("CLAUDE_API_KEY", _env("ANTHROPIC_API_KEY", ""))
+CLAUDE_MODEL = _env("CLAUDE_MODEL", _env("CLAUDE_PRIMARY_MODEL", "claude-3-5-sonnet-latest"))
+
+# Confidence / output shaping (safe defaults)
+LOW_CONFIDENCE_THRESHOLD = _env_float("LOW_CONFIDENCE_THRESHOLD", 0.35)
+MAX_STEPS = _env_int("MAX_STEPS", 12)
+MAX_CHARS_ANSWER = _env_int("MAX_CHARS_ANSWER", 6000)
+
+
+# -----------------------------
+# rate limiting (names expected by repo)
+# -----------------------------
 RATE_LIMIT_WINDOW_SECONDS = _env_int("RATE_LIMIT_WINDOW_SECONDS", 60)
+RATE_LIMIT_PER_MINUTE = _env_int("RATE_LIMIT_PER_MINUTE", 60)
+RATE_LIMIT_BURST = _env_int("RATE_LIMIT_BURST", 10)
 
-# In-memory per-process safety limit (kept modest for free tier)
-MAX_REQUESTS_INFLIGHT = _env_int("MAX_REQUESTS_INFLIGHT", 30)
 
-# =========================
-# Solve cache (optional Redis)
-# =========================
+# -----------------------------
+# cache / redis (names expected by repo)
+# -----------------------------
 SOLVE_CACHE_TTL_SECONDS = _env_int("SOLVE_CACHE_TTL_SECONDS", 3600)
+REDIS_URL = _env("REDIS_URL", _env("REDIS_TLS_URL", ""))
 
-# =========================
-# Redis (optional)
-# =========================
-REDIS_URL = _env_str("REDIS_URL", "")  # empty => Redis disabled
 
-# =========================
-# Database (optional)
-# =========================
-DATABASE_URL = _env_str("DATABASE_URL", _env_str("DATABASE_URL_INTERNAL", ""))
-DB_SSLMODE = _env_str("DB_SSLMODE", "require")
+# -----------------------------
+# circuit breaker (names expected by repo)
+# -----------------------------
+CB_FAILURE_THRESHOLD = _env_int("CB_FAILURE_THRESHOLD", 3)
+CB_COOLDOWN_S = _env_int("CB_COOLDOWN_S", 20)
 
-# =========================
-# HTTP / CORS
-# =========================
-# Comma-separated list. "*" allows all.
-CORS_ALLOW_ORIGINS = _env_str("CORS_ALLOW_ORIGINS", "*")
-REQUEST_TIMEOUT_SECONDS = _env_int("REQUEST_TIMEOUT_SECONDS", 30)
 
-# =========================
-# Compatibility exports (some older names referenced in logs)
-# =========================
-# Aliases to avoid future ImportError if older code imports these.
-SOLVE_CACHE_TTL = SOLVE_CACHE_TTL_SECONDS
-REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_SECONDS * 1000
+# -----------------------------
+# backwards-compatible extras (safe)
+# -----------------------------
+ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=["*"])
