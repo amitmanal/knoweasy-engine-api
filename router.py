@@ -2,6 +2,8 @@
 import hashlib
 import json
 import time
+import os
+import threading
 from typing import Dict, Tuple
 
 from fastapi import APIRouter, Request, Header
@@ -23,6 +25,13 @@ from redis_store import setex_json as redis_setex_json
 from redis_store import incr_with_ttl as redis_incr_with_ttl
 
 router = APIRouter()
+
+
+# Global concurrency guardrail (prevents provider overload under spikes).
+# Limits concurrent /solve executions per instance.
+_MAX_CONCURRENT_SOLVES = int(os.getenv("MAX_CONCURRENT_SOLVES", "40"))
+_SOLVE_QUEUE_WAIT_SECONDS = int(os.getenv("SOLVE_QUEUE_WAIT_SECONDS", "12"))
+_SOLVE_SEM = threading.BoundedSemaphore(value=max(1, _MAX_CONCURRENT_SOLVES))
 
 # In-memory rate limit buckets: {ip: (window_start_epoch, count)}
 # Used ONLY if Redis is not enabled.
@@ -149,7 +158,24 @@ def solve_route(
 
     try:
         t0 = time.perf_counter()
-        out = solve(payload)
+        acquired = _SOLVE_SEM.acquire(timeout=_SOLVE_QUEUE_WAIT_SECONDS)
+        if not acquired:
+            return JSONResponse(
+                status_code=503,
+                content=_safe_failure(
+                    "High traffic right now. Please try again in a few seconds 😊",
+                    "OVERLOADED",
+                ).model_dump(),
+            )
+
+        try:
+            out = solve(payload)
+        finally:
+            try:
+                _SOLVE_SEM.release()
+            except Exception:
+                pass
+
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         # Best-effort DB log (never breaks the response)

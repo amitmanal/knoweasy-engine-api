@@ -58,7 +58,8 @@ Rules:
 - Language: {language}
 - Keep final_answer under {MAX_CHARS_ANSWER} characters.
 - Keep steps <= {MAX_STEPS}.
-- If question is unclear, ask 1-2 short clarifying questions inside final_answer.
+- If question is unclear / too short / typo-like: FIRST give a short NCERT-style overview or definition relevant to the subject (2–5 lines), THEN ask exactly 1 clarifying question at the end of final_answer.
+- If there is a likely typo in a key term (e.g., 'benxzene'), correct it and proceed with the overview.
 - Do not include markdown fences. Output ONLY JSON.
 
 Question:
