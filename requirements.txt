@@ -6,3 +6,4 @@ google-genai>=0.7.0
 SQLAlchemy>=2.0.0,<3
 psycopg2-binary>=2.9.0,<3
 redis>=5.0.0
+requests>=2.31.0
