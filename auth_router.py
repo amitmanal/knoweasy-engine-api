@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
 from auth_utils import normalize_email, is_valid_email, auth_is_configured, new_otp_code, new_session_token
@@ -14,7 +14,7 @@ from auth_store import (
     session_user,
     delete_session,
 )
-from email_service import smtp_is_configured, send_otp_email
+from email_service import email_is_configured, email_provider_debug, send_otp_email
 from auth_schemas import RequestOtpIn, RequestOtpOut, VerifyOtpIn, VerifyOtpOut, LogoutIn, BasicOut
 
 logger = logging.getLogger("knoweasy-engine-api.auth")
@@ -28,7 +28,8 @@ def _role_norm(role: str) -> str:
     return r
 
 @router.post("/auth/request-otp", response_model=RequestOtpOut)
-def request_otp(payload: RequestOtpIn):
+def request_otp(payload: RequestOtpIn, request: Request):
+    rid = getattr(getattr(request, "state", None), "rid", "") or "-"
     if not auth_is_configured():
         return JSONResponse(status_code=503, content={"ok": False, "message": "Auth not configured (missing AUTH_SECRET_KEY)", "cooldown_seconds": 0})
 
@@ -46,19 +47,35 @@ def request_otp(payload: RequestOtpIn):
             content={"ok": False, "message": "Please wait before requesting another code.", "cooldown_seconds": int(retry_after)},
         )
 
-    if not smtp_is_configured():
-        return JSONResponse(status_code=503, content={"ok": False, "message": "Email sender not configured (missing SMTP env vars).", "cooldown_seconds": 0})
+    if not email_is_configured():
+        dbg = email_provider_debug()
+        logger.error(f"[RID:{rid}] Email not configured. debug={dbg}")
+        return JSONResponse(status_code=503, content={"ok": False, "message": "Email sender not configured (missing Resend/SMTP env vars).", "cooldown_seconds": 0})
 
     otp_plain, otp_hash = new_otp_code()
     store_otp(email, role, otp_hash)
 
     try:
-        send_otp_email(to_email=email, otp=otp_plain, role=role)
-    except Exception:
-        logger.exception("Failed to send OTP email")
+        logger.info(f"[RID:{rid}] Sending OTP email. to={_mask_email(email)} role={role} provider={email_provider_debug().get('provider')}")
+        send_otp_email(to_email=email, otp=otp_plain)
+        logger.info(f"[RID:{rid}] OTP email send triggered")
+    except Exception as e:
+        logger.exception(f"[RID:{rid}] Failed to send OTP email: {e}")
         return JSONResponse(status_code=500, content={"ok": False, "message": "Failed to send OTP. Please try again.", "cooldown_seconds": 0})
 
     return {"ok": True, "message": "OTP sent to your email.", "cooldown_seconds": 30}
+
+
+def _mask_email(email: str) -> str:
+    try:
+        local, domain = email.split("@", 1)
+        if len(local) <= 2:
+            local_mask = local[:1] + "*"
+        else:
+            local_mask = local[:2] + "***"
+        return f"{local_mask}@{domain}"
+    except Exception:
+        return "***"
 
 @router.post("/auth/verify-otp", response_model=VerifyOtpOut)
 def verify_otp_code(payload: VerifyOtpIn):
