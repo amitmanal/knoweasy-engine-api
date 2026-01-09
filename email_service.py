@@ -1,191 +1,175 @@
-"""Email sending for OTP.
+"""Email sending utilities.
 
-This module supports two delivery modes:
-1) SMTP (traditional) - good for local/dev or paid hosting that allows SMTP outbound.
-2) Resend (HTTPS API) - works on platforms that block SMTP outbound (e.g., Render Free tier).
+Supports:
+- SMTP (Hostinger or any SMTP server)
+- Resend (API) for scalable transactional email
 
-Environment variables (SMTP):
-- SMTP_HOST (e.g., smtp.hostinger.com)
-- SMTP_PORT (465, 587, etc)
-- SMTP_USER (full email address)
-- SMTP_PASS (mailbox password)
-- SMTP_FROM (from email address)
-- SMTP_FROM_NAME (display name, optional)
-- SMTP_SECURITY: "ssl" or "tls" (optional; inferred from port if missing)
+Decision order:
+1) If EMAIL_PROVIDER=resend and RESEND_API_KEY is set -> Resend
+2) If EMAIL_PROVIDER=smtp and SMTP_* configured -> SMTP
+3) Fallback: prefer Resend if configured, else SMTP
 
-Environment variables (Resend):
-- EMAIL_PROVIDER="resend" (or "auto")
-- RESEND_API_KEY (required for Resend)
-- RESEND_FROM (optional; defaults to SMTP_FROM)
-- RESEND_FROM_NAME (optional; defaults to SMTP_FROM_NAME)
-
-Provider selection:
-- EMAIL_PROVIDER="smtp"   -> SMTP only
-- EMAIL_PROVIDER="resend" -> Resend only
-- EMAIL_PROVIDER="auto"   -> try SMTP, then Resend if SMTP fails
+This file is intentionally dependency-light (uses stdlib only).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import smtplib
-import socket
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from typing import Optional
-
-import logging
-
-logger = logging.getLogger("knoweasy.email")
-
-try:
-    import requests  # type: ignore
-except Exception:  # pragma: no cover
-    requests = None  # type: ignore
+import ssl
+from email.message import EmailMessage
+from typing import Optional, Tuple
+from urllib import request, error
 
 
-def _get_env(key: str, default: Optional[str] = None) -> Optional[str]:
-    val = os.getenv(key)
-    return val if val not in (None, "") else default
+def _env(name: str, default: str = "") -> str:
+    v = os.getenv(name)
+    return (v if v is not None else default).strip()
 
 
-def _smtp_security(host: str, port: int) -> str:
-    # Default inference:
-    # - 465: implicit SSL
-    # - 587: STARTTLS
-    sec = (_get_env("SMTP_SECURITY", "") or "").strip().lower()
-    if sec in ("ssl", "tls"):
-        return sec
-    if port == 465:
-        return "ssl"
-    return "tls"
+# Generic "from" settings (recommended)
+EMAIL_FROM = _env("EMAIL_FROM") or _env("SMTP_FROM")  # allow legacy SMTP_FROM
+SMTP_FROM_NAME = _env("SMTP_FROM_NAME", "KnowEasy")
+
+# SMTP settings
+SMTP_HOST = _env("SMTP_HOST")
+SMTP_PORT = int(_env("SMTP_PORT", "587") or "587")
+SMTP_USER = _env("SMTP_USER")
+SMTP_PASS = _env("SMTP_PASS")
+SMTP_SECURITY = _env("SMTP_SECURITY", "starttls").lower()  # starttls | ssl
+
+# Resend settings
+RESEND_API_KEY = _env("RESEND_API_KEY")
+EMAIL_REGION = _env("EMAIL_REGION")  # optional; kept for compatibility
+RESEND_ENDPOINT = "https://api.resend.com/emails"
+
+# Provider selector
+EMAIL_PROVIDER = (_env("EMAIL_PROVIDER") or "").lower()  # resend | smtp | ""
 
 
-def _send_via_smtp(to_email: str, subject: str, body_text: str) -> None:
-    host = _get_env("SMTP_HOST")
-    port_str = _get_env("SMTP_PORT")
-    user = _get_env("SMTP_USER")
-    password = _get_env("SMTP_PASS")
-    from_email = _get_env("SMTP_FROM", user)
-    from_name = _get_env("SMTP_FROM_NAME", "KnowEasy")
+def smtp_is_configured() -> bool:
+    return all([SMTP_HOST, SMTP_USER, SMTP_PASS, EMAIL_FROM])
 
-    if not host or not port_str or not user or not password or not from_email:
-        raise RuntimeError(
-            "SMTP is not fully configured. Required: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM."
-        )
 
-    try:
-        port = int(port_str)
-    except ValueError as e:
-        raise RuntimeError("SMTP_PORT must be an integer.") from e
+def resend_is_configured() -> bool:
+    return bool(RESEND_API_KEY and EMAIL_FROM)
 
-    msg = MIMEMultipart()
-    msg["From"] = f"{from_name} <{from_email}>"
+
+def _choose_provider() -> str:
+    # Explicit selection wins (if configured)
+    if EMAIL_PROVIDER == "resend" and resend_is_configured():
+        return "resend"
+    if EMAIL_PROVIDER == "smtp" and smtp_is_configured():
+        return "smtp"
+    # Fallback preference: Resend first (more scalable)
+    if resend_is_configured():
+        return "resend"
+    if smtp_is_configured():
+        return "smtp"
+    return "none"
+
+
+def _build_otp_content(otp: str, minutes_valid: int = 10) -> Tuple[str, str]:
+    subject = "Your KnowEasy login code"
+    text = (
+        f"Your KnowEasy login code is: {otp}\n\n"
+        f"This code expires in {minutes_valid} minutes.\n"
+        "If you didn't request this, you can ignore this email.\n"
+    )
+
+    html = f"""<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f7f7f7;font-family:Arial,Helvetica,sans-serif;">
+    <div style="max-width:520px;margin:32px auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #eaeaea;">
+      <div style="padding:20px 22px;background:#111827;color:#ffffff;">
+        <div style="font-size:16px;font-weight:700;letter-spacing:0.2px;">KnowEasy</div>
+        <div style="opacity:0.9;margin-top:4px;">Login verification</div>
+      </div>
+      <div style="padding:22px;color:#111827;">
+        <div style="font-size:14px;line-height:1.5;">Use this code to login:</div>
+        <div style="margin:14px 0 16px 0;font-size:28px;font-weight:800;letter-spacing:4px;">{otp}</div>
+        <div style="font-size:12px;color:#6b7280;line-height:1.5;">Expires in {minutes_valid} minutes.</div>
+      </div>
+      <div style="padding:14px 22px;background:#f9fafb;color:#6b7280;font-size:12px;line-height:1.4;">
+        If you didn't request this, ignore this email.
+      </div>
+    </div>
+  </body>
+</html>
+"""
+    return subject, text, html
+
+
+def _send_via_smtp(to_email: str, subject: str, text: str, html: str) -> None:
+    msg = EmailMessage()
+    msg["From"] = f"{SMTP_FROM_NAME} <{EMAIL_FROM}>" if SMTP_FROM_NAME else EMAIL_FROM
     msg["To"] = to_email
     msg["Subject"] = subject
-    msg.attach(MIMEText(body_text, "plain", "utf-8"))
+    msg.set_content(text)
+    msg.add_alternative(html, subtype="html")
 
-    security = _smtp_security(host, port)
-    logger.info("Sending OTP email via SMTP (%s:%s, security=%s) to=%s", host, port, security, to_email)
+    if SMTP_SECURITY == "ssl":
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=25) as server:
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+        return
 
-    if security == "ssl":
-        server = smtplib.SMTP_SSL(host, port, timeout=20)
-    else:
-        server = smtplib.SMTP(host, port, timeout=20)
-
-    try:
+    # default STARTTLS
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=25) as server:
         server.ehlo()
-        if security == "tls":
-            server.starttls()
-            server.ehlo()
-        server.login(user, password)
-        server.sendmail(from_email, [to_email], msg.as_string())
-    finally:
-        try:
-            server.quit()
-        except Exception:
-            pass
+        server.starttls(context=ssl.create_default_context())
+        server.ehlo()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg)
 
 
-def _send_via_resend(to_email: str, subject: str, body_text: str) -> None:
-    api_key = _get_env("RESEND_API_KEY")
-    if not api_key:
-        raise RuntimeError("RESEND_API_KEY is missing (cannot send via Resend).")
-
-    if requests is None:
-        raise RuntimeError("Python package 'requests' is missing; add it to requirements.txt.")
-
-    from_email = _get_env("RESEND_FROM") or _get_env("SMTP_FROM") or _get_env("SMTP_USER")
-    from_name = _get_env("RESEND_FROM_NAME") or _get_env("SMTP_FROM_NAME") or "KnowEasy"
-
-    if not from_email:
-        raise RuntimeError("RESEND_FROM (or SMTP_FROM) is missing.")
-
-    # Resend allows "Name <email>" format.
-    from_field = f"{from_name} <{from_email}>"
-
-    logger.info("Sending OTP email via Resend to=%s from=%s", to_email, from_email)
-
-    resp = requests.post(
-        "https://api.resend.com/emails",
+def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
+    payload = {
+        "from": EMAIL_FROM,
+        "to": [to_email],
+        "subject": subject,
+        "text": text,
+        "html": html,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        RESEND_ENDPOINT,
+        data=data,
         headers={
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={
-            "from": from_field,
-            "to": [to_email],
-            "subject": subject,
-            "text": body_text,
-            "reply_to": from_email,
-        },
-        timeout=20,
+        method="POST",
     )
-    if resp.status_code >= 400:
-        # Avoid logging full response body if it might contain hints, but include first 400 chars for debugging.
-        snippet = (resp.text or "")[:400]
-        raise RuntimeError(f"Resend API error {resp.status_code}: {snippet}")
+    try:
+        with request.urlopen(req, timeout=25) as resp:
+            # Expect 200/201; just read to finish request
+            resp.read()
+    except error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Resend HTTP {e.code}: {body}") from e
+    except Exception as e:
+        raise RuntimeError(f"Resend send failed: {e}") from e
 
 
-def send_otp_email(to_email: str, otp: str, role: str) -> None:
-    """Send OTP email for login."""
-    subject = "Your KnowEasy login code"
-    body = (
-        f"Your KnowEasy login code is: {otp}
+def send_otp_email(to_email: str, otp: str, minutes_valid: int = 10) -> None:
+    """Send an OTP email. Raises RuntimeError on failure."""
+    provider = _choose_provider()
+    if provider == "none":
+        raise RuntimeError(
+            "Email is not configured. Set EMAIL_PROVIDER and either RESEND_API_KEY+EMAIL_FROM (Resend) "
+            "or SMTP_HOST/SMTP_USER/SMTP_PASS/EMAIL_FROM (SMTP)."  # noqa: E501
+        )
 
-"
-        "This code expires in 10 minutes.
+    subject, text, html = _build_otp_content(otp=otp, minutes_valid=minutes_valid)
 
-"
-        f"Role: {role}
-"
-        "If you did not request this, you can ignore this email."
-    )
+    if provider == "resend":
+        _send_via_resend(to_email, subject, text, html)
+        return
+    if provider == "smtp":
+        _send_via_smtp(to_email, subject, text, html)
+        return
 
-    provider = (_get_env("EMAIL_PROVIDER", "auto") or "auto").strip().lower()
-
-    last_err: Optional[Exception] = None
-
-    if provider in ("smtp", "auto"):
-        try:
-            _send_via_smtp(to_email=to_email, subject=subject, body_text=body)
-            return
-        except Exception as e:
-            last_err = e
-            # On Render free tier, SMTP ports are blocked -> often socket.gaierror / OSError 101.
-            logger.exception("SMTP send failed (provider=%s).", provider)
-
-            if provider == "smtp":
-                raise
-
-    if provider in ("resend", "auto"):
-        try:
-            _send_via_resend(to_email=to_email, subject=subject, body_text=body)
-            return
-        except Exception as e:
-            last_err = e
-            logger.exception("Resend send failed (provider=%s).", provider)
-            raise
-
-    # If we reach here, nothing worked.
-    raise RuntimeError("Failed to send OTP email.") from last_err
+    raise RuntimeError(f"Unsupported EMAIL_PROVIDER: {provider}")
