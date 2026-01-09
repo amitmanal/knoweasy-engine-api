@@ -15,10 +15,10 @@ This file is intentionally dependency-light (uses stdlib only).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import smtplib
 import ssl
-import logging
 from email.message import EmailMessage
 from typing import Optional, Tuple
 from urllib import request, error
@@ -51,31 +51,24 @@ RESEND_ENDPOINT = "https://api.resend.com/emails"
 EMAIL_PROVIDER = (_env("EMAIL_PROVIDER") or "").lower()  # resend | smtp | ""
 
 
+def email_is_configured() -> bool:
+    """True if at least one email backend is correctly configured."""
+    return resend_is_configured() or smtp_is_configured()
+
+
+def _format_from() -> str:
+    """Resend accepts either `email@` or `Name <email@>`; prefer branded format."""
+    if SMTP_FROM_NAME and EMAIL_FROM:
+        return f"{SMTP_FROM_NAME} <{EMAIL_FROM}>"
+    return EMAIL_FROM
+
+
 def smtp_is_configured() -> bool:
     return all([SMTP_HOST, SMTP_USER, SMTP_PASS, EMAIL_FROM])
 
 
 def resend_is_configured() -> bool:
     return bool(RESEND_API_KEY and EMAIL_FROM)
-
-
-def email_is_configured() -> bool:
-    """True if either Resend or SMTP is usable."""
-    return _choose_provider() != "none"
-
-
-def email_provider_debug() -> dict:
-    """Non-sensitive diagnostics to understand provider selection in prod logs."""
-    provider = _choose_provider()
-    return {
-        "provider": provider,
-        "email_provider_env": EMAIL_PROVIDER or "",
-        "has_resend_key": bool(RESEND_API_KEY),
-        "has_email_from": bool(EMAIL_FROM),
-        "smtp_host_set": bool(SMTP_HOST),
-        "smtp_user_set": bool(SMTP_USER),
-        "smtp_pass_set": bool(SMTP_PASS),
-    }
 
 
 def _choose_provider() -> str:
@@ -148,13 +141,8 @@ def _send_via_smtp(to_email: str, subject: str, text: str, html: str) -> None:
 
 
 def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
-    # Resend recommends a "Name <email@domain>" format for From.
-    from_value = EMAIL_FROM
-    if from_value and "<" not in from_value and ">" not in from_value and SMTP_FROM_NAME:
-        from_value = f"{SMTP_FROM_NAME} <{from_value}>"
-
     payload = {
-        "from": from_value,
+        "from": _format_from(),
         "to": [to_email],
         "subject": subject,
         "text": text,
@@ -172,31 +160,19 @@ def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
     )
     try:
         with request.urlopen(req, timeout=25) as resp:
-            body = resp.read().decode("utf-8", errors="ignore")
-            try:
-                logger.info(f"Resend ok status={getattr(resp, 'status', 'unknown')} to={to_email}")
-            except Exception:
-                pass
-            # keep body unused; it's sometimes JSON with id
-            _ = body
+            # Expect 200/201; just read to finish request
+            resp.read()
     except error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
-        try:
-            logger.error(f"Resend HTTP {e.code} to={to_email} body={body[:300]}")
-        except Exception:
-            pass
         raise RuntimeError(f"Resend HTTP {e.code}: {body}") from e
     except Exception as e:
-        try:
-            logger.exception(f"Resend send failed to={to_email}: {e}")
-        except Exception:
-            pass
         raise RuntimeError(f"Resend send failed: {e}") from e
 
 
 def send_otp_email(to_email: str, otp: str, minutes_valid: int = 10) -> None:
     """Send an OTP email. Raises RuntimeError on failure."""
     provider = _choose_provider()
+    logger.info("OTP email provider selected: %s", provider)
     if provider == "none":
         raise RuntimeError(
             "Email is not configured. Set EMAIL_PROVIDER and either RESEND_API_KEY+EMAIL_FROM (Resend) "

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
-import uuid
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request
@@ -78,46 +76,6 @@ async def limit_request_body_size(request: Request, call_next):
 
     return await call_next(request)
 
-
-# -----------------------------
-# Request logging (critical for debugging production issues)
-# -----------------------------
-@app.middleware("http")
-async def request_logger(request: Request, call_next):
-    """Log every request and attach a short request id.
-
-    This is intentionally lightweight and NEVER crashes the app.
-    """
-    rid = str(uuid.uuid4())[:8]
-    request.state.rid = rid
-    start = time.time()
-    path = request.url.path
-    method = request.method
-    try:
-        logger.info(f"[RID:{rid}] --> {method} {path}")
-    except Exception:
-        pass
-
-    try:
-        response = await call_next(request)
-        try:
-            ms = int((time.time() - start) * 1000)
-            logger.info(f"[RID:{rid}] <-- {method} {path} {response.status_code} ({ms}ms)")
-        except Exception:
-            pass
-        try:
-            response.headers["X-Request-ID"] = rid
-        except Exception:
-            pass
-        return response
-    except Exception as e:
-        try:
-            ms = int((time.time() - start) * 1000)
-            logger.exception(f"[RID:{rid}] !! EXCEPTION on {method} {path} after {ms}ms: {e}")
-        except Exception:
-            pass
-        raise
-
 # -----------------------------
 # Routes
 # -----------------------------
@@ -127,8 +85,13 @@ app.include_router(auth_router)
 # -----------------------------
 # Health & version endpoints (Render + monitoring)
 # -----------------------------
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
+    """Root endpoint for Render health checks.
+
+    Render may probe with HEAD. FastAPI typically supports HEAD automatically for GET,
+    but we make it explicit to avoid noisy 405 logs.
+    """
     return {"ok": True, "service": SERVICE_NAME}
 
 @app.get("/version")
