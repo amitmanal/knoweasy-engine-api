@@ -14,7 +14,7 @@ from auth_store import (
     session_user,
     delete_session,
 )
-from email_service import email_is_configured, send_otp_email
+from email_service import send_otp_email, email_is_configured
 from auth_schemas import RequestOtpIn, RequestOtpOut, VerifyOtpIn, VerifyOtpOut, LogoutIn, BasicOut
 
 logger = logging.getLogger("knoweasy-engine-api.auth")
@@ -28,12 +28,20 @@ def _role_norm(role: str) -> str:
     return r
 
 @router.post("/auth/request-otp", response_model=RequestOtpOut)
-def request_otp(payload: RequestOtpIn):
+def request_otp(payload: RequestOtpIn, x_request_id: str | None = Header(default=None, alias="X-Request-ID")):
     if not auth_is_configured():
         return JSONResponse(status_code=503, content={"ok": False, "message": "Auth not configured (missing AUTH_SECRET_KEY)", "cooldown_seconds": 0})
 
     email = normalize_email(payload.email)
     role = _role_norm(payload.role)
+    rid = x_request_id or "-"
+    _local, _domain = (email.split("@", 1) + [""])[:2]
+    masked_email = ( (_local[:2] + "***" + (_local[-1:] if len(_local) > 2 else "")) + ("@" + _domain if _domain else "") ) if _local else "***"
+    logger.info(f"[RID:{rid}] verify_otp role={role} email={masked_email}")
+    rid = x_request_id or "-"
+    _local, _domain = (email.split("@", 1) + [""])[:2]
+    masked_email = ( (_local[:2] + "***" + (_local[-1:] if len(_local) > 2 else "")) + ("@" + _domain if _domain else "") ) if _local else "***"
+    logger.info(f"[RID:{rid}] request_otp role={role} email={masked_email}")
     if not role:
         return JSONResponse(status_code=400, content={"ok": False, "message": "Invalid role. Use 'student' or 'parent'.", "cooldown_seconds": 0})
     if not is_valid_email(email):
@@ -46,22 +54,13 @@ def request_otp(payload: RequestOtpIn):
             content={"ok": False, "message": "Please wait before requesting another code.", "cooldown_seconds": int(retry_after)},
         )
 
-    # Email backend can be Resend (recommended) or SMTP (fallback).
     if not email_is_configured():
-        return JSONResponse(
-            status_code=503,
-            content={
-                "ok": False,
-                "message": "Email sender not configured (missing Resend/SMTP env vars).",
-                "cooldown_seconds": 0,
-            },
-        )
+        return JSONResponse(status_code=503, content={"ok": False, "message": "Email sender not configured (missing SMTP env vars).", "cooldown_seconds": 0})
 
     otp_plain, otp_hash = new_otp_code()
     store_otp(email, role, otp_hash)
 
     try:
-        # Email service doesn't need role; keep interface minimal/stable.
         send_otp_email(to_email=email, otp=otp_plain)
     except Exception:
         logger.exception("Failed to send OTP email")
@@ -70,7 +69,7 @@ def request_otp(payload: RequestOtpIn):
     return {"ok": True, "message": "OTP sent to your email.", "cooldown_seconds": 30}
 
 @router.post("/auth/verify-otp", response_model=VerifyOtpOut)
-def verify_otp_code(payload: VerifyOtpIn):
+def verify_otp_code(payload: VerifyOtpIn, x_request_id: str | None = Header(default=None, alias="X-Request-ID")):
     if not auth_is_configured():
         return JSONResponse(status_code=503, content={"ok": False, "error": "AUTH_NOT_CONFIGURED", "message": "Auth not configured (missing AUTH_SECRET_KEY)"})
 

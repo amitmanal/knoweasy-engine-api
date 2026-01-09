@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import uuid
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request
@@ -28,7 +30,14 @@ except Exception:
 try:
     from config import ALLOWED_ORIGINS  # type: ignore
 except Exception:
-    ALLOWED_ORIGINS = ["*"]
+    ALLOWED_ORIGINS = [
+    "https://knoweasylearning.com",
+    "https://www.knoweasylearning.com",
+    "http://localhost",
+    "http://127.0.0.1",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+]
 
 try:
     from config import MAX_REQUEST_BODY_BYTES  # type: ignore
@@ -74,6 +83,26 @@ async def limit_request_body_size(request: Request, call_next):
         # Never crash middleware
         pass
 
+
+# -----------------------------
+# Request ID + access logging (production observability)
+# -----------------------------
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    rid = request.headers.get("x-request-id") or str(uuid.uuid4())[:8]
+    request.state.rid = rid
+    start = time.time()
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        ms = int((time.time() - start) * 1000)
+        logger.exception(f"[RID:{rid}] !! {request.method} {request.url.path} exception after {ms}ms: {e}")
+        raise
+    ms = int((time.time() - start) * 1000)
+    logger.info(f"[RID:{rid}] {request.method} {request.url.path} -> {response.status_code} ({ms}ms)")
+    response.headers["X-Request-ID"] = rid
+    return response
+
     return await call_next(request)
 
 # -----------------------------
@@ -85,13 +114,8 @@ app.include_router(auth_router)
 # -----------------------------
 # Health & version endpoints (Render + monitoring)
 # -----------------------------
-@app.api_route("/", methods=["GET", "HEAD"])
+@app.get("/")
 def root():
-    """Root endpoint for Render health checks.
-
-    Render may probe with HEAD. FastAPI typically supports HEAD automatically for GET,
-    but we make it explicit to avoid noisy 405 logs.
-    """
     return {"ok": True, "service": SERVICE_NAME}
 
 @app.get("/version")

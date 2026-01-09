@@ -15,15 +15,12 @@ This file is intentionally dependency-light (uses stdlib only).
 from __future__ import annotations
 
 import json
-import logging
 import os
 import smtplib
 import ssl
 from email.message import EmailMessage
 from typing import Optional, Tuple
 from urllib import request, error
-
-logger = logging.getLogger("knoweasy-engine-api.email")
 
 
 def _env(name: str, default: str = "") -> str:
@@ -49,18 +46,6 @@ RESEND_ENDPOINT = "https://api.resend.com/emails"
 
 # Provider selector
 EMAIL_PROVIDER = (_env("EMAIL_PROVIDER") or "").lower()  # resend | smtp | ""
-
-
-def email_is_configured() -> bool:
-    """True if at least one email backend is correctly configured."""
-    return resend_is_configured() or smtp_is_configured()
-
-
-def _format_from() -> str:
-    """Resend accepts either `email@` or `Name <email@>`; prefer branded format."""
-    if SMTP_FROM_NAME and EMAIL_FROM:
-        return f"{SMTP_FROM_NAME} <{EMAIL_FROM}>"
-    return EMAIL_FROM
 
 
 def smtp_is_configured() -> bool:
@@ -142,7 +127,7 @@ def _send_via_smtp(to_email: str, subject: str, text: str, html: str) -> None:
 
 def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
     payload = {
-        "from": _format_from(),
+        "from": EMAIL_FROM,
         "to": [to_email],
         "subject": subject,
         "text": text,
@@ -172,7 +157,6 @@ def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
 def send_otp_email(to_email: str, otp: str, minutes_valid: int = 10) -> None:
     """Send an OTP email. Raises RuntimeError on failure."""
     provider = _choose_provider()
-    logger.info("OTP email provider selected: %s", provider)
     if provider == "none":
         raise RuntimeError(
             "Email is not configured. Set EMAIL_PROVIDER and either RESEND_API_KEY+EMAIL_FROM (Resend) "
@@ -189,3 +173,9 @@ def send_otp_email(to_email: str, otp: str, minutes_valid: int = 10) -> None:
         return
 
     raise RuntimeError(f"Unsupported EMAIL_PROVIDER: {provider}")
+
+
+def email_is_configured() -> bool:
+    """True if either Resend or SMTP is configured for sending transactional email."""
+    return resend_is_configured() or smtp_is_configured()
+
