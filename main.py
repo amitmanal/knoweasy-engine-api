@@ -83,6 +83,9 @@ async def limit_request_body_size(request: Request, call_next):
         # Never crash middleware
         pass
 
+    # IMPORTANT: middleware must always return a Response
+    return await call_next(request)
+
 
 # -----------------------------
 # Request ID + access logging (production observability)
@@ -102,8 +105,6 @@ async def request_id_middleware(request: Request, call_next):
     logger.info(f"[RID:{rid}] {request.method} {request.url.path} -> {response.status_code} ({ms}ms)")
     response.headers["X-Request-ID"] = rid
     return response
-
-    return await call_next(request)
 
 # -----------------------------
 # Routes
