@@ -31,3 +31,15 @@ class LogoutIn(BaseModel):
 class BasicOut(BaseModel):
     ok: bool
     message: str | None = None
+
+
+class ProfileUpsertIn(BaseModel):
+    full_name: str = Field(..., examples=["Amit Manal"])
+    board: str = Field(..., examples=["CBSE"])
+    class_level: int = Field(..., examples=[9])
+
+class ProfileOut(BaseModel):
+    ok: bool
+    profile: dict | None = None
+    error: str | None = None
+    message: str | None = None

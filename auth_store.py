@@ -75,6 +75,15 @@ def ensure_tables() -> None:
         );
         """,
         """
+        ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS full_name TEXT,
+            ADD COLUMN IF NOT EXISTS board TEXT,
+            ADD COLUMN IF NOT EXISTS class_level INT,
+            ADD COLUMN IF NOT EXISTS profile_complete BOOLEAN NOT NULL DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+        """,
+
+        """
         CREATE TABLE IF NOT EXISTS otp_codes (
             id SERIAL PRIMARY KEY,
             email TEXT NOT NULL,
@@ -264,6 +273,55 @@ def get_or_create_user(email: str, role: str) -> Tuple[int, bool]:
         ).mappings().first()
         return int(row2["id"]), True
 
+
+def get_user_profile(user_id: int) -> Optional[Dict[str, Any]]:
+    """Fetch profile fields for a user."""
+    ensure_tables()
+    eng = _get_engine()
+    assert eng is not None
+    with eng.begin() as conn:
+        row = conn.execute(
+            text("""
+                SELECT id AS user_id, email, role, full_name, board, class_level, profile_complete
+                FROM users
+                WHERE id=:user_id
+                LIMIT 1
+            """),
+            {"user_id": user_id},
+        ).mappings().first()
+        if not row:
+            return None
+        return {
+            "user_id": int(row["user_id"]),
+            "email": row["email"],
+            "role": row["role"],
+            "full_name": row.get("full_name"),
+            "board": row.get("board"),
+            "class_level": row.get("class_level"),
+            "profile_complete": bool(row.get("profile_complete") or False),
+        }
+
+def update_user_profile(user_id: int, full_name: str, board: str, class_level: int) -> Optional[Dict[str, Any]]:
+    """Update profile and mark complete."""
+    ensure_tables()
+    eng = _get_engine()
+    assert eng is not None
+    now = datetime.now(timezone.utc)
+    with eng.begin() as conn:
+        conn.execute(
+            text("""
+                UPDATE users
+                SET full_name=:full_name,
+                    board=:board,
+                    class_level=:class_level,
+                    profile_complete=TRUE,
+                    updated_at=:now
+                WHERE id=:user_id
+            """),
+            {"user_id": user_id, "full_name": full_name, "board": board, "class_level": class_level, "now": now},
+        )
+    return get_user_profile(user_id)
+
 def create_session(user_id: int, token_hash: str) -> None:
     ensure_tables()
     eng = _get_engine()
@@ -291,7 +349,7 @@ def session_user(token_plain: str) -> Optional[Dict[str, Any]]:
     with eng.begin() as conn:
         row = conn.execute(
             text("""
-                SELECT u.id AS user_id, u.email, u.role, s.expires_at
+                SELECT u.id AS user_id, u.email, u.role, u.full_name, u.board, u.class_level, u.profile_complete, s.expires_at
                 FROM sessions s
                 JOIN users u ON u.id = s.user_id
                 WHERE s.token_hash = :token_hash
@@ -318,7 +376,7 @@ def session_user(token_plain: str) -> Optional[Dict[str, Any]]:
             {"now": now, "token_hash": token_h},
         )
 
-        return {"user_id": int(row["user_id"]), "email": row["email"], "role": row["role"]}
+        return {"user_id": int(row["user_id"]), "email": row["email"], "role": row["role"], "full_name": row.get("full_name"), "board": row.get("board"), "class_level": row.get("class_level"), "profile_complete": bool(row.get("profile_complete") or False)}
 
 def delete_session(token_plain: str) -> None:
     ensure_tables()
