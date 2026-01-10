@@ -129,4 +129,11 @@ CB_COOLDOWN_S = _env_int("CB_COOLDOWN_S", 20)
 # -----------------------------
 # backwards-compatible extras (safe)
 # -----------------------------
-ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=["*"])
+ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=[
+    "https://knoweasylearning.com",
+    "https://www.knoweasylearning.com",
+    "http://localhost",
+    "http://127.0.0.1",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+])
