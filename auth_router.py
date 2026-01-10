@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from auth_utils import normalize_email, is_valid_email, auth_is_configured, new_otp_code, new_session_token
@@ -28,7 +28,7 @@ def _role_norm(role: str) -> str:
     return r
 
 @router.post("/auth/request-otp", response_model=RequestOtpOut)
-def request_otp(payload: RequestOtpIn, x_request_id: str | None = Header(default=None, alias="X-Request-ID")):
+def request_otp(payload: RequestOtpIn, background_tasks: BackgroundTasks, x_request_id: str | None = Header(default=None, alias="X-Request-ID")):
     if not auth_is_configured():
         return JSONResponse(status_code=503, content={"ok": False, "message": "Auth not configured (missing AUTH_SECRET_KEY)", "cooldown_seconds": 0})
 
@@ -60,10 +60,11 @@ def request_otp(payload: RequestOtpIn, x_request_id: str | None = Header(default
     otp_plain, otp_hash = new_otp_code()
     store_otp(email, role, otp_hash)
 
+    # Send email in background so the API responds fast (avoids client timeouts on cold starts).
     try:
-        send_otp_email(to_email=email, otp=otp_plain)
+        background_tasks.add_task(send_otp_email, to_email=email, otp=otp_plain)
     except Exception:
-        logger.exception("Failed to send OTP email")
+        logger.exception("Failed to enqueue OTP email")
         return JSONResponse(status_code=500, content={"ok": False, "message": "Failed to send OTP. Please try again.", "cooldown_seconds": 0})
 
     return {"ok": True, "message": "OTP sent to your email.", "cooldown_seconds": 30}
