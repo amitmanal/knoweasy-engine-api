@@ -130,3 +130,13 @@ CB_COOLDOWN_S = _env_int("CB_COOLDOWN_S", 20)
 # backwards-compatible extras (safe)
 # -----------------------------
 ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=["*"])
+
+
+# -----------------------------
+# Payments (Razorpay) - optional (skeleton)
+# -----------------------------
+RAZORPAY_KEY_ID = _env("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = _env("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = _env("RAZORPAY_WEBHOOK_SECRET", "")
+RAZORPAY_PRICE_PRO_INR = _env_int("RAZORPAY_PRICE_PRO_INR", 199)
+RAZORPAY_PRICE_MAX_INR = _env_int("RAZORPAY_PRICE_MAX_INR", 399)
