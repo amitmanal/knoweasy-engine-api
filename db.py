@@ -197,13 +197,13 @@ def db_log_solve(req: Any, out: Any, latency_ms: int, error: Optional[str]) -> N
     out_d = _coerce_mapping(out)
 
     board = (req_d.get("board") or "").strip() or None
-    class_level = (str(req_d.get("class") or req_d.get("class_level") or "")).strip() or None
+    class_level = (str(req_d.get("class") or req_d.get("class_") or req_d.get("class_level") or "")).strip() or None
     subject = (req_d.get("subject") or "").strip() or None
 
     question = req_d.get("question") or req_d.get("prompt") or ""
     question = question if isinstance(question, str) else str(question)
 
-    answer = out_d.get("answer") or out_d.get("text") or out_d.get("output") or ""
+    answer = out_d.get("final_answer") or out_d.get("answer") or out_d.get("text") or out_d.get("output") or ""
     answer = answer if isinstance(answer, str) else str(answer)
 
     insert_sql = """

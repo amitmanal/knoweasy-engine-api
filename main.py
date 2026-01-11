@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from router import router as api_router
 from auth_router import router as auth_router
+from billing_router import router as billing_router
 from redis_store import redis_health
 from db import db_health
 
@@ -111,6 +112,7 @@ async def request_id_middleware(request: Request, call_next):
 # -----------------------------
 app.include_router(api_router)
 app.include_router(auth_router)
+app.include_router(billing_router)
 
 # -----------------------------
 # Health & version endpoints (Render + monitoring)

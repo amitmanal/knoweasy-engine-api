@@ -19,6 +19,8 @@ from config import (
 from schemas import SolveRequest, SolveResponse
 from orchestrator import solve
 from db import db_log_solve
+from auth_store import session_user
+from billing_store import consume_credits, get_or_create_subscription
 
 from redis_store import get_json as redis_get_json
 from redis_store import setex_json as redis_setex_json
@@ -98,7 +100,7 @@ def _cache_key(payload: dict) -> str:
     """
     normalized = {
         "board": (payload.get("board") or "").strip(),
-        "class_level": (payload.get("class_level") or "").strip(),
+        "class_level": (str(payload.get("class") or payload.get("class_") or payload.get("class_level") or "").strip() or None),
         "subject": (payload.get("subject") or "").strip(),
         "question": (payload.get("question") or "").strip(),
     }
@@ -112,6 +114,7 @@ def solve_route(
     req: SolveRequest,
     request: Request,
     x_ke_key: str | None = Header(default=None, alias="X-KE-KEY"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
 ):
     # Optional shared key guardrail (not security, but reduces random abuse).
     if KE_API_KEY:
@@ -124,6 +127,57 @@ def solve_route(
                 ).model_dump(),
             )
 
+
+    # -------- Auth + Credits (Phase-2 skeleton) --------
+    # AI actions require login so we can enforce plan/credits safely.
+    token = ""
+    if authorization:
+        parts = authorization.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1].strip()
+
+    if not token:
+        return JSONResponse(
+            status_code=401,
+            content=_safe_failure(
+                "Please sign in to use AI features (doubts/solutions).",
+                "LOGIN_REQUIRED",
+            ).model_dump(),
+        )
+
+    u = session_user(token)
+    if not u:
+        return JSONResponse(
+            status_code=401,
+            content=_safe_failure(
+                "Your session expired. Please sign in again.",
+                "SESSION_EXPIRED",
+            ).model_dump(),
+        )
+
+    try:
+        consume_credits(int(u["user_id"]), action="solve", cost=1, meta={"path": str(request.url.path)})
+    except ValueError as ve:
+        reason = str(ve)
+        if reason == "INSUFFICIENT_CREDITS":
+            # Provide a consistent response the UI can show.
+            sub = get_or_create_subscription(int(u["user_id"]))
+            bal = int(sub.get("credits_balance") or 0)
+            return JSONResponse(
+                status_code=402,
+                content=_safe_failure(
+                    "Daily AI limit reached. Try again tomorrow or upgrade your plan.",
+                    "NO_CREDITS",
+                ).model_dump() | {"credits_balance": bal},
+            )
+        return JSONResponse(
+            status_code=500,
+            content=_safe_failure(
+                "Credits system not ready. Please try again in a minute.",
+                "CREDITS_ERROR",
+            ).model_dump(),
+        )
+
     ip = _client_ip(request)
     if not _rate_limit_ok(ip):
         return JSONResponse(
@@ -135,7 +189,7 @@ def solve_route(
         )
 
     # -------- Cache (best-effort) --------
-    payload = req.model_dump()
+    payload = req.model_dump(by_alias=True)
     cache_key = _cache_key(payload)
 
     cached = redis_get_json(cache_key)
