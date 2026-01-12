@@ -25,9 +25,17 @@ def is_valid_email(email: str) -> bool:
     return bool(_EMAIL_RE.match(normalize_email(email)))
 
 def _secret_bytes() -> bytes:
-    # Required for stable hashing across processes/deploys.
-    s = os.getenv("AUTH_SECRET_KEY", "").strip()
-    return s.encode("utf-8") if s else b""
+    """Return the secret as bytes.
+
+    Auth and session security rely on a strong secret key.  If no
+    AUTH_SECRET_KEY is configured in the environment, we raise an
+    exception instead of silently falling back to an empty string.  This
+    prevents inadvertent deployments with insecure authentication.
+    """
+    s = os.getenv("AUTH_SECRET_KEY")
+    if not s:
+        raise RuntimeError("AUTH_SECRET_KEY must be set for authentication to function securely")
+    return str(s).strip().encode("utf-8")
 
 def auth_is_configured() -> bool:
     return bool(_secret_bytes())

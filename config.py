@@ -129,7 +129,11 @@ CB_COOLDOWN_S = _env_int("CB_COOLDOWN_S", 20)
 # -----------------------------
 # backwards-compatible extras (safe)
 # -----------------------------
-ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=["*"])
+# Allow only explicitly configured origins.  If none are provided via
+# the environment, default to an empty list and rely on main.py to
+# append localhost/Hostinger origins.  Wildcards are no longer used by
+# default to mitigate open CORS policies.
+ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=[])
 
 
 # -----------------------------

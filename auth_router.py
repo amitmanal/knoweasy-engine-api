@@ -112,11 +112,16 @@ def verify_otp_code(payload: VerifyOtpIn, x_request_id: str | None = Header(defa
     token_plain, token_hash = new_session_token()
     create_session(user_id, token_hash)
 
+    # Fetch the full user profile to determine whether the profile is complete.
+    profile = get_user_profile(user_id) or {"email": email, "role": role}
+    # Expose profile_complete at the top level for backward‑compatibility with older frontends.
+    profile_complete = bool(profile.get("profile_complete") or False)
     return {
         "ok": True,
         "session_token": token_plain,
         "is_new_user": bool(is_new),
-        "user": (get_user_profile(user_id) or {"email": email, "role": role}),
+        "profile_complete": profile_complete,
+        "user": profile,
     }
 
 def _human_reason(reason: str) -> str:
@@ -142,7 +147,20 @@ def me(authorization: str | None = Header(default=None, alias="Authorization")):
     if not u:
         return JSONResponse(status_code=401, content={"ok": False, "error": "UNAUTHORIZED", "message": "Invalid or expired session."})
 
-    return {"ok": True, "user": {"email": u["email"], "role": u["role"], "full_name": u.get("full_name"), "board": u.get("board"), "class_level": u.get("class_level"), "profile_complete": bool(u.get("profile_complete") or False)}}
+    # Expose profile_complete at top level as well as in user object.  This
+    # makes it easy for clients to read without drilling into user.
+    return {
+        "ok": True,
+        "profile_complete": bool(u.get("profile_complete") or False),
+        "user": {
+            "email": u["email"],
+            "role": u["role"],
+            "full_name": u.get("full_name"),
+            "board": u.get("board"),
+            "class_level": u.get("class_level"),
+            "profile_complete": bool(u.get("profile_complete") or False),
+        },
+    }
 
 
 
