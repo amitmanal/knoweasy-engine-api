@@ -1,6 +1,8 @@
+import re
+
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 class RequestOtpIn(BaseModel):
     email: str = Field(..., examples=["student@example.com"])
@@ -34,9 +36,20 @@ class BasicOut(BaseModel):
 
 
 class ProfileUpsertIn(BaseModel):
+    @field_validator('class_level')
+    @classmethod
+    def normalize_class_level(cls, v):
+        if isinstance(v, int):
+            return v
+        s = str(v).strip()
+        m = re.search(r'(\d{1,2})', s)
+        if not m:
+            raise ValueError('Invalid class_level')
+        return int(m.group(1))
+
     full_name: str = Field(..., examples=["Amit Manal"])
     board: str = Field(..., examples=["CBSE"])
-    class_level: int = Field(..., examples=[9])
+    class_level: int | str = Field(..., examples=[9])
 
 class ProfileOut(BaseModel):
     ok: bool

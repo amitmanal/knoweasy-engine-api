@@ -179,6 +179,12 @@ def upsert_profile(payload: ProfileUpsertIn, authorization: str | None = Header(
         return JSONResponse(status_code=404, content={"ok": False, "error": "NOT_FOUND", "message": "User not found."})
     return {"ok": True, "profile": {"email": updated["email"], "role": updated["role"], "full_name": updated.get("full_name"), "board": updated.get("board"), "class_level": updated.get("class_level"), "profile_complete": bool(updated.get("profile_complete") or False)}}
 
+
+@router.post("/auth/profile", response_model=ProfileOut)
+def auth_upsert_profile(payload: ProfileUpsertIn, authorization: str | None = Header(default=None, alias="Authorization")):
+    """Backward-compatible alias for frontend."""
+    return upsert_profile(payload, authorization)
+
 @router.post("/auth/logout", response_model=BasicOut)
 def logout(payload: LogoutIn):
     token = (payload.session_token or "").strip()
@@ -194,3 +200,15 @@ def _token_from_header(authorization: str | None) -> str:
     if len(parts) == 2 and parts[0].lower() == "bearer":
         return parts[1].strip()
     return ""
+
+@router.get("/auth/me")
+def auth_me(authorization: str | None = Header(default=None, alias="Authorization")):
+    """Backward-compatible alias for frontend."""
+    return me(authorization)
+
+
+@router.get("/auth/profile", response_model=ProfileOut)
+def auth_get_profile(authorization: str | None = Header(default=None, alias="Authorization")):
+    """Backward-compatible alias for frontend."""
+    return get_profile(authorization)
+
