@@ -55,9 +55,37 @@ app = FastAPI(title=SERVICE_NAME, version=str(SERVICE_VERSION))
 # CORS (required for Hostinger frontend)
 # -----------------------------
 # Keep permissive for Phase-1 stability; tighten later.
+def _normalize_origins(origins: list[str]) -> list[str]:
+    # Ensure Hostinger production origins are always allowed (prevents silent CORS breakages).
+    extra = [
+        'https://knoweasylearning.com',
+        'https://www.knoweasylearning.com',
+        'http://localhost',
+        'http://127.0.0.1',
+        'http://localhost:5500',
+        'http://127.0.0.1:5500',
+    ]
+    cleaned = []
+    for o in (origins or []):
+        if not o:
+            continue
+        o2 = str(o).strip()
+        if o2.endswith('/'):
+            o2 = o2[:-1]
+        cleaned.append(o2)
+    for e in extra:
+        if e not in cleaned:
+            cleaned.append(e)
+    # If '*' is present, keep only '*' (FastAPI will emit ACAO: *).
+    if '*' in cleaned:
+        return ['*']
+    return cleaned
+
+CORS_ORIGINS = _normalize_origins(ALLOWED_ORIGINS)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS else ["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
