@@ -1,6 +1,6 @@
-import re
-
 from __future__ import annotations
+
+import re
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -33,7 +33,6 @@ class LogoutIn(BaseModel):
 class BasicOut(BaseModel):
     ok: bool
     message: str | None = None
-
 
 class ProfileUpsertIn(BaseModel):
     @field_validator('class_level')
