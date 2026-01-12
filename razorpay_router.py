@@ -11,7 +11,28 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
 from auth_store import session_user
-from billing_store import get_plan_price_inr, create_payment_order_row, mark_payment_paid
+from billing_store import (
+    get_plan_price_inr,
+    create_payment_order_row,
+    mark_payment_paid,
+)
+
+def _is_simulation() -> bool:
+    """Return True if payments should be simulated instead of using Razorpay.
+
+    In simulation mode we bypass external Razorpay API calls.  This
+    mode is enabled when either the environment variable
+    PAYMENT_SIMULATION_MODE is set to a truthy value, or when the
+    Razorpay key credentials are missing.  Simulation mode allows
+    development and testing of the payment flow without real
+    transactions.
+    """
+    flag = os.getenv("PAYMENT_SIMULATION_MODE", "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    # If either key_id or key_secret is missing then treat as simulation
+    key_id, key_secret = _creds()
+    return not (key_id and key_secret)
 
 router = APIRouter(prefix="/billing/razorpay", tags=["billing"])
 
@@ -31,6 +52,17 @@ def _creds() -> tuple[str, str]:
 
 @router.get("/key")
 def get_key():
+    """Return Razorpay key information.
+
+    When payment simulation mode is enabled (see _is_simulation()),
+    this endpoint returns `enabled: False` to signal to the frontend
+    that Razorpay is unavailable and a simulated payment flow should
+    be used instead.  Otherwise it returns the configured key_id.
+    """
+    if _is_simulation():
+        # In simulation mode we do not expose a key; the frontend
+        # should fall back to the simulation flow.
+        return {"ok": True, "enabled": False}
     key_id, _ = _creds()
     if not key_id:
         return {"ok": False, "enabled": False}
@@ -50,10 +82,7 @@ def create_order(payload: Dict[str, Any], authorization: str | None = Header(def
     if plan not in ("PRO", "MAX"):
         return JSONResponse(status_code=400, content={"ok": False, "error": "INVALID_PLAN", "message": "Plan must be PRO or MAX."})
 
-    key_id, key_secret = _creds()
-    if not key_id or not key_secret:
-        return JSONResponse(status_code=501, content={"ok": False, "error": "PAYMENTS_NOT_ENABLED", "message": "Razorpay is not configured yet."})
-
+    # Determine price and amount for the order
     price_inr = get_plan_price_inr(plan)
     if price_inr <= 0:
         return JSONResponse(status_code=400, content={"ok": False, "error": "INVALID_PRICE", "message": "Price not configured."})
@@ -61,7 +90,17 @@ def create_order(payload: Dict[str, Any], authorization: str | None = Header(def
     amount_paise = int(price_inr * 100)
     receipt = f"ke_{u['user_id']}_{plan}_{uuid.uuid4().hex[:12]}"
 
-    # Create order via Razorpay Orders API
+    # Simulation mode: create a fake order without contacting Razorpay
+    if _is_simulation():
+        order_id = f"sim_{u['user_id']}_{uuid.uuid4().hex[:10]}"
+        create_payment_order_row(int(u["user_id"]), plan, amount_paise, "INR", order_id, {"receipt": receipt, "simulated": True})
+        return {"ok": True, "order": {"id": order_id, "amount": amount_paise, "currency": "INR", "plan": plan, "simulated": True}}
+
+    # Real mode: use Razorpay API
+    key_id, key_secret = _creds()
+    if not key_id or not key_secret:
+        return JSONResponse(status_code=501, content={"ok": False, "error": "PAYMENTS_NOT_ENABLED", "message": "Razorpay is not configured yet."})
+
     try:
         r = requests.post(
             "https://api.razorpay.com/v1/orders",
@@ -99,21 +138,29 @@ def verify_payment(payload: Dict[str, Any], authorization: str | None = Header(d
     if not u:
         return JSONResponse(status_code=401, content={"ok": False, "error": "UNAUTHORIZED", "message": "Invalid or expired session."})
 
+    order_id = str(payload.get("razorpay_order_id", "")).strip()
+    payment_id = str(payload.get("razorpay_payment_id", "")).strip() or "simulated"
+    signature = str(payload.get("razorpay_signature", "")).strip()
+    plan = str(payload.get("plan", "")).upper()
+
+    if plan not in ("PRO", "MAX") or not order_id:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "BAD_REQUEST", "message": "Missing fields."})
+
+    # Simulation mode: skip signature validation and mark payment as paid
+    if _is_simulation():
+        mark_payment_paid(int(u["user_id"]), plan, order_id, payment_id)
+        return {"ok": True, "message": "Simulated payment verified. Subscription activated.", "plan": plan}
+
+    # Real mode requires signature validation
     key_id, key_secret = _creds()
     if not key_id or not key_secret:
         return JSONResponse(status_code=501, content={"ok": False, "error": "PAYMENTS_NOT_ENABLED", "message": "Razorpay is not configured yet."})
 
-    order_id = str(payload.get("razorpay_order_id", "")).strip()
-    payment_id = str(payload.get("razorpay_payment_id", "")).strip()
-    signature = str(payload.get("razorpay_signature", "")).strip()
-    plan = str(payload.get("plan", "")).upper()
-
-    if not order_id or not payment_id or not signature or plan not in ("PRO", "MAX"):
+    if not payment_id or not signature:
         return JSONResponse(status_code=400, content={"ok": False, "error": "BAD_REQUEST", "message": "Missing fields."})
 
     body = f"{order_id}|{payment_id}".encode("utf-8")
     expected = hmac.new(key_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-
     if not hmac.compare_digest(expected, signature):
         return JSONResponse(status_code=400, content={"ok": False, "error": "INVALID_SIGNATURE", "message": "Payment signature verification failed."})
 

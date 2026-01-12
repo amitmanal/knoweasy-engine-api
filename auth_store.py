@@ -13,16 +13,26 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
+
+# Import the shared DB engine from the central db module.  By reusing
+# db._get_engine() we avoid creating multiple connection pools across
+# different stores.  The local _get_engine defined below simply
+# delegates to db._get_engine().
+from db import _get_engine as _shared_engine
 
 from auth_utils import hash_value, constant_time_equal
 
 logger = logging.getLogger("knoweasy-engine-api.auth")
 
-_ENGINE: Optional[Engine] = None
 _TABLES_READY: bool = False
+
+# Note: We intentionally do not create a separate engine here.  All
+# functions should call _get_engine() which delegates to the shared
+# engine defined in db.py.  This avoids creating multiple pools.
+_ENGINE: Optional[Engine] = None
 
 def _clean_sslmode(v: Optional[str]) -> Optional[str]:
     if not v:
@@ -31,27 +41,18 @@ def _clean_sslmode(v: Optional[str]) -> Optional[str]:
     return v or None
 
 def _get_engine() -> Optional[Engine]:
-    global _ENGINE
-    url = (os.getenv("DATABASE_URL") or "").strip()
-    if not url:
-        return None
+    """Return the shared SQLAlchemy engine from the central db module.
 
-    if _ENGINE is not None:
-        return _ENGINE
-
-    url_lower = url.lower()
-    has_sslmode_in_url = "sslmode=" in url_lower
-    connect_args: Dict[str, Any] = {}
-    if not has_sslmode_in_url:
-        sslmode = _clean_sslmode(os.getenv("DB_SSLMODE"))
-        if sslmode:
-            connect_args = {"sslmode": sslmode}
-
+    We delegate to db._get_engine() to ensure that only one connection
+    pool is created for the entire application.  This avoids the
+    resource waste and connection exhaustion that occur when each
+    module constructs its own engine.  If the database is not
+    configured, the shared engine will return None.
+    """
+    # Use the imported shared engine from db.py
     try:
-        _ENGINE = create_engine(url, pool_pre_ping=True, connect_args=connect_args)
-        return _ENGINE
+        return _shared_engine()
     except Exception:
-        logger.exception("Failed to create auth DB engine")
         return None
 
 def ensure_tables() -> None:

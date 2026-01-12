@@ -18,22 +18,27 @@ import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+
+# Reuse the central DB engine rather than constructing a new one.
+from db import _get_engine as _shared_engine
 
 _ENGINE = None
 _READY = False
 
 def _db_url() -> str:
+    """Kept for backward compatibility but unused.  The engine is
+    now obtained from the shared db module."""
     url = os.getenv("DATABASE_URL", "").strip()
     if not url:
         raise RuntimeError("DATABASE_URL not configured")
     return url
 
 def _get_engine():
-    global _ENGINE
-    if _ENGINE is None:
-        _ENGINE = create_engine(_db_url(), future=True, pool_pre_ping=True)
-    return _ENGINE
+    """Return the shared SQLAlchemy engine from the central db module.
+    This wrapper exists to maintain the local API but delegates
+    to db._get_engine(), avoiding creation of multiple engines."""
+    return _shared_engine()
 
 def ensure_tables() -> None:
     global _READY
