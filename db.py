@@ -230,4 +230,21 @@ def db_log_solve(req: Any, out: Any, latency_ms: int, error: Optional[str]) -> N
         return
 
 
-__all__ = ["db_init", "db_health", "db_log_solve"]
+
+
+# -----------------------------
+# Backwards-compatible helper
+# -----------------------------
+
+
+def get_engine():
+    """Public wrapper for the cached SQLAlchemy engine (or None).
+
+    Some modules (e.g., Razorpay webhook handler) import `get_engine`.
+    Keeping this wrapper avoids ImportError and keeps DB initialization logic
+    centralized.
+    """
+    return _get_engine()
+
+
+__all__ = ["db_init", "db_health", "db_log_solve", "get_engine"]

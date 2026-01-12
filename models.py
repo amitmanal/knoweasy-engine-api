@@ -1,8 +1,29 @@
+"""LLM provider clients.
+
+Gemini-only is the default for KnowEasy Engine v1.
+
+Stability goal: never crash-loop on import. The `google-genai` package commonly
+supports `from google import genai`, but some environments have a shadowing
+`google` namespace which can break that import. We try a fallback import so the
+service can start and surface a clear error.
+"""
+
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
-from google import genai
+_GENAI_IMPORT_ERROR: Exception | None = None
+
+try:
+    # Preferred import for google-genai
+    from google import genai  # type: ignore
+except Exception as e1:  # pragma: no cover
+    try:
+        # Fallback import style (some environments expose it this way)
+        import google.genai as genai  # type: ignore
+    except Exception as e2:  # pragma: no cover
+        genai = None  # type: ignore
+        _GENAI_IMPORT_ERROR = e2
 
 from config import (
     GEMINI_API_KEY,
@@ -22,11 +43,17 @@ _executor = ThreadPoolExecutor(max_workers=8)
 
 
 class GeminiCircuitOpen(RuntimeError):
-    pass
+    """Raised when circuit breaker is open."""
 
 
 class GeminiClient:
     def __init__(self) -> None:
+        if genai is None:
+            # Provide a very explicit dependency error.
+            raise RuntimeError(
+                "Gemini client import failed. Ensure `google-genai` is installed and no conflicting `google` package is shadowing it. "
+                f"Import error: {_GENAI_IMPORT_ERROR}"
+            )
         if not GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY is missing. Set it in Render env vars.")
         self.client = genai.Client(api_key=GEMINI_API_KEY)
@@ -48,8 +75,8 @@ class GeminiClient:
     def _record_failure(self) -> None:
         global _cb_failures, _cb_open_until_ts
         _cb_failures += 1
-        if _cb_failures >= CB_FAILURE_THRESHOLD:
-            _cb_open_until_ts = time.time() + CB_COOLDOWN_S
+        if _cb_failures >= int(CB_FAILURE_THRESHOLD):
+            _cb_open_until_ts = time.time() + float(CB_COOLDOWN_S)
 
     def generate_json(self, prompt: str, model: str | None = None) -> dict:
         """Generate strict JSON using Gemini with timeout + circuit breaker."""
@@ -62,8 +89,9 @@ class GeminiClient:
 
         try:
             fut = _executor.submit(_do_call, use_model)
-            resp = fut.result(timeout=GEMINI_TIMEOUT_S)
-            text = (resp.text or "").strip()
+            resp = fut.result(timeout=float(GEMINI_TIMEOUT_S))
+            text = (getattr(resp, 'text', '') or '').strip()
+            # Best-effort trimming to the first JSON object.
             if "{" in text and "}" in text:
                 text = text[text.find("{") : text.rfind("}") + 1]
             out = json.loads(text)
@@ -79,8 +107,8 @@ class GeminiClient:
             try:
                 if use_model != GEMINI_FALLBACK_MODEL:
                     fut2 = _executor.submit(_do_call, GEMINI_FALLBACK_MODEL)
-                    resp2 = fut2.result(timeout=GEMINI_TIMEOUT_S)
-                    text2 = (resp2.text or "").strip()
+                    resp2 = fut2.result(timeout=float(GEMINI_TIMEOUT_S))
+                    text2 = (getattr(resp2, 'text', '') or '').strip()
                     if "{" in text2 and "}" in text2:
                         text2 = text2[text2.find("{") : text2.rfind("}") + 1]
                     out2 = json.loads(text2)
