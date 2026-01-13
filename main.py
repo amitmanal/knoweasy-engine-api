@@ -43,17 +43,10 @@ except Exception:
 
 app = FastAPI(title=SERVICE_NAME, version=str(SERVICE_VERSION))
 
-# -----------------------------
-# CORS (required for Hostinger frontend)
-# -----------------------------
-# Keep permissive for Phase-1 stability; tighten later.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# NOTE: CORS middleware is added at the END of this file (outermost middleware)
+# so CORS headers are present even when earlier middleware returns early
+# (e.g., 413 payload-too-large). This avoids browser "TypeError: Failed to fetch"
+# caused by blocked cross-origin responses that lack CORS headers.
 
 # -----------------------------
 # Request body size cap (stability + abuse protection)
@@ -175,3 +168,23 @@ def health():
         "redis": redis_info,
         "db": db_info,
     }
+
+
+# -----------------------------
+# CORS (required for Hostinger frontend)
+# -----------------------------
+# IMPORTANT: keep this middleware OUTERMOST (added last) so that CORS headers
+# are present even when earlier middleware returns early.
+#
+# Allowing Authorization + JSON requests enables:
+# - POST /student/parent-code (Generate Parent Code)
+# - Parent linking & analytics
+_origins = ALLOWED_ORIGINS or ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    max_age=86400,
+)
