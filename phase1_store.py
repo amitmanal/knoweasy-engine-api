@@ -354,7 +354,7 @@ def list_parent_students(parent_user_id: int) -> List[Dict[str, Any]]:
                 parent_links.c.student_user_id,
                 student_profiles.c.full_name,
                 student_profiles.c.board,
-                student_profiles.c.class,
+                student_profiles.c["class"],
                 student_profiles.c.class_group,
                 student_profiles.c.target_exams,
                 student_profiles.c.updated_at,
