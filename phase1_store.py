@@ -46,6 +46,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+import redis_store
+
 
 # -------------------------
 # Engine / metadata
@@ -55,87 +57,133 @@ from sqlalchemy.exc import SQLAlchemyError
 _ENGINE: Optional[Engine] = None
 
 
-def _get_engine() -> Engine:
+def _clean_sslmode(value: str | None) -> str | None:
+    if not value:
+        return None
+    v = value.strip().strip('"').strip("'").strip()
+    return v or None
+
+
+def _get_engine() -> Optional[Engine]:
+    """Return a SQLAlchemy engine if Postgres is configured; otherwise None.
+
+    Phase-1 stability rule:
+    - Missing/broken DB must NOT crash the API.
+    - Endpoints fall back to Redis for core Phase-1 flows.
+    """
     global _ENGINE
     if _ENGINE is not None:
         return _ENGINE
 
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
-        raise RuntimeError("DATABASE_URL is not set")
+        logger.warning("DATABASE_URL is not set; Phase-1 store will use Redis fallback.")
+        return None
 
     connect_args: Dict[str, Any] = {}
-    if db_url.startswith("postgres"):
-        # Render + managed Postgres commonly require SSL
-        if os.getenv("DB_SSLMODE"):
-            connect_args["sslmode"] = os.getenv("DB_SSLMODE")
+    # If sslmode isn't in URL, allow DB_SSLMODE env (sanitized)
+    if "sslmode=" not in db_url:
+        sslmode = _clean_sslmode(os.getenv("DB_SSLMODE"))
+        if sslmode:
+            connect_args["sslmode"] = sslmode
 
-    _ENGINE = create_engine(db_url, pool_pre_ping=True, connect_args=connect_args)
-    return _ENGINE
+    try:
+        _ENGINE = create_engine(db_url, pool_pre_ping=True, connect_args=connect_args)
+        return _ENGINE
+    except Exception as e:
+        logger.exception("Failed to create DB engine; Phase-1 store will use Redis fallback. Error: %s", e)
+        _ENGINE = None
+        return None
 
+def ensure_tables() -> bool:
+    """Ensure Phase-1 tables exist when DB is available.
 
-metadata = MetaData()
-
-
-student_profiles = Table(
-    "student_profiles",
-    metadata,
-    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
-    Column("full_name", Text, nullable=True),
-    Column("class", Integer, nullable=True),  # effective class number, or 11 for 11_12 bundle
-    Column("class_group", String(16), nullable=True),  # "5".."10" or "11_12"
-    Column("board", String(64), nullable=True),  # cbse/maharashtra/icse/...
-    Column("target_exams", JSON, nullable=True),  # list[str]
-    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
-)
-
-
-parent_codes = Table(
-    "parent_codes",
-    metadata,
-    Column("code", String(16), primary_key=True),
-    Column("student_user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-    Column("expires_at", DateTime(timezone=True), nullable=False),
-    Column("created_at", DateTime(timezone=True), server_default=func.now()),
-    Column("used_at", DateTime(timezone=True), nullable=True),
-    Column("used_by_parent_user_id", Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
-)
-
-
-parent_links = Table(
-    "parent_links",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("parent_user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-    Column("student_user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-    Column("created_at", DateTime(timezone=True), server_default=func.now()),
-    UniqueConstraint("parent_user_id", "student_user_id", name="uq_parent_student"),
-)
-
-
-events = Table(
-    "events",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-    Column("event_type", String(64), nullable=False),
-    Column("created_at", DateTime(timezone=True), server_default=func.now()),
-    Column("duration_sec", Integer, nullable=True),
-    Column("value_num", Integer, nullable=True),  # e.g., score percent
-    Column("meta", JSON, nullable=True),
-)
-
-
-def ensure_tables() -> None:
-    """Create Phase-1 tables if they don't exist."""
+    Returns True if DB tables were ensured, False if DB is unavailable.
+    """
     engine = _get_engine()
-    metadata.create_all(engine)
+    if engine is None:
+        return False
+    try:
+        metadata.create_all(engine)
+        return True
+    except Exception as e:
+        logger.exception("Phase-1 ensure_tables failed; continuing with Redis fallback. Error: %s", e)
+        return False
 
 
 # -------------------------
-# Helpers
+# Redis fallback (Phase-1 stability)
 # -------------------------
 
+def _r():
+    return redis_store.get_redis()
+
+def _redis_setex(key: str, ttl_seconds: int, value: Dict[str, Any]) -> bool:
+    return redis_store.setex_json(key, ttl_seconds, value)
+
+def _redis_get(key: str) -> Optional[Dict[str, Any]]:
+    return redis_store.get_json(key)
+
+def _redis_del(key: str) -> None:
+    r = _r()
+    if not r:
+        return
+    try:
+        r.delete(key)
+    except Exception:
+        pass
+
+def _redis_get_int(key: str) -> int:
+    r = _r()
+    if not r:
+        return 0
+    try:
+        v = r.get(key)
+        if v is None:
+            return 0
+        return int(v)
+    except Exception:
+        return 0
+
+def _redis_incr(key: str, ttl_seconds: int) -> int:
+    v = redis_store.incr_with_ttl(key, ttl_seconds)
+    return int(v or 0)
+
+def _redis_links_key(parent_user_id: int) -> str:
+    return f"parent_links:{parent_user_id}"
+
+def _redis_student_profile_key(user_id: int) -> str:
+    return f"student_profile:{user_id}"
+
+def _redis_parent_code_key(code: str) -> str:
+    return f"parent_code:{code}"
+
+def _redis_get_linked_students(parent_user_id: int) -> List[int]:
+    r = _r()
+    if not r:
+        return []
+    key = _redis_links_key(parent_user_id)
+    try:
+        raw = r.get(key)
+        if not raw:
+            return []
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [int(x) for x in data]
+        return []
+    except Exception:
+        return []
+
+def _redis_set_linked_students(parent_user_id: int, student_ids: List[int]) -> None:
+    r = _r()
+    if not r:
+        return
+    key = _redis_links_key(parent_user_id)
+    try:
+        # Keep long TTL (1 year) but still self-heals
+        r.setex(key, 31536000, json.dumps(sorted(set(student_ids))))
+    except Exception:
+        pass
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -195,63 +243,108 @@ def upsert_student_profile(
     target_exams: Optional[List[str]],
     class_group: Optional[str] = None,
 ) -> Dict[str, Any]:
-    ensure_tables()
-    engine = _get_engine()
-
+    # Normalize inputs first (works for both DB + Redis)
     board_n = _sanitize_board(board)
     class_int, class_group_n = _normalize_class_group(cls, class_group)
 
     # For classes 5-10, ignore target exams (Phase-1 product decision)
     if class_int is not None and class_int < 11:
-        target_exams = []
-    target_exams = target_exams or []
+        target_exams = None
 
+    now = _utcnow()
     payload = {
-        "user_id": user_id,
-        "full_name": (full_name or None),
-        "class": class_int,
-        "class_group": class_group_n,
+        "user_id": int(user_id),
+        "full_name": full_name,
+        "cls": class_int,
         "board": board_n,
-        "target_exams": target_exams,
-        "updated_at": _utcnow(),
+        "target_exams_json": json.dumps(target_exams or []),
+        "class_group": class_group_n,
+        "updated_at": now,
     }
 
+    engine = _get_engine()
+    if engine is None:
+        prof = {
+            "user_id": int(user_id),
+            "full_name": full_name,
+            "class": class_int,
+            "board": board_n,
+            "target_exams": target_exams or [],
+            "class_group": class_group_n,
+            "updated_at": now.isoformat(),
+        }
+        _redis_setex(_redis_student_profile_key(user_id), 31536000, prof)
+        return prof
+
+    ensure_tables()
     with engine.begin() as conn:
         existing = conn.execute(select(student_profiles.c.user_id).where(student_profiles.c.user_id == user_id)).first()
         if existing:
-            conn.execute(
-                student_profiles.update().where(student_profiles.c.user_id == user_id).values(**payload)
-            )
+            conn.execute(student_profiles.update().where(student_profiles.c.user_id == user_id).values(**payload))
         else:
             conn.execute(student_profiles.insert().values(**payload))
 
-    return get_student_profile(user_id) or payload
-
+    prof = get_student_profile(user_id) or payload
+    # Normalize key names for frontend convenience
+    if "cls" in prof and "class" not in prof:
+        prof["class"] = prof.get("cls")
+    return prof
 
 def get_student_profile(user_id: int) -> Optional[Dict[str, Any]]:
-    ensure_tables()
     engine = _get_engine()
+    if engine is None:
+        prof = _redis_get(_redis_student_profile_key(user_id))
+        if not prof:
+            return None
+        # ensure shape
+        if "cls" not in prof and "class" in prof:
+            prof["cls"] = prof.get("class")
+        return prof
+
+    ensure_tables()
     with engine.begin() as conn:
         row = conn.execute(select(student_profiles).where(student_profiles.c.user_id == user_id)).mappings().first()
-        return dict(row) if row else None
-
-
-# -------------------------
-# Parent code + linking
-# -------------------------
-
+        if not row:
+            return None
+        prof = dict(row)
+        try:
+            prof["target_exams"] = json.loads(prof.get("target_exams_json") or "[]")
+        except Exception:
+            prof["target_exams"] = []
+        if "cls" in prof and "class" not in prof:
+            prof["class"] = prof.get("cls")
+        return prof
 
 def create_parent_code(student_user_id: int, ttl_seconds: int = 900) -> Dict[str, Any]:
-    ensure_tables()
-    engine = _get_engine()
-
     now = _utcnow()
     expires = now + timedelta(seconds=ttl_seconds)
 
-    # Create a fresh code. We don't try to reuse; codes are short-lived.
+    engine = _get_engine()
+    if engine is None:
+        # Redis fallback: store parent code with TTL
+        code = _make_parent_code()
+        rkey = _redis_parent_code_key(code)
+        # avoid collisions
+        for _ in range(5):
+            if not _redis_get(rkey):
+                break
+            code = _make_parent_code()
+            rkey = _redis_parent_code_key(code)
+        _redis_setex(
+            rkey,
+            int(ttl_seconds),
+            {
+                "code": code,
+                "student_user_id": int(student_user_id),
+                "created_at": now.isoformat(),
+                "expires_at": expires.isoformat(),
+            },
+        )
+        return {"code": code, "expires_at": expires.isoformat(), "expires_in_seconds": int(ttl_seconds)}
+
+    ensure_tables()
     code = _make_parent_code()
     with engine.begin() as conn:
-        # Extremely low collision chance, but handle gracefully.
         for _ in range(5):
             exists = conn.execute(select(parent_codes.c.code).where(parent_codes.c.code == code)).first()
             if not exists:
@@ -268,24 +361,43 @@ def create_parent_code(student_user_id: int, ttl_seconds: int = 900) -> Dict[str
 
     return {"code": code, "expires_at": expires.isoformat(), "expires_in_seconds": ttl_seconds}
 
-
 def link_parent_with_code(parent_user_id: int, code: str) -> Tuple[bool, str, Optional[int]]:
-    """Consume a parent code and create a link.
+    """Link a parent to a student via one-time parent code.
 
     Returns (ok, message, student_user_id)
     """
-    ensure_tables()
-    engine = _get_engine()
-
     code_n = (code or "").strip().upper()
     if not code_n:
         return False, "Invalid code.", None
 
     now = _utcnow()
+    engine = _get_engine()
+    if engine is None:
+        rkey = _redis_parent_code_key(code_n)
+        data = _redis_get(rkey)
+        if not data:
+            return False, "Code not found or expired. Ask your child to generate a new one.", None
+
+        student_user_id = int(data.get("student_user_id") or 0)
+        if not student_user_id:
+            return False, "Invalid code. Ask your child to generate a new one.", None
+        if student_user_id == int(parent_user_id):
+            return False, "You cannot link to yourself.", None
+
+        # one-time: delete code after use
+        _redis_del(rkey)
+
+        # store link
+        linked = _redis_get_linked_students(int(parent_user_id))
+        if student_user_id not in linked:
+            linked.append(student_user_id)
+        _redis_set_linked_students(int(parent_user_id), linked)
+
+        return True, "Linked successfully.", student_user_id
+
+    ensure_tables()
     with engine.begin() as conn:
-        row = conn.execute(
-            select(parent_codes).where(parent_codes.c.code == code_n)
-        ).mappings().first()
+        row = conn.execute(select(parent_codes).where(parent_codes.c.code == code_n)).mappings().first()
         if not row:
             return False, "Code not found. Ask your child to generate a new one.", None
         if row.get("used_at") is not None:
@@ -301,14 +413,12 @@ def link_parent_with_code(parent_user_id: int, code: str) -> Tuple[bool, str, Op
         if student_user_id == parent_user_id:
             return False, "You cannot link to yourself.", None
 
-        # Mark code used (one-time)
         conn.execute(
             parent_codes.update()
             .where(parent_codes.c.code == code_n)
             .values(used_at=now, used_by_parent_user_id=parent_user_id)
         )
 
-        # Create link (idempotent)
         existing = conn.execute(
             select(parent_links.c.id).where(
                 and_(
@@ -328,10 +438,13 @@ def link_parent_with_code(parent_user_id: int, code: str) -> Tuple[bool, str, Op
 
     return True, "Linked successfully.", student_user_id
 
-
 def is_parent_linked(parent_user_id: int, student_user_id: int) -> bool:
-    ensure_tables()
     engine = _get_engine()
+    if engine is None:
+        linked = _redis_get_linked_students(int(parent_user_id))
+        return int(student_user_id) in linked
+
+    ensure_tables()
     with engine.begin() as conn:
         row = conn.execute(
             select(parent_links.c.id).where(
@@ -343,20 +456,36 @@ def is_parent_linked(parent_user_id: int, student_user_id: int) -> bool:
         ).first()
         return bool(row)
 
-
 def list_parent_students(parent_user_id: int) -> List[Dict[str, Any]]:
-    ensure_tables()
     engine = _get_engine()
+    if engine is None:
+        student_ids = _redis_get_linked_students(int(parent_user_id))
+        out: List[Dict[str, Any]] = []
+        for sid in student_ids:
+            prof = get_student_profile(int(sid)) or {"user_id": int(sid)}
+            out.append(
+                {
+                    "student_user_id": int(sid),
+                    "full_name": prof.get("full_name"),
+                    "board": prof.get("board"),
+                    "class": prof.get("class") if "class" in prof else prof.get("cls"),
+                    "class_group": prof.get("class_group"),
+                    "target_exams": prof.get("target_exams") or [],
+                    "updated_at": prof.get("updated_at"),
+                }
+            )
+        return out
 
+    ensure_tables()
     with engine.begin() as conn:
         q = (
             select(
-                parent_links.c.student_user_id,
+                parent_links.c.student_user_id.label("student_user_id"),
                 student_profiles.c.full_name,
                 student_profiles.c.board,
-                student_profiles.c["class"],
+                student_profiles.c.cls.label("class"),
                 student_profiles.c.class_group,
-                student_profiles.c.target_exams,
+                student_profiles.c.target_exams_json,
                 student_profiles.c.updated_at,
             )
             .select_from(
@@ -372,24 +501,14 @@ def list_parent_students(parent_user_id: int) -> List[Dict[str, Any]]:
 
     out: List[Dict[str, Any]] = []
     for r in rows:
-        out.append(
-            {
-                "student_user_id": int(r["student_user_id"]),
-                "full_name": r.get("full_name") or "Student",
-                "board": r.get("board"),
-                "class": r.get("class"),
-                "class_group": r.get("class_group"),
-                "target_exams": r.get("target_exams") or [],
-                "updated_at": (r.get("updated_at").isoformat() if r.get("updated_at") else None),
-            }
-        )
+        d = dict(r)
+        try:
+            d["target_exams"] = json.loads(d.get("target_exams_json") or "[]")
+        except Exception:
+            d["target_exams"] = []
+        d.pop("target_exams_json", None)
+        out.append(d)
     return out
-
-
-# -------------------------
-# Event tracking + analytics
-# -------------------------
-
 
 def track_event(
     user_id: int,
@@ -398,30 +517,86 @@ def track_event(
     duration_sec: Optional[int] = None,
     value_num: Optional[int] = None,
 ) -> Dict[str, Any]:
-    ensure_tables()
-    engine = _get_engine()
-
     et = (event_type or "").strip()[:64]
     if not et:
         raise ValueError("event_type is required")
 
+    engine = _get_engine()
+    now = _utcnow()
+
+    if engine is None:
+        # Redis fallback: keep lightweight counters for 30 days
+        ttl = 30 * 24 * 3600
+        base = f"events:{int(user_id)}:{et}"
+        count = _redis_incr(base + ":count", ttl)
+        if duration_sec is not None:
+            _redis_incr(base + ":duration_sec", ttl)  # count occurrences
+            r = _r()
+            if r:
+                try:
+                    r.incrby(base + ":duration_sum", int(duration_sec))
+                    r.expire(base + ":duration_sum", ttl)
+                except Exception:
+                    pass
+        if value_num is not None:
+            r = _r()
+            if r:
+                try:
+                    r.incrby(base + ":value_sum", int(value_num))
+                    r.expire(base + ":value_sum", ttl)
+                    r.incrby(base + ":value_count", 1)
+                    r.expire(base + ":value_count", ttl)
+                except Exception:
+                    pass
+        return {"ok": True, "stored": "redis", "event_type": et, "count_30d": count, "ts": now.isoformat()}
+
+    ensure_tables()
     payload = {
         "user_id": int(user_id),
         "event_type": et,
-        "created_at": _utcnow(),
+        "meta_json": json.dumps(meta or {}),
         "duration_sec": int(duration_sec) if duration_sec is not None else None,
-        "value_num": int(value_num) if value_num is not None else None,
-        "meta": meta or {},
+        "value_num": float(value_num) if value_num is not None else None,
+        "created_at": now,
     }
+
     with engine.begin() as conn:
         conn.execute(events.insert().values(**payload))
-    return {"ok": True}
 
+    return {"ok": True, "stored": "db", "event_type": et, "ts": now.isoformat()}
 
 def analytics_summary(parent_user_id: int, student_user_id: int) -> Dict[str, Any]:
     """Return read-only analytics summary for a linked student."""
-    ensure_tables()
     engine = _get_engine()
+    now = _utcnow()
+
+    if engine is None:
+        # Redis fallback summary (Phase-1 stability). Minimal but useful.
+        def _sum_for(et: str) -> Dict[str, int]:
+            base = f"events:{int(student_user_id)}:{et}"
+            return {
+                "count_30d": _redis_get_int(base + ":count"),
+                "value_sum": _redis_get_int(base + ":value_sum"),
+                "value_count": _redis_get_int(base + ":value_count"),
+            }
+
+        tests = _sum_for("test_submitted")
+        avg_score = 0
+        if tests["value_count"] > 0:
+            avg_score = int(round(tests["value_sum"] / max(1, tests["value_count"])))
+
+        return {
+            "student_user_id": int(student_user_id),
+            "generated_at": now.isoformat(),
+            "active_days_7d": 0,
+            "tests_30d": int(tests["count_30d"]),
+            "avg_score_30d": avg_score,
+            "study_minutes_7d": 0,
+            "recent_activity": [],
+            "subject_weaknesses": [],
+        }
+
+    ensure_tables()
 
     # Access control is enforced by router before calling this.
     now = _utcnow()
