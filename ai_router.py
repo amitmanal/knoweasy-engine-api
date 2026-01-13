@@ -1,65 +1,174 @@
 from __future__ import annotations
-import json, logging, os
-from typing import Any, Dict
-from fastapi import APIRouter, Header
-from fastapi.responses import JSONResponse
-from config import GEMINI_API_KEY, AI_PROVIDER
 
-logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/ai", tags=["AI"])
+import json
+import logging
+import os
+import re
+import time
+import urllib.request
+import urllib.error
+from typing import Any, Dict, List, Optional, Tuple
 
-@router.post("/solve-question")
-async def solve_question(
-    prompt: str,
-    subject: str = "",
-    board: str = "",
-    class_level: int = 9,
-    timeout_s: int = 15,
-    authorization: str = Header(None)
-) -> Dict[str, Any]:
-    """Solve a student question using AI"""
+from config import (
+    AI_PROVIDER,
+    AI_TIMEOUT_SECONDS,
+    GEMINI_API_KEY,
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    CLAUDE_API_KEY,
+    CLAUDE_MODEL,
+)
+
+# Gemini client already exists in models.py (kept stable)
+from models import GeminiClient
+
+logger = logging.getLogger("knoweasy.ai_router")
+
+
+class ProviderError(RuntimeError):
+    """Raised when a provider is misconfigured or returns an unusable response."""
+
+
+def _extract_json(text: str) -> Dict[str, Any]:
+    """Best-effort JSON extraction for models that wrap JSON in text."""
+    text = (text or "").strip()
+    # If it's already JSON
     try:
-        if not authorization:
-            return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
-        
-        prompt = prompt.strip()
-        if not prompt:
-            return JSONResponse({"ok": False, "error": "Empty question"}, status_code=400)
-        
-        provider = AI_PROVIDER or "gemini"
-        
-        if provider == "gemini":
-            if not GEMINI_API_KEY:
-                return JSONResponse({"ok": False, "error": "Gemini API key not configured", "hint": "Set GEMINI_API_KEY environment variable"}, status_code=503)
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=GEMINI_API_KEY)
-                model = genai.GenerativeModel('gemini-pro')
-                response = model.generate_content(prompt, request_options={"timeout": timeout_s})
-                answer = response.text
-            except Exception as e:
-                logger.error(f"Gemini error: {e}")
-                return JSONResponse({"ok": False, "error": f"AI error: {str(e)}"}, status_code=503)
-        else:
-            return JSONResponse({"ok": False, "error": f"Provider {provider} not supported yet"}, status_code=501)
-        
-        return {"ok": True, "answer": answer, "provider": provider}
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # Try to find the first JSON object in the text
+    m = re.search(r"\{[\s\S]*\}", text)
+    if not m:
+        raise ProviderError("Model did not return JSON.")
+    try:
+        return json.loads(m.group(0))
     except Exception as e:
-        logger.error(f"Solve question error: {e}")
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
-@router.get("/health")
-async def health_check() -> Dict[str, Any]:
-    """Check AI service health"""
-    provider = AI_PROVIDER or "gemini"
-    return {"ok": True, "provider": provider, "configured": bool(GEMINI_API_KEY if provider == "gemini" else True)}
+        raise ProviderError(f"Invalid JSON from model: {e}") from e
 
 
-def generate_json(content: str, response_format: str = 'json') -> Dict:
-    """Generate JSON response from content"""
+def _provider_order() -> List[str]:
+    p = (AI_PROVIDER or "gemini").strip().lower()
+    if p in {"auto", "multi"}:
+        # Prefer Gemini first (current Phase-1), then OpenAI, then Claude.
+        return ["gemini", "openai", "claude"]
+    return [p]
+
+
+def _openai_request(prompt: str, timeout_s: int) -> Dict[str, Any]:
+    if not OPENAI_API_KEY:
+        raise ProviderError("OPENAI_API_KEY missing.")
+    model = OPENAI_MODEL or "gpt-4o-mini"
+
+    url = "https://api.openai.com/v1/chat/completions"
+    body = {
+        "model": model,
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": "Return ONLY valid JSON. No markdown."},
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
     try:
-        if isinstance(content, dict):
-            return content
-        return {"content": content, "format": response_format}
-    except:
-        return {"content": str(content), "format": response_format}
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else str(e)
+        raise ProviderError(f"OpenAI HTTPError {e.code}: {detail[:300]}") from e
+    except Exception as e:
+        # urllib raises TimeoutError sometimes, keep it consistent
+        if isinstance(e, TimeoutError):
+            raise
+        raise ProviderError(f"OpenAI request failed: {e}") from e
+
+    data = json.loads(raw)
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    return _extract_json(content)
+
+
+def _claude_request(prompt: str, timeout_s: int) -> Dict[str, Any]:
+    if not CLAUDE_API_KEY:
+        raise ProviderError("CLAUDE_API_KEY missing.")
+    model = CLAUDE_MODEL or "claude-3-5-sonnet-20240620"
+
+    url = "https://api.anthropic.com/v1/messages"
+    body = {
+        "model": model,
+        "max_tokens": 1200,
+        "temperature": 0.2,
+        "system": "Return ONLY valid JSON. No markdown.",
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "x-api-key": CLAUDE_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else str(e)
+        raise ProviderError(f"Claude HTTPError {e.code}: {detail[:300]}") from e
+    except Exception as e:
+        if isinstance(e, TimeoutError):
+            raise
+        raise ProviderError(f"Claude request failed: {e}") from e
+
+    data = json.loads(raw)
+    content_blocks = data.get("content") or []
+    text = ""
+    if content_blocks and isinstance(content_blocks, list):
+        text = content_blocks[0].get("text", "") if isinstance(content_blocks[0], dict) else str(content_blocks[0])
+    return _extract_json(text)
+
+
+def generate_json(prompt: str) -> Dict[str, Any]:
+    """Generate a JSON response using the configured provider (or auto fallback)."""
+    timeout_s = int(AI_TIMEOUT_SECONDS or 30)
+
+    last_err: Optional[Exception] = None
+    for provider in _provider_order():
+        provider = provider.strip().lower()
+        try:
+            if provider == "gemini":
+                if not GEMINI_API_KEY:
+                    raise ProviderError("GEMINI_API_KEY missing.")
+                return GeminiClient().generate_json(prompt)
+            if provider == "openai":
+                return _openai_request(prompt, timeout_s)
+            if provider in {"claude", "anthropic"}:
+                return _claude_request(prompt, timeout_s)
+
+            raise ProviderError(f"Unknown AI_PROVIDER: {provider}")
+        except TimeoutError as e:
+            # Bubble up as timeout (orchestrator handles deterministic fallback)
+            raise
+        except Exception as e:
+            last_err = e
+            logger.warning("Provider failed (%s): %s", provider, str(e)[:200])
+
+    # If all providers failed:
+    if last_err:
+        raise ProviderError(f"All providers failed. Last error: {last_err}") from last_err
+    raise ProviderError("All providers failed.")
