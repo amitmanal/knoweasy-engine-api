@@ -129,8 +129,7 @@ def seed_plans() -> None:
                 text(
                     """
                     INSERT INTO plans (code, daily_credits, monthly_credits, features_json, is_active)
-                    VALUES (:code, :daily_credits, :monthly_credits, :features_json::jsonb, :is_active)
-                    ON CONFLICT (code) DO UPDATE SET
+VALUES (%(code)s, %(daily_credits)s, %(monthly_credits)s, %(features_json)s::jsonb, %(is_active)s)                    ON CONFLICT (code) DO UPDATE SET
                       daily_credits = EXCLUDED.daily_credits,
                       monthly_credits = EXCLUDED.monthly_credits,
                       features_json = EXCLUDED.features_json,
