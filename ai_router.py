@@ -53,3 +53,13 @@ async def health_check() -> Dict[str, Any]:
     """Check AI service health"""
     provider = AI_PROVIDER or "gemini"
     return {"ok": True, "provider": provider, "configured": bool(GEMINI_API_KEY if provider == "gemini" else True)}
+
+
+def generate_json(content: str, response_format: str = 'json') -> Dict:
+    """Generate JSON response from content"""
+    try:
+        if isinstance(content, dict):
+            return content
+        return {"content": content, "format": response_format}
+    except:
+        return {"content": str(content), "format": response_format}
