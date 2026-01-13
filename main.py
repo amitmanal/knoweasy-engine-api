@@ -12,9 +12,6 @@ from fastapi.responses import JSONResponse
 
 from router import router as api_router
 from auth_router import router as auth_router
-from billing_router import router as billing_router
-from razorpay_router import router as razorpay_router
-from family_router import router as family_router
 from redis_store import redis_health
 from db import db_health
 
@@ -33,14 +30,7 @@ except Exception:
 try:
     from config import ALLOWED_ORIGINS  # type: ignore
 except Exception:
-    ALLOWED_ORIGINS = [
-    "https://knoweasylearning.com",
-    "https://www.knoweasylearning.com",
-    "http://localhost",
-    "http://127.0.0.1",
-    "http://localhost:5500",
-    "http://127.0.0.1:5500",
-]
+    ALLOWED_ORIGINS = ["*"]
 
 try:
     from config import MAX_REQUEST_BODY_BYTES  # type: ignore
@@ -55,37 +45,9 @@ app = FastAPI(title=SERVICE_NAME, version=str(SERVICE_VERSION))
 # CORS (required for Hostinger frontend)
 # -----------------------------
 # Keep permissive for Phase-1 stability; tighten later.
-def _normalize_origins(origins: list[str]) -> list[str]:
-    # Ensure Hostinger production origins are always allowed (prevents silent CORS breakages).
-    extra = [
-        'https://knoweasylearning.com',
-        'https://www.knoweasylearning.com',
-        'http://localhost',
-        'http://127.0.0.1',
-        'http://localhost:5500',
-        'http://127.0.0.1:5500',
-    ]
-    cleaned = []
-    for o in (origins or []):
-        if not o:
-            continue
-        o2 = str(o).strip()
-        if o2.endswith('/'):
-            o2 = o2[:-1]
-        cleaned.append(o2)
-    for e in extra:
-        if e not in cleaned:
-            cleaned.append(e)
-    # If '*' is present, keep only '*' (FastAPI will emit ACAO: *).
-    if '*' in cleaned:
-        return ['*']
-    return cleaned
-
-CORS_ORIGINS = _normalize_origins(ALLOWED_ORIGINS)
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
+    allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS else ["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -114,37 +76,53 @@ async def limit_request_body_size(request: Request, call_next):
         # Never crash middleware
         pass
 
-    # IMPORTANT: middleware must always return a Response
     return await call_next(request)
 
 
 # -----------------------------
-# Request ID + access logging (production observability)
+# Request logging (critical for debugging production issues)
 # -----------------------------
 @app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    rid = request.headers.get("x-request-id") or str(uuid.uuid4())[:8]
+async def request_logger(request: Request, call_next):
+    """Log every request and attach a short request id.
+
+    This is intentionally lightweight and NEVER crashes the app.
+    """
+    rid = str(uuid.uuid4())[:8]
     request.state.rid = rid
     start = time.time()
+    path = request.url.path
+    method = request.method
+    try:
+        logger.info(f"[RID:{rid}] --> {method} {path}")
+    except Exception:
+        pass
+
     try:
         response = await call_next(request)
+        try:
+            ms = int((time.time() - start) * 1000)
+            logger.info(f"[RID:{rid}] <-- {method} {path} {response.status_code} ({ms}ms)")
+        except Exception:
+            pass
+        try:
+            response.headers["X-Request-ID"] = rid
+        except Exception:
+            pass
+        return response
     except Exception as e:
-        ms = int((time.time() - start) * 1000)
-        logger.exception(f"[RID:{rid}] !! {request.method} {request.url.path} exception after {ms}ms: {e}")
+        try:
+            ms = int((time.time() - start) * 1000)
+            logger.exception(f"[RID:{rid}] !! EXCEPTION on {method} {path} after {ms}ms: {e}")
+        except Exception:
+            pass
         raise
-    ms = int((time.time() - start) * 1000)
-    logger.info(f"[RID:{rid}] {request.method} {request.url.path} -> {response.status_code} ({ms}ms)")
-    response.headers["X-Request-ID"] = rid
-    return response
 
 # -----------------------------
 # Routes
 # -----------------------------
 app.include_router(api_router)
 app.include_router(auth_router)
-app.include_router(billing_router)
-app.include_router(razorpay_router)
-app.include_router(family_router)
 
 # -----------------------------
 # Health & version endpoints (Render + monitoring)

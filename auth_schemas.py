@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import re
-
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 class RequestOtpIn(BaseModel):
     email: str = Field(..., examples=["student@example.com"])
@@ -32,26 +30,4 @@ class LogoutIn(BaseModel):
 
 class BasicOut(BaseModel):
     ok: bool
-    message: str | None = None
-
-class ProfileUpsertIn(BaseModel):
-    @field_validator('class_level')
-    @classmethod
-    def normalize_class_level(cls, v):
-        if isinstance(v, int):
-            return v
-        s = str(v).strip()
-        m = re.search(r'(\d{1,2})', s)
-        if not m:
-            raise ValueError('Invalid class_level')
-        return int(m.group(1))
-
-    full_name: str = Field(..., examples=["Amit Manal"])
-    board: str = Field(..., examples=["CBSE"])
-    class_level: int | str = Field(..., examples=[9])
-
-class ProfileOut(BaseModel):
-    ok: bool
-    profile: dict | None = None
-    error: str | None = None
     message: str | None = None

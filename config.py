@@ -129,33 +129,4 @@ CB_COOLDOWN_S = _env_int("CB_COOLDOWN_S", 20)
 # -----------------------------
 # backwards-compatible extras (safe)
 # -----------------------------
-# Allow only explicitly configured origins.  If none are provided via
-# the environment, default to an empty list and rely on main.py to
-# append localhost/Hostinger origins.  Wildcards are no longer used by
-# default to mitigate open CORS policies.
-ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=[])
-
-
-# -----------------------------
-# Payments (Razorpay) - optional (skeleton)
-# -----------------------------
-RAZORPAY_KEY_ID = _env("RAZORPAY_KEY_ID", "")
-RAZORPAY_KEY_SECRET = _env("RAZORPAY_KEY_SECRET", "")
-RAZORPAY_WEBHOOK_SECRET = _env("RAZORPAY_WEBHOOK_SECRET", "")
-RAZORPAY_PRICE_PRO_INR = _env_int("RAZORPAY_PRICE_PRO_INR", 199)
-RAZORPAY_PRICE_MAX_INR = _env_int("RAZORPAY_PRICE_MAX_INR", 399)
-
-# -----------------------------
-# Extra safe defaults (import stability)
-# -----------------------------
-SERVICE_NAME = _env('SERVICE_NAME', 'knoweasy-engine-api')
-SERVICE_VERSION = _env('SERVICE_VERSION', _env('APP_VERSION', 'phase-2'))
-MAX_REQUEST_BODY_BYTES = _env_int('MAX_REQUEST_BODY_BYTES', 2_000_000)
-EMAIL_PROVIDER = _env('EMAIL_PROVIDER', '')
-EMAIL_FROM = _env('EMAIL_FROM', '')
-RESEND_API_KEY = _env('RESEND_API_KEY', '')
-SMTP_HOST = _env('SMTP_HOST', '')
-SMTP_PORT = _env('SMTP_PORT', '')
-SMTP_USER = _env('SMTP_USER', '')
-SMTP_PASS = _env('SMTP_PASS', '')
-SMTP_SECURITY = _env('SMTP_SECURITY', '')
+ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=["*"])

@@ -197,13 +197,13 @@ def db_log_solve(req: Any, out: Any, latency_ms: int, error: Optional[str]) -> N
     out_d = _coerce_mapping(out)
 
     board = (req_d.get("board") or "").strip() or None
-    class_level = (str(req_d.get("class") or req_d.get("class_") or req_d.get("class_level") or "")).strip() or None
+    class_level = (str(req_d.get("class") or req_d.get("class_level") or "")).strip() or None
     subject = (req_d.get("subject") or "").strip() or None
 
     question = req_d.get("question") or req_d.get("prompt") or ""
     question = question if isinstance(question, str) else str(question)
 
-    answer = out_d.get("final_answer") or out_d.get("answer") or out_d.get("text") or out_d.get("output") or ""
+    answer = out_d.get("answer") or out_d.get("text") or out_d.get("output") or ""
     answer = answer if isinstance(answer, str) else str(answer)
 
     insert_sql = """
@@ -230,21 +230,4 @@ def db_log_solve(req: Any, out: Any, latency_ms: int, error: Optional[str]) -> N
         return
 
 
-
-
-# -----------------------------
-# Backwards-compatible helper
-# -----------------------------
-
-
-def get_engine():
-    """Public wrapper for the cached SQLAlchemy engine (or None).
-
-    Some modules (e.g., Razorpay webhook handler) import `get_engine`.
-    Keeping this wrapper avoids ImportError and keeps DB initialization logic
-    centralized.
-    """
-    return _get_engine()
-
-
-__all__ = ["db_init", "db_health", "db_log_solve", "get_engine"]
+__all__ = ["db_init", "db_health", "db_log_solve"]
