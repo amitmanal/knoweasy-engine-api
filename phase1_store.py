@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import os
 import json  # needed for Redis JSON serialization
+import logging
 import secrets
 import string
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -50,11 +50,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 import redis_store
 
-# -------------------------
-# Logging
-# -------------------------
 logger = logging.getLogger(__name__)
-
 
 
 # -------------------------
@@ -64,7 +60,58 @@ logger = logging.getLogger(__name__)
 
 _ENGINE: Optional[Engine] = None
 
+# -------------------------
+# SQLAlchemy metadata + tables (Phase-1 minimal schema)
+# -------------------------
+
 metadata = MetaData()
+
+student_profiles = Table(
+    "student_profiles",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", BigInteger, nullable=False, unique=True, index=True),
+    Column("full_name", String(200), nullable=True),
+    Column("cls", Integer, nullable=True),
+    Column("board", String(100), nullable=True),
+    Column("target_exams_json", Text, nullable=False, default="[]"),
+    Column("class_group", String(20), nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+parent_codes = Table(
+    "parent_codes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("code", String(24), nullable=False, unique=True, index=True),
+    Column("student_user_id", BigInteger, nullable=False, index=True),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at", DateTime(timezone=True), nullable=True),
+    Column("used_by_parent_user_id", BigInteger, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+parent_links = Table(
+    "parent_links",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("parent_user_id", BigInteger, nullable=False, index=True),
+    Column("student_user_id", BigInteger, nullable=False, index=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+events = Table(
+    "events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", BigInteger, nullable=False, index=True),
+    Column("event_type", String(64), nullable=False, index=True),
+    Column("meta_json", Text, nullable=False, default="{}"),
+    Column("duration_sec", Integer, nullable=True),
+    Column("value_num", Integer, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
 
 
 
