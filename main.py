@@ -43,6 +43,10 @@ except Exception:
 
 app = FastAPI(title=SERVICE_NAME, version=str(SERVICE_VERSION))
 
+# -----------------------------
+# CORS (required for Hostinger frontend)
+# -----------------------------
+# Keep permissive for Phase-1 stability; tighten later.
 
 # -----------------------------
 # Request body size cap (stability + abuse protection)
@@ -108,19 +112,6 @@ async def request_logger(request: Request, call_next):
         except Exception:
             pass
         raise
-# -----------------------------
-# CORS (required for Hostinger frontend)
-# -----------------------------
-# Keep permissive for Phase-1 stability; tighten later.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
-    max_age=86400,
-)
-
 
 # -----------------------------
 # Routes
@@ -128,6 +119,31 @@ app.add_middleware(
 app.include_router(api_router)
 app.include_router(auth_router)
 app.include_router(phase1_router)
+
+# -----------------------------
+# CORS (required for Hostinger frontend + parent dashboard)
+# -----------------------------
+# IMPORTANT: Keep this middleware OUTERMOST so even error responses include CORS headers.
+ALLOWED_ORIGINS_EFFECTIVE = os.getenv('ALLOWED_ORIGINS', '').strip()
+if ALLOWED_ORIGINS_EFFECTIVE:
+    allow_origins = [o.strip() for o in ALLOWED_ORIGINS_EFFECTIVE.split(',') if o.strip()]
+elif isinstance(ALLOWED_ORIGINS, list) and ALLOWED_ORIGINS:
+    allow_origins = ALLOWED_ORIGINS
+else:
+    allow_origins = [
+        'https://knoweasylearning.com',
+        'https://www.knoweasylearning.com',
+        'http://localhost:8000',
+        'http://127.0.0.1:8000',
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allow_origins,
+    allow_credentials=False,
+    allow_methods=['GET', 'POST', 'OPTIONS'],
+    allow_headers=['Authorization', 'Content-Type', 'X-Requested-With'],
+)
 
 
 @app.on_event("startup")
