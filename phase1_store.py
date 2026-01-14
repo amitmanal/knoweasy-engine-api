@@ -44,6 +44,7 @@ from sqlalchemy import (
     create_engine,
     func,
     select,
+    literal,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -249,6 +250,41 @@ def create_parent_session(student_user_id: int, ttl_days: int = 365) -> Dict[str
     # TTL in seconds (365 days) – ensure sessions self‑expire.
     ttl_seconds = int(ttl_days * 24 * 3600)
     _redis_setex(rkey, ttl_seconds, payload)
+    import json
+
+    def _parse_meta(v):
+        """Parse event metadata stored as JSON string in `meta_json`."""
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            try:
+                return json.loads(v) or {}
+            except Exception:
+                return {}
+        return {}
+
+    # Build recent activity (safe JSON parse).
+    recent_activity = []
+    for r in recent:
+        meta_raw = r.get("meta_json")
+        if isinstance(meta_raw, str):
+            try:
+                import json
+                meta = json.loads(meta_raw) or {}
+            except Exception:
+                meta = {}
+        elif isinstance(meta_raw, dict):
+            meta = meta_raw
+        else:
+            meta = {}
+        recent_activity.append({
+            "event_type": r.get("event_type"),
+            "created_at": (r.get("created_at").isoformat() if r.get("created_at") else None),
+            "meta": meta,
+        })
+
     return {
         "parent_session": token,
         "student_user_id": int(student_user_id),
@@ -437,6 +473,21 @@ def upsert_student_profile(
         return prof
 
     ensure_tables()
+    import json
+
+    def _parse_meta(v):
+        """Parse event metadata stored as JSON string in `meta_json`."""
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            try:
+                return json.loads(v) or {}
+            except Exception:
+                return {}
+        return {}
+
     with engine.begin() as conn:
         existing = conn.execute(select(student_profiles.c.user_id).where(student_profiles.c.user_id == user_id)).first()
         if existing:
@@ -794,8 +845,12 @@ def analytics_summary(parent_user_id: int, student_user_id: int) -> Dict[str, An
             select(func.max(events.c.created_at)).where(events.c.user_id == student_user_id)
         ).scalar()
 
+        # `events` stores metadata in `meta_json` (JSON). Older deployments used `meta` or had no meta column at all.
+        meta_col = getattr(events.c, 'meta_json', None) or getattr(events.c, 'meta', None)
+        meta_sel = meta_col.label('meta_json') if meta_col is not None else literal(None).label('meta_json')
+
         recent = conn.execute(
-            select(events.c.event_type, events.c.created_at, events.c.meta)
+            select(events.c.event_type, events.c.created_at, meta_sel)
             .where(events.c.user_id == student_user_id)
             .order_by(events.c.created_at.desc())
             .limit(25)
@@ -807,7 +862,18 @@ def analytics_summary(parent_user_id: int, student_user_id: int) -> Dict[str, An
     for r in recent:
         if r.get("event_type") != "test_submitted":
             continue
-        meta = r.get("meta") or {}
+        # `meta_json` is stored as a JSON string in DB.
+        meta_raw = r.get("meta_json")
+        if isinstance(meta_raw, str):
+            try:
+                import json
+                meta = json.loads(meta_raw) or {}
+            except Exception:
+                meta = {}
+        elif isinstance(meta_raw, dict):
+            meta = meta_raw
+        else:
+            meta = {}
         subj = meta.get("subject")
         if not subj:
             continue
@@ -829,6 +895,26 @@ def analytics_summary(parent_user_id: int, student_user_id: int) -> Dict[str, An
     strengths = subj_avgs[:3]
     weaknesses = list(reversed(subj_avgs[-3:])) if len(subj_avgs) >= 3 else []
 
+    # Build recent activity (safe JSON parse).
+    recent_activity = []
+    for r in recent:
+        meta_raw = r.get("meta_json")
+        if isinstance(meta_raw, str):
+            try:
+                import json
+                meta = json.loads(meta_raw) or {}
+            except Exception:
+                meta = {}
+        elif isinstance(meta_raw, dict):
+            meta = meta_raw
+        else:
+            meta = {}
+        recent_activity.append({
+            "type": r.get("event_type"),
+            "at": r.get("created_at").isoformat() if r.get("created_at") else None,
+            "meta": meta,
+        })
+
     return {
         "time_spent_minutes_7d": int(round((time_7d or 0) / 60)),
         "active_days_7d": int(active_days_7d or 0),
@@ -837,12 +923,5 @@ def analytics_summary(parent_user_id: int, student_user_id: int) -> Dict[str, An
         "last_active_at": (last_active.isoformat() if last_active else None),
         "subject_strengths": strengths,
         "subject_weaknesses": weaknesses,
-        "recent_activity": [
-            {
-                "event_type": r.get("event_type"),
-                "created_at": (r.get("created_at").isoformat() if r.get("created_at") else None),
-                "meta": r.get("meta") or {},
-            }
-            for r in recent
-        ],
+        "recent_activity": recent_activity,
     }

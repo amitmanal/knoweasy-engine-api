@@ -138,17 +138,37 @@ else:
     ]
 
 
-# Normalize wildcard: if '*' is present, use strict wildcard list so CORS always returns ACAO='*'.
-if any(o == '*' for o in allow_origins):
-    allow_origins = ['*']
+# CORS: allow our Hostinger domains + local dev by default. Use ALLOWED_ORIGINS env to override.
+default_origins = [
+    'https://knoweasylearning.com',
+    'https://www.knoweasylearning.com',
+    'http://localhost',
+    'http://127.0.0.1',
+    'http://localhost:5500',
+    'http://127.0.0.1:5500',
+]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allow_origins,
-    allow_credentials=False,
-    allow_methods=['*'],
-    allow_headers=['*'],
-)
+# Merge env origins with defaults (env can include '*' to allow all origins).
+origins = list(dict.fromkeys((allow_origins or []) + default_origins))
+
+if any(o == '*' for o in origins):
+    # Wildcard mode (no credentials).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=['*'],
+        allow_credentials=False,
+        allow_methods=['*'],
+        allow_headers=['*'],
+    )
+else:
+    # Normal mode (supports Authorization header).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=['*'],
+        allow_headers=['*'],
+    )
 
 
 @app.on_event("startup")
