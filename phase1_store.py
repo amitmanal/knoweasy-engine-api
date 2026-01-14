@@ -855,7 +855,11 @@ def analytics_summary(parent_user_id: int, student_user_id: int) -> Dict[str, An
         ).scalar()
 
         # `events` stores metadata in `meta_json` (JSON). Older deployments used `meta` or had no meta column at all.
-        meta_col = getattr(events.c, 'meta_json', None) or getattr(events.c, 'meta', None)
+        # IMPORTANT: SQLAlchemy column objects do NOT support truthy checks.
+        # Using `A or B` here can trigger "Boolean value of this clause is not defined".
+        meta_col = getattr(events.c, "meta_json", None)
+        if meta_col is None:
+            meta_col = getattr(events.c, "meta", None)
         meta_sel = meta_col.label('meta_json') if meta_col is not None else literal(None).label('meta_json')
 
         recent = conn.execute(
