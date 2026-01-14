@@ -21,6 +21,7 @@ Notes
 from __future__ import annotations
 
 import os
+import json  # needed for Redis JSON serialization
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
@@ -151,6 +152,108 @@ def _redis_incr(key: str, ttl_seconds: int) -> int:
 
 def _redis_links_key(parent_user_id: int) -> str:
     return f"parent_links:{parent_user_id}"
+
+# -------------------------
+# Parent session helpers (Phase-1 persistent parent dashboard)
+#
+# We implement a lightweight parent session mechanism. When a parent enters a
+# one-time link code, we return a long‑lived session token tied to a single
+# student. This token is stored in Redis (fallback when DB is unavailable)
+# with a TTL of 365 days. There is intentionally no parent user_id involved,
+# making the parent dashboard read‑only and privacy‑safe.
+
+def _redis_parent_session_key(token: str) -> str:
+    """Return the Redis key for a parent session token."""
+    return f"parent_session:{token}"
+
+def create_parent_session(student_user_id: int, ttl_days: int = 365) -> Dict[str, Any]:
+    """Create a new parent session for the given student.
+
+    Returns a dict with the session token and expiry information. The session
+    token is stored in Redis with a TTL so parents can reopen the dashboard
+    across devices without linking again. We intentionally do not persist
+    sessions in Postgres for Phase‑1 stability; if the DB is configured we
+    still prefer Redis because it avoids migrations and potential 500 errors.
+    """
+    now = _utcnow()
+    expires = now + timedelta(days=ttl_days)
+    # Use a URL‑safe token; 32 bytes → ~43 characters. This is sufficient for
+    # unpredictable tokens that are hard to guess.
+    token = secrets.token_urlsafe(32)
+    rkey = _redis_parent_session_key(token)
+    # Store session payload. Use isoformat() for timestamps so values are JSON
+    # serializable and human‑readable.
+    payload = {
+        "token": token,
+        "student_user_id": int(student_user_id),
+        "created_at": now.isoformat(),
+        "expires_at": expires.isoformat(),
+    }
+    # TTL in seconds (365 days) – ensure sessions self‑expire.
+    ttl_seconds = int(ttl_days * 24 * 3600)
+    _redis_setex(rkey, ttl_seconds, payload)
+    return {
+        "parent_session": token,
+        "student_user_id": int(student_user_id),
+        "expires_at": expires.isoformat(),
+        "expires_in_days": ttl_days,
+    }
+
+def get_parent_session(token: str) -> Optional[Dict[str, Any]]:
+    """Return the parent session payload if valid and not expired.
+
+    If the session does not exist or is expired, returns None. Expired
+    sessions are automatically cleaned up by Redis via TTL so we simply
+    attempt to read the record.
+    """
+    token_n = (token or "").strip()
+    if not token_n:
+        return None
+    rkey = _redis_parent_session_key(token_n)
+    data = _redis_get(rkey)
+    if not data:
+        return None
+    # Parse expiry string into datetime for validation. If parsing fails we
+    # assume expired to err on the side of safety.
+    try:
+        expires_at_str = data.get("expires_at")
+        if expires_at_str:
+            expires_at = datetime.fromisoformat(expires_at_str)
+            if expires_at.tzinfo is None:
+                # assume UTC when missing tzinfo
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at < _utcnow():
+                # expired – remove and return None
+                try:
+                    _redis_del(rkey)
+                except Exception:
+                    pass
+                return None
+    except Exception:
+        # If the payload is malformed, remove it for safety
+        try:
+            _redis_del(rkey)
+        except Exception:
+            pass
+        return None
+    return data
+
+def claim_parent_code(code: str) -> Optional[int]:
+    """Consume a one‑time parent link code and return the associated student ID.
+
+    This wraps the existing link_parent_with_code() helper by passing a
+    dummy parent_user_id=0. It marks the code as used (removing it from
+    Redis) and returns the student_user_id on success. If the code is
+    invalid, expired or already used, returns None.
+    """
+    try:
+        ok, _msg, sid = link_parent_with_code(parent_user_id=0, code=code)
+        if ok and sid:
+            return int(sid)
+        return None
+    except Exception:
+        # Never raise exceptions to callers; treat as invalid.
+        return None
 
 def _redis_student_profile_key(user_id: int) -> str:
     return f"student_profile:{user_id}"
