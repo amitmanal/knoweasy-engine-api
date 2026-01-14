@@ -27,6 +27,25 @@ import phase1_store
 router = APIRouter()
 
 
+def _uid(u: Dict[str, Any]) -> int:
+    """Return authenticated user's integer id.
+
+    `auth_store.session_user()` returns a dict with key `user_id`.
+    Older code used `id`. Support both defensively.
+    """
+    if not isinstance(u, dict):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    raw = u.get("user_id")
+    if raw is None:
+        raw = u.get("id")
+    if raw is None:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        return int(raw)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 def _token_from_auth_header(authorization: Optional[str]) -> str:
     if not authorization:
         return ""
@@ -69,7 +88,7 @@ def student_profile(payload: Dict[str, Any], u: Dict[str, Any] = Depends(require
     class_group = payload.get("class_group")
 
     prof = phase1_store.upsert_student_profile(
-        user_id=int(u["id"]),
+        user_id=_uid(u),
         full_name=full_name,
         cls=cls,
         board=board,
@@ -94,7 +113,7 @@ def student_parent_link_code(u: Dict[str, Any] = Depends(require_role("student")
     parent to establish a long‑lived parent session. Returns the code and
     expiry info.
     """
-    data = phase1_store.create_parent_code(student_user_id=int(u["id"]), ttl_seconds=900)
+    data = phase1_store.create_parent_code(student_user_id=_uid(u), ttl_seconds=900)
     return {"ok": True, **data}
 
 @router.post("/student/parent-code")
@@ -168,15 +187,15 @@ def parent_dashboard(authorization: Optional[str] = Header(None)):
 
 @router.get("/parent/students")
 def parent_students(u: Dict[str, Any] = Depends(require_role("parent"))):
-    students = phase1_store.list_parent_students(parent_user_id=int(u["id"]))
+    students = phase1_store.list_parent_students(parent_user_id=_uid(u))
     return {"ok": True, "students": students}
 
 
 @router.get("/parent/analytics/summary")
 def parent_analytics_summary(student_user_id: int, u: Dict[str, Any] = Depends(require_role("parent"))):
-    if not phase1_store.is_parent_linked(parent_user_id=int(u["id"]), student_user_id=int(student_user_id)):
+    if not phase1_store.is_parent_linked(parent_user_id=_uid(u), student_user_id=int(student_user_id)):
         raise HTTPException(status_code=403, detail="Not linked to this student")
-    summary = phase1_store.analytics_summary(parent_user_id=int(u["id"]), student_user_id=int(student_user_id))
+    summary = phase1_store.analytics_summary(parent_user_id=_uid(u), student_user_id=int(student_user_id))
     return {"ok": True, "summary": summary}
 
 
@@ -195,7 +214,7 @@ def events_track(payload: Dict[str, Any], u: Dict[str, Any] = Depends(get_curren
         duration_sec = payload.get("duration_sec")
         value_num = payload.get("value_num")
         phase1_store.track_event(
-            user_id=int(u["id"]),
+            user_id=_uid(u),
             event_type=event_type,
             meta=meta,
             duration_sec=duration_sec,
