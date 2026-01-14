@@ -214,7 +214,14 @@ def parent_analytics_summary(student_user_id: int, u: Dict[str, Any] = Depends(r
     if not phase1_store.is_parent_linked(parent_user_id=_uid(u), student_user_id=int(student_user_id)):
         raise HTTPException(status_code=403, detail="Not linked to this student")
     summary = phase1_store.analytics_summary(parent_user_id=_uid(u), student_user_id=int(student_user_id))
-    return {"ok": True, "summary": summary}
+    # Backward/forward compatible response: keep nested `summary` but also flatten fields for older frontends.
+    resp = {"ok": True, "summary": summary}
+    if isinstance(summary, dict):
+        # Flatten summary fields at top-level so UIs can read without `summary` nesting.
+        for k, v in summary.items():
+            if k not in resp:
+                resp[k] = v
+    return resp
 
 
 @router.post("/events/track")

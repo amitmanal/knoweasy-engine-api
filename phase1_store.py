@@ -799,11 +799,20 @@ def analytics_summary(parent_user_id: int, student_user_id: int) -> Dict[str, An
         return {
             "student_user_id": int(student_user_id),
             "generated_at": now.isoformat(),
+            # Canonical keys
+            "time_spent_minutes_7d": 0,
             "active_days_7d": 0,
-            "tests_30d": int(tests["count_30d"]),
-            "avg_score_30d": avg_score,
-            "study_minutes_7d": 0,
+            "tests_attempted_30d": int(tests["count_30d"]),
+            "avg_score_30d": avg_score if tests["value_count"] > 0 else None,
             "recent_activity": [],
+            # Aliases for older/newer UIs
+            "time_spent_mins_7d": 0,
+            "time_spent_minutes": 0,
+            "active_days_7": 0,
+            "tests_30d": int(tests["count_30d"]),
+            "recent": [],
+            # Phase-1 placeholders (kept for premium feel)
+            "subject_strengths": [],
             "subject_weaknesses": [],
         }
 
@@ -916,6 +925,7 @@ def analytics_summary(parent_user_id: int, student_user_id: int) -> Dict[str, An
         })
 
     return {
+        # Canonical keys
         "time_spent_minutes_7d": int(round((time_7d or 0) / 60)),
         "active_days_7d": int(active_days_7d or 0),
         "tests_attempted_30d": int(tests_30d or 0),
@@ -924,4 +934,10 @@ def analytics_summary(parent_user_id: int, student_user_id: int) -> Dict[str, An
         "subject_strengths": strengths,
         "subject_weaknesses": weaknesses,
         "recent_activity": recent_activity,
+        # Aliases for UI compatibility
+        "time_spent_mins_7d": int(round((time_7d or 0) / 60)),
+        "time_spent_minutes": int(round((time_7d or 0) / 60)),
+        "active_days_7": int(active_days_7d or 0),
+        "tests_30d": int(tests_30d or 0),
+        "recent": recent_activity,
     }
