@@ -24,6 +24,7 @@ import os
 import json  # needed for Redis JSON serialization
 import secrets
 import string
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -49,6 +50,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 import redis_store
 
+# -------------------------
+# Logging
+# -------------------------
+logger = logging.getLogger(__name__)
+
+
 
 # -------------------------
 # Engine / metadata
@@ -56,6 +63,9 @@ import redis_store
 
 
 _ENGINE: Optional[Engine] = None
+
+metadata = MetaData()
+
 
 
 def _clean_sslmode(value: str | None) -> str | None:
