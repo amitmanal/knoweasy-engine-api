@@ -25,6 +25,7 @@ import requests
 from fastapi import APIRouter, Depends, HTTPException
 
 from phase1_router import get_current_user
+import billing_store
 from payments_store import get_subscription, mark_payment_paid, record_order, upsert_subscription
 
 logger = logging.getLogger("knoweasy-engine-api.payments")
@@ -50,30 +51,42 @@ def _get_razorpay_keys() -> tuple[str, str]:
     return key_id, key_secret
 
 
-def _plan_to_amount_paise(plan: str) -> int:
+def _plan_to_amount_paise(plan: str, billing_cycle: str) -> int:
     # Safety-first defaults: ₹1 if env not set.
     plan = (plan or "").lower().strip()
+    bc = (billing_cycle or "monthly").lower().strip()
     if plan == "pro":
-        return _env_int("PLAN_PRO_AMOUNT_PAISE", 100)
+        if bc == "yearly":
+            return _env_int("PLAN_PRO_AMOUNT_PAISE_YEARLY", _env_int("PLAN_PRO_AMOUNT_PAISE", 100))
+        return _env_int("PLAN_PRO_AMOUNT_PAISE_MONTHLY", _env_int("PLAN_PRO_AMOUNT_PAISE", 100))
     if plan == "max":
-        return _env_int("PLAN_MAX_AMOUNT_PAISE", 100)
+        if bc == "yearly":
+            return _env_int("PLAN_MAX_AMOUNT_PAISE_YEARLY", _env_int("PLAN_MAX_AMOUNT_PAISE", 100))
+        return _env_int("PLAN_MAX_AMOUNT_PAISE_MONTHLY", _env_int("PLAN_MAX_AMOUNT_PAISE", 100))
     raise HTTPException(status_code=400, detail="Invalid plan")
 
 
-def _plan_duration_days(plan: str) -> int:
+def _plan_duration_days(plan: str, billing_cycle: str) -> int:
     plan = (plan or "").lower().strip()
+    bc = (billing_cycle or "monthly").lower().strip()
     if plan == "pro":
-        return _env_int("PLAN_PRO_DAYS", 30)
+        if bc == "yearly":
+            return _env_int("PLAN_PRO_DAYS_YEARLY", 365)
+        return _env_int("PLAN_PRO_DAYS_MONTHLY", 30)
     if plan == "max":
-        return _env_int("PLAN_MAX_DAYS", 30)
+        if bc == "yearly":
+            return _env_int("PLAN_MAX_DAYS_YEARLY", 365)
+        return _env_int("PLAN_MAX_DAYS_MONTHLY", 30)
     raise HTTPException(status_code=400, detail="Invalid plan")
 
 
 @router.get("/me")
 def payments_me(user=Depends(get_current_user)):
-    # Always returns something.
-    sub = get_subscription(int(user["user_id"]))
-    return {"ok": True, "subscription": sub}
+    uid = int(user["user_id"])
+    sub = get_subscription(uid)
+    plan = (sub.get("plan") or "free").lower().strip() or "free"
+    wallet = billing_store.get_wallet(uid, plan)
+    return {"ok": True, "subscription": sub, "wallet": wallet}
 
 
 @router.post("/create_order")
@@ -83,7 +96,10 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Only students can purchase")
 
     plan = (payload.get("plan") or "").lower().strip()
-    amount_paise = _plan_to_amount_paise(plan)
+    billing_cycle = (payload.get("billing_cycle") or "monthly").lower().strip() or "monthly"
+    if billing_cycle not in ("monthly", "yearly"):
+        billing_cycle = "monthly"
+    amount_paise = _plan_to_amount_paise(plan, billing_cycle)
     currency = (payload.get("currency") or "INR").upper().strip() or "INR"
 
     key_id, key_secret = _get_razorpay_keys()
@@ -94,7 +110,7 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
         "amount": int(amount_paise),
         "currency": currency,
         "receipt": f"knoweasy_{user['user_id']}_{plan}",
-        "notes": {"user_id": str(user["user_id"]), "plan": plan},
+        "notes": {"user_id": str(user["user_id"]), "plan": plan, "billing_cycle": billing_cycle, "type": "subscription"},
     }
 
     try:
@@ -117,7 +133,7 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
     if not order_id:
         raise HTTPException(status_code=502, detail="Razorpay order id missing")
 
-    record_order(int(user["user_id"]), plan, int(amount_paise), currency, order_id)
+    record_order(int(user["user_id"]), plan, int(amount_paise), currency, order_id, payment_type="subscription", billing_cycle=billing_cycle)
 
     return {
         "ok": True,
@@ -127,6 +143,7 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
         "amount_paise": int(amount_paise),
         "currency": currency,
         "plan": plan,
+        "billing_cycle": billing_cycle,
     }
 
 
@@ -137,6 +154,9 @@ def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Only students can verify")
 
     plan = (payload.get("plan") or "").lower().strip()
+    billing_cycle = (payload.get("billing_cycle") or "monthly").lower().strip() or "monthly"
+    if billing_cycle not in ("monthly", "yearly"):
+        billing_cycle = "monthly"
     razorpay_order_id = (payload.get("razorpay_order_id") or "").strip()
     razorpay_payment_id = (payload.get("razorpay_payment_id") or "").strip()
     razorpay_signature = (payload.get("razorpay_signature") or "").strip()
@@ -155,7 +175,12 @@ def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)):
 
     mark_payment_paid(int(user["user_id"]), razorpay_order_id, razorpay_payment_id, razorpay_signature)
 
-    duration_days = _plan_duration_days(plan)
-    sub = upsert_subscription(int(user["user_id"]), plan, duration_days)
+    duration_days = _plan_duration_days(plan, billing_cycle)
+    sub = upsert_subscription(int(user["user_id"]), plan, duration_days, billing_cycle=billing_cycle)
+    # reset wallet included credits on activation
+    try:
+        billing_store.reset_included_credits(int(user["user_id"]), plan, reason=f"subscription_{billing_cycle}")
+    except Exception:
+        pass
 
     return {"ok": True, "subscription": sub}
