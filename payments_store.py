@@ -95,6 +95,9 @@ def ensure_tables() -> None:
             razorpay_payment_id TEXT,
             razorpay_signature TEXT,
             status TEXT NOT NULL DEFAULT 'created',
+            payment_type TEXT NOT NULL DEFAULT 'subscription',
+            billing_cycle TEXT NOT NULL DEFAULT 'monthly',
+            booster_sku TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(razorpay_order_id)
         );
@@ -123,6 +126,9 @@ def ensure_tables() -> None:
                 "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS razorpay_payment_id TEXT;",
                 "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS razorpay_signature TEXT;",
                 "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'created';",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS payment_type TEXT DEFAULT 'subscription';",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS billing_cycle TEXT DEFAULT 'monthly';",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS booster_sku TEXT;",
                 "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();",
             ]
             for stmt in repairs:
@@ -213,7 +219,16 @@ def upsert_subscription(user_id: int, plan: str, duration_days: int) -> Dict[str
         return {"plan": plan, "status": "active", "expires_at": expires_at}
 
 
-def record_order(user_id: int, plan: str, amount_paise: int, currency: str, razorpay_order_id: str) -> None:
+def record_order(
+    user_id: int,
+    plan: str,
+    amount_paise: int,
+    currency: str,
+    razorpay_order_id: str,
+    payment_type: str = 'subscription',
+    billing_cycle: str = 'monthly',
+    booster_sku: str | None = None,
+) -> None:
     ensure_tables()
     eng = _get_engine()
     if eng is None:
@@ -223,8 +238,14 @@ def record_order(user_id: int, plan: str, amount_paise: int, currency: str, razo
             conn.execute(
                 text(
                     """
-                    INSERT INTO payments(user_id, plan, amount_paise, currency, razorpay_order_id, status)
-                    VALUES (:user_id, :plan, :amount_paise, :currency, :order_id, 'created')
+                    INSERT INTO payments(
+                        user_id, plan, amount_paise, currency, razorpay_order_id,
+                        status, payment_type, billing_cycle, booster_sku
+                    )
+                    VALUES (
+                        :user_id, :plan, :amount_paise, :currency, :order_id,
+                        'created', :payment_type, :billing_cycle, :booster_sku
+                    )
                     ON CONFLICT (razorpay_order_id) DO NOTHING
                     """
                 ),
@@ -234,6 +255,9 @@ def record_order(user_id: int, plan: str, amount_paise: int, currency: str, razo
                     "amount_paise": int(amount_paise),
                     "currency": currency,
                     "order_id": razorpay_order_id,
+                    "payment_type": payment_type,
+                    "billing_cycle": billing_cycle,
+                    "booster_sku": booster_sku,
                 },
             )
     except Exception:
