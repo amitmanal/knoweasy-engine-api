@@ -82,6 +82,9 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
     if role != "student":
         raise HTTPException(status_code=403, detail="Only students can purchase")
 
+    logger.info("create_order user_id=%s plan=%s", user.get("user_id"), (payload.get("plan") or "").lower().strip())
+
+
     plan = (payload.get("plan") or "").lower().strip()
     amount_paise = _plan_to_amount_paise(plan)
     currency = (payload.get("currency") or "INR").upper().strip() or "INR"

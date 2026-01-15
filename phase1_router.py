@@ -15,6 +15,8 @@ Parents are read-only and may only access linked students.
 
 from __future__ import annotations
 
+import logging
+
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -24,6 +26,8 @@ from auth_store import session_user
 import phase1_store
 
 
+
+logger = logging.getLogger("knoweasy.auth")
 router = APIRouter()
 
 
@@ -58,9 +62,13 @@ def _token_from_auth_header(authorization: Optional[str]) -> str:
 def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     token = _token_from_auth_header(authorization)
     if not token:
+        logger.warning("auth missing token (Authorization header empty)")
         raise HTTPException(status_code=401, detail="Missing token")
     u = session_user(token)
     if not u:
+        # Don't log full token; log a short fingerprint for debugging.
+        fp = token[:6] + "…" + token[-4:] if len(token) > 12 else token[:4] + "…"
+        logger.warning("auth invalid/expired token fp=%s", fp)
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return u
 
