@@ -125,6 +125,7 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
         "key_id": key_id,
         "order_id": order_id,
         "amount": int(amount_paise),
+        "amount_paise": int(amount_paise),
         "currency": currency,
         "plan": plan,
     }
