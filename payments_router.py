@@ -24,7 +24,7 @@ from typing import Any, Dict, Optional
 import requests
 from fastapi import APIRouter, Depends, HTTPException
 
-from auth_utils import get_current_user
+from phase1_router import get_current_user
 from payments_store import get_subscription, mark_payment_paid, record_order, upsert_subscription
 
 logger = logging.getLogger("knoweasy-engine-api.payments")
