@@ -24,10 +24,6 @@ from redis_store import get_json as redis_get_json
 from redis_store import setex_json as redis_setex_json
 from redis_store import incr_with_ttl as redis_incr_with_ttl
 
-from auth_store import session_user
-from payments_store import get_subscription
-import billing_store
-
 router = APIRouter()
 
 
@@ -138,53 +134,6 @@ def solve_route(
             ).model_dump(),
         )
 
-    # -------- Optional auth + credit enforcement (best-effort) --------
-    # If a Bearer token is present, we enforce plan/credits. If not present, we behave as anonymous free.
-    auth_header = (request.headers.get("authorization") or request.headers.get("Authorization") or "").strip()
-    user_ctx = None
-    sub = None
-    wallet = None
-    credits_units_charged = 0
-
-    if auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1].strip()
-        try:
-            user_ctx = session_user(token)
-        except Exception:
-            return JSONResponse(
-                status_code=401,
-                content=_safe_failure(
-                    "Session expired. Please login again.",
-                    "AUTH_EXPIRED",
-                ).model_dump(),
-            )
-
-        try:
-            sub = get_subscription(int(user_ctx["user_id"]))
-            plan = (sub.get("plan") or "free").lower().strip() or "free"
-
-            q = (req.question or "").strip()
-            # Simple, stable units estimator (tunable later)
-            units = 120 + max(0, len(q) // 20)
-            units = max(60, min(600, int(units)))
-
-            # Consume credits (402 if insufficient)
-            try:
-                out = billing_store.consume_credits(int(user_ctx["user_id"]), plan, units, meta={"route": "/solve", "answer_mode": req.answer_mode, "subject": req.subject, "board": req.board})
-                wallet = out
-                credits_units_charged = int(out.get("consumed") or units)
-            except ValueError:
-                return JSONResponse(
-                    status_code=402,
-                    content=_safe_failure(
-                        "You have used all your AI credits. Please buy a Booster Pack or upgrade your plan.",
-                        "OUT_OF_CREDITS",
-                    ).model_dump(),
-                )
-        except Exception:
-            # If billing fails, we do NOT block solving (stability first)
-            pass
-
     # -------- Cache (best-effort) --------
     payload = req.model_dump()
     cache_key = _cache_key(payload)
@@ -194,15 +143,6 @@ def solve_route(
         # Still log "served from cache" as best effort
         try:
             db_log_solve(req=req, out=cached, latency_ms=0, error=None)
-        except Exception:
-            pass
-
-        # Attach billing info (best-effort) without breaking old clients
-        try:
-            if user_ctx and isinstance(out, dict):
-                out_flags = list(out.get("flags", []) or [])
-                out_flags.append("BILLED")
-                out["flags"] = out_flags
         except Exception:
             pass
 
@@ -253,17 +193,9 @@ def solve_route(
             steps=out.get("steps", []),
             assumptions=out.get("assumptions", []),
             confidence=float(out.get("confidence", 0.5)),
-            flags=(out.get("flags", []) or []) + (["AUTH"] if user_ctx else []),
+            flags=out.get("flags", []),
             safe_note=out.get("safe_note"),
-            meta={
-                "engine": "knoweasy-orchestrator-phase1",
-                "billing": {
-                    "user_id": int(user_ctx["user_id"]) if user_ctx else None,
-                    "plan": (sub.get("plan") if isinstance(sub, dict) else None) if user_ctx else None,
-                    "credits_units_charged": int(credits_units_charged) if user_ctx else 0,
-                    "wallet": wallet if user_ctx else None,
-                },
-            },
+            meta={"engine": "knoweasy-orchestrator-phase1"},
         )
 
     except Exception as e:
