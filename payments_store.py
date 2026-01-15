@@ -106,6 +106,32 @@ def ensure_tables() -> None:
         with eng.begin() as conn:
             for stmt in ddl:
                 conn.execute(text(stmt))
+            # --- lightweight schema repair (idempotent) ---
+            # Older DBs may have subscriptions/payments tables missing columns.
+            # We repair using ALTER TABLE ... ADD COLUMN IF NOT EXISTS (Postgres-safe).
+            repairs = [
+                "ALTER TABLE IF EXISTS subscriptions ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free';",
+                "ALTER TABLE IF EXISTS subscriptions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';",
+                "ALTER TABLE IF EXISTS subscriptions ADD COLUMN IF NOT EXISTS starts_at TIMESTAMPTZ NOT NULL DEFAULT NOW();",
+                "ALTER TABLE IF EXISTS subscriptions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;",
+                "ALTER TABLE IF EXISTS subscriptions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();",
+                "ALTER TABLE IF EXISTS subscriptions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS plan TEXT;",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS amount_paise INT;",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'INR';",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS razorpay_order_id TEXT;",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS razorpay_payment_id TEXT;",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS razorpay_signature TEXT;",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'created';",
+                "ALTER TABLE IF EXISTS payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();",
+            ]
+            for stmt in repairs:
+                try:
+                    conn.execute(text(stmt))
+                except Exception:
+                    # Non-fatal: if table doesn't exist yet or dialect doesn't support IF EXISTS/IF NOT EXISTS
+                    logger.debug("payments_store schema repair skipped: %s", stmt, exc_info=True)
+
     except Exception:
         logger.exception("payments_store.ensure_tables failed (non-fatal)")
 
