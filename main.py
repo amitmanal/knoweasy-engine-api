@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from router import router as api_router
 from auth_router import router as auth_router
 from phase1_router import router as phase1_router
+from payments_router import router as payments_router
 import phase1_store
 from redis_store import redis_health
 from db import db_health
@@ -119,6 +120,7 @@ async def request_logger(request: Request, call_next):
 app.include_router(api_router)
 app.include_router(auth_router)
 app.include_router(phase1_router)
+app.include_router(payments_router)
 
 # -----------------------------
 # CORS (required for Hostinger frontend + parent dashboard)
