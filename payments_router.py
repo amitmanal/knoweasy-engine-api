@@ -92,7 +92,6 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
     # https://razorpay.com/docs/api/orders/
     order_payload = {
         "amount": int(amount_paise),
-        "amount_paise": int(amount_paise),
         "currency": currency,
         "receipt": f"knoweasy_{user['user_id']}_{plan}",
         "notes": {"user_id": str(user["user_id"]), "plan": plan},
