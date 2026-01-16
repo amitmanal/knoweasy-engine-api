@@ -503,24 +503,33 @@ def list_booster_packs() -> list[Dict[str, Any]]:
 
 
 def _append_ledger(conn, user_id: int, event_type: str, source: str, units: int, included_after: int, booster_after: int, meta: Dict[str, Any]) -> None:
+    """Best-effort credit ledger write.
+
+    Important: If the INSERT fails (schema drift, missing table/column, etc.) Postgres
+    marks the *whole* transaction as aborted. We must isolate this write in a SAVEPOINT
+    so booster/plan flows don't get broken by a non-critical ledger failure.
+    """
     try:
-        conn.execute(
-            text(
-                """
-                INSERT INTO credit_ledger(user_id, event_type, source, units, included_after, booster_after, meta_json)
-                VALUES (:user_id, :event_type, :source, :units, :included_after, :booster_after, :meta_json)
-                """
-            ),
-            {
-                "user_id": int(user_id),
-                "event_type": str(event_type),
-                "source": str(source),
-                "units": int(units),
-                "included_after": int(included_after),
-                "booster_after": int(booster_after),
-                "meta_json": json.dumps(meta or {}, ensure_ascii=False),
-            },
-        )
+        # begin_nested() creates a SAVEPOINT on Postgres.
+        # If the ledger insert fails, only the savepoint is rolled back.
+        with conn.begin_nested():
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO credit_ledger(user_id, event_type, source, units, included_after, booster_after, meta_json)
+                    VALUES (:user_id, :event_type, :source, :units, :included_after, :booster_after, :meta_json)
+                    """
+                ),
+                {
+                    "user_id": int(user_id),
+                    "event_type": str(event_type),
+                    "source": str(source),
+                    "units": int(units),
+                    "included_after": int(included_after),
+                    "booster_after": int(booster_after),
+                    "meta_json": json.dumps(meta or {}, ensure_ascii=False),
+                },
+            )
     except Exception:
         # ledger must never break business flow
-        logger.debug("credit ledger append failed", exc_info=True)
+        logger.debug("credit ledger append failed (ignored)", exc_info=True)

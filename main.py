@@ -9,6 +9,8 @@ from typing import Any, Dict
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import hmac
+import hashlib
 
 from router import router as api_router
 from auth_router import router as auth_router
@@ -123,6 +125,64 @@ app.include_router(auth_router)
 app.include_router(phase1_router)
 app.include_router(payments_router)
 app.include_router(billing_router)
+
+
+@app.post("/webhook/razorpay")
+async def razorpay_webhook(request: Request):
+    """Optional Razorpay webhook endpoint.
+
+    Your UI already does a client->server verify call, so this webhook is
+    primarily to prevent 404 spam and enable future reconciliation.
+
+    If you configure Razorpay Webhooks, set env var:
+    - RAZORPAY_WEBHOOK_SECRET
+    """
+    body = await request.body()
+    secret = os.getenv("RAZORPAY_WEBHOOK_SECRET")
+    sig = request.headers.get("X-Razorpay-Signature")
+
+    # If secret not set, accept and ignore (non-breaking)
+    if not secret:
+        return {"ok": True, "ignored": True}
+
+    if not sig:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "missing signature"})
+
+    expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad signature"})
+
+    # Verified webhook. For now we only ACK.
+    return {"ok": True}
+
+# -----------------------------
+# Razorpay webhook (optional)
+# -----------------------------
+# Razorpay may send webhooks (if enabled in dashboard). We ACK them safely so
+# production logs don't fill with 404s. Later we can use this to auto-activate
+# plans/boosters server-side.
+
+
+@app.post("/webhook/razorpay")
+async def razorpay_webhook(request: Request):
+    try:
+        body = await request.body()
+    except Exception:
+        body = b""
+
+    secret = os.getenv("RAZORPAY_WEBHOOK_SECRET", "").strip()
+    sig = request.headers.get("X-Razorpay-Signature") or request.headers.get("x-razorpay-signature")
+
+    # If secret is configured, verify signature.
+    if secret:
+        if not sig:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "MISSING_SIGNATURE"})
+        expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, str(sig)):
+            return JSONResponse(status_code=400, content={"ok": False, "error": "BAD_SIGNATURE"})
+
+    # For now: accept and ignore. (Verification/activation handled by client verify endpoint.)
+    return {"ok": True}
 
 # -----------------------------
 # CORS (required for Hostinger frontend + parent dashboard)
