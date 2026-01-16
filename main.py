@@ -14,6 +14,7 @@ from router import router as api_router
 from auth_router import router as auth_router
 from phase1_router import router as phase1_router
 from payments_router import router as payments_router
+from billing_router import router as billing_router
 import phase1_store
 from redis_store import redis_health
 from db import db_health
@@ -121,6 +122,7 @@ app.include_router(api_router)
 app.include_router(auth_router)
 app.include_router(phase1_router)
 app.include_router(payments_router)
+app.include_router(billing_router)
 
 # -----------------------------
 # CORS (required for Hostinger frontend + parent dashboard)
@@ -150,20 +152,27 @@ default_origins = [
     'http://127.0.0.1:5500',
 ]
 
-# Merge env origins with defaults.
-# NOTE: If env accidentally includes '*', we ignore it because this app uses
-# Authorization headers (credentials mode) and wildcard origins can break CORS.
+# Merge env origins with defaults (env can include '*' to allow all origins).
 origins = list(dict.fromkeys((allow_origins or []) + default_origins))
-origins = [o for o in origins if o != '*']
 
-# Normal mode (supports Authorization header).
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*'],
-)
+if any(o == '*' for o in origins):
+    # Wildcard mode (no credentials).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=['*'],
+        allow_credentials=False,
+        allow_methods=['*'],
+        allow_headers=['*'],
+    )
+else:
+    # Normal mode (supports Authorization header).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=['*'],
+        allow_headers=['*'],
+    )
 
 
 @app.on_event("startup")
@@ -173,6 +182,15 @@ def _startup() -> None:
         phase1_store.ensure_tables()
     except Exception:
         # Never crash boot. Health endpoint will still show DB status.
+        pass
+
+    try:
+        import payments_store
+        import billing_store
+
+        payments_store.ensure_tables()
+        billing_store.ensure_tables()
+    except Exception:
         pass
 
 # -----------------------------
