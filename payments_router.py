@@ -25,58 +25,12 @@ import requests
 from fastapi import APIRouter, Depends, HTTPException
 
 from phase1_router import get_current_user
-from payments_store import get_subscription, get_wallet, mark_payment_paid, record_order, upsert_subscription
+import billing_store
+from payments_store import get_subscription, mark_payment_paid, record_order, upsert_subscription
 
 logger = logging.getLogger("knoweasy-engine-api.payments")
 
 router = APIRouter(prefix="/payments", tags=["payments"])
-
-
-def _compute_warnings(wallet: Dict[str, Any]) -> Dict[str, Any]:
-    """Compute AI credit warnings for UI + hard blocking."""
-    try:
-        included_total = int(wallet.get("included_total") or 0)
-        included_remaining = int(wallet.get("included_remaining") or 0)
-        booster_remaining = int(wallet.get("booster_remaining") or 0)
-        remaining = max(0, included_remaining + booster_remaining)
-        total = max(1, included_total + max(0, booster_remaining))
-        pct = int(round((remaining / total) * 100)) if total > 0 else 0
-        cycle_end_at = wallet.get("cycle_end_at")
-
-        level = "ok"
-        if remaining <= 0:
-            level = "blocked"
-        elif pct <= 10:
-            level = "critical"
-        elif pct <= 30:
-            level = "low"
-
-        if level == "blocked":
-            msg = "AI credits finished. Buy a booster pack to continue."  # hard stop
-        elif level == "critical":
-            msg = f"AI credits critical: {remaining}/{total} ({pct}%) left."
-        elif level == "low":
-            msg = f"AI credits low: {remaining}/{total} ({pct}%) left."
-        else:
-            msg = ""
-
-        return {
-            "level": level,
-            "remaining": remaining,
-            "total": total,
-            "pct": pct,
-            "cycle_end_at": cycle_end_at,
-            "message": msg,
-        }
-    except Exception:
-        return {
-            "level": "ok",
-            "remaining": 0,
-            "total": 0,
-            "pct": 0,
-            "cycle_end_at": None,
-            "message": "",
-        }
 
 
 def _env_int(name: str, default: int) -> int:
@@ -97,47 +51,42 @@ def _get_razorpay_keys() -> tuple[str, str]:
     return key_id, key_secret
 
 
-def _plan_to_amount_paise(plan: str) -> int:
+def _plan_to_amount_paise(plan: str, billing_cycle: str) -> int:
     # Safety-first defaults: ₹1 if env not set.
     plan = (plan or "").lower().strip()
+    bc = (billing_cycle or "monthly").lower().strip()
     if plan == "pro":
-        return _env_int("PLAN_PRO_AMOUNT_PAISE", 100)
+        if bc == "yearly":
+            return _env_int("PLAN_PRO_AMOUNT_PAISE_YEARLY", _env_int("PLAN_PRO_AMOUNT_PAISE", 100))
+        return _env_int("PLAN_PRO_AMOUNT_PAISE_MONTHLY", _env_int("PLAN_PRO_AMOUNT_PAISE", 100))
     if plan == "max":
-        return _env_int("PLAN_MAX_AMOUNT_PAISE", 100)
+        if bc == "yearly":
+            return _env_int("PLAN_MAX_AMOUNT_PAISE_YEARLY", _env_int("PLAN_MAX_AMOUNT_PAISE", 100))
+        return _env_int("PLAN_MAX_AMOUNT_PAISE_MONTHLY", _env_int("PLAN_MAX_AMOUNT_PAISE", 100))
     raise HTTPException(status_code=400, detail="Invalid plan")
 
 
-def _plan_duration_days(plan: str) -> int:
+def _plan_duration_days(plan: str, billing_cycle: str) -> int:
     plan = (plan or "").lower().strip()
+    bc = (billing_cycle or "monthly").lower().strip()
     if plan == "pro":
-        return _env_int("PLAN_PRO_DAYS", 30)
+        if bc == "yearly":
+            return _env_int("PLAN_PRO_DAYS_YEARLY", 365)
+        return _env_int("PLAN_PRO_DAYS_MONTHLY", 30)
     if plan == "max":
-        return _env_int("PLAN_MAX_DAYS", 30)
+        if bc == "yearly":
+            return _env_int("PLAN_MAX_DAYS_YEARLY", 365)
+        return _env_int("PLAN_MAX_DAYS_MONTHLY", 30)
     raise HTTPException(status_code=400, detail="Invalid plan")
 
 
 @router.get("/me")
 def payments_me(user=Depends(get_current_user)):
-    # Always returns something.
-    user_id = int(user["user_id"])
-    sub = get_subscription(user_id)
-    wallet = get_wallet(user_id)
-    warnings = _compute_warnings(wallet)
-    # add friendly fields for the frontend (non-breaking)
-    billing_cycle = "monthly"
-    try:
-        exp = sub.get("expires_at")
-        if exp is not None and isinstance(exp, (int, float)):
-            # ignore
-            pass
-    except Exception:
-        pass
-    return {
-        "ok": True,
-        "subscription": {**sub, "billing_cycle": billing_cycle},
-        "wallet": {**wallet, "billing_cycle": billing_cycle},
-        "warnings": warnings,
-    }
+    uid = int(user["user_id"])
+    sub = get_subscription(uid)
+    plan = (sub.get("plan") or "free").lower().strip() or "free"
+    wallet = billing_store.get_wallet(uid, plan)
+    return {"ok": True, "subscription": sub, "wallet": wallet}
 
 
 @router.post("/create_order")
@@ -147,7 +96,10 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Only students can purchase")
 
     plan = (payload.get("plan") or "").lower().strip()
-    amount_paise = _plan_to_amount_paise(plan)
+    billing_cycle = (payload.get("billing_cycle") or "monthly").lower().strip() or "monthly"
+    if billing_cycle not in ("monthly", "yearly"):
+        billing_cycle = "monthly"
+    amount_paise = _plan_to_amount_paise(plan, billing_cycle)
     currency = (payload.get("currency") or "INR").upper().strip() or "INR"
 
     key_id, key_secret = _get_razorpay_keys()
@@ -158,7 +110,7 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
         "amount": int(amount_paise),
         "currency": currency,
         "receipt": f"knoweasy_{user['user_id']}_{plan}",
-        "notes": {"user_id": str(user["user_id"]), "plan": plan},
+        "notes": {"user_id": str(user["user_id"]), "plan": plan, "billing_cycle": billing_cycle, "type": "subscription"},
     }
 
     try:
@@ -181,7 +133,7 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
     if not order_id:
         raise HTTPException(status_code=502, detail="Razorpay order id missing")
 
-    record_order(int(user["user_id"]), plan, int(amount_paise), currency, order_id)
+    record_order(int(user["user_id"]), plan, int(amount_paise), currency, order_id, payment_type="subscription", billing_cycle=billing_cycle)
 
     return {
         "ok": True,
@@ -191,6 +143,7 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
         "amount_paise": int(amount_paise),
         "currency": currency,
         "plan": plan,
+        "billing_cycle": billing_cycle,
     }
 
 
@@ -201,6 +154,9 @@ def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Only students can verify")
 
     plan = (payload.get("plan") or "").lower().strip()
+    billing_cycle = (payload.get("billing_cycle") or "monthly").lower().strip() or "monthly"
+    if billing_cycle not in ("monthly", "yearly"):
+        billing_cycle = "monthly"
     razorpay_order_id = (payload.get("razorpay_order_id") or "").strip()
     razorpay_payment_id = (payload.get("razorpay_payment_id") or "").strip()
     razorpay_signature = (payload.get("razorpay_signature") or "").strip()
@@ -219,7 +175,12 @@ def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)):
 
     mark_payment_paid(int(user["user_id"]), razorpay_order_id, razorpay_payment_id, razorpay_signature)
 
-    duration_days = _plan_duration_days(plan)
-    sub = upsert_subscription(int(user["user_id"]), plan, duration_days)
+    duration_days = _plan_duration_days(plan, billing_cycle)
+    sub = upsert_subscription(int(user["user_id"]), plan, duration_days, billing_cycle=billing_cycle)
+    # reset wallet included credits on activation
+    try:
+        billing_store.reset_included_credits(int(user["user_id"]), plan, reason=f"subscription_{billing_cycle}")
+    except Exception:
+        pass
 
     return {"ok": True, "subscription": sub}
