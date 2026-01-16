@@ -176,10 +176,12 @@ async def razorpay_webhook(request: Request):
     # If secret is configured, verify signature.
     if secret:
         if not sig:
-            return JSONResponse(status_code=400, content={"ok": False, "error": "MISSING_SIGNATURE"})
+            logger.warning("Razorpay webhook: missing signature header")
+            return JSONResponse(status_code=200, content={"ok": True, "warn": "MISSING_SIGNATURE"})
         expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, str(sig)):
-            return JSONResponse(status_code=400, content={"ok": False, "error": "BAD_SIGNATURE"})
+            logger.warning("Razorpay webhook: bad signature (check RAZORPAY_WEBHOOK_SECRET)")
+            return JSONResponse(status_code=200, content={"ok": True, "warn": "BAD_SIGNATURE"})
 
     # For now: accept and ignore. (Verification/activation handled by client verify endpoint.)
     return {"ok": True}
