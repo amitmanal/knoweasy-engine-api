@@ -72,6 +72,14 @@ def _get_engine() -> Optional[Engine]:
         return None
 
 
+def get_engine_safe():
+    """Back-compat helper for other modules (eg billing_store).
+
+    Returns the SQLAlchemy Engine if DB is configured, else None.
+    """
+    return _get_engine()
+
+
 def ensure_tables() -> None:
     global _TABLES_READY
     if _TABLES_READY:
