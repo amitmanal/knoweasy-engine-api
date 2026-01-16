@@ -195,11 +195,38 @@ def get_subscription(user_id: int) -> Dict[str, Any]:
 
 
 def upsert_subscription(user_id: int, plan: str, duration_days: int, billing_cycle: str | None = None) -> Dict[str, Any]:
-    """Activate subscription for duration_days from now."""
+    """Activate/renew/upgrade subscription.
+
+    Policy:
+    - If user already has an active subscription (expires_at in future), do NOT throw away remaining time.
+      Extend from the current expires_at.
+    - Otherwise start from now.
+    """
     ensure_tables()
     eng = _get_engine()
-    starts_at = datetime.now(timezone.utc)
-    expires_at = starts_at + timedelta(days=int(duration_days))
+
+    now = datetime.now(timezone.utc)
+    base = now
+    try:
+        existing = get_subscription(int(user_id))
+        if existing and existing.get("expires_at"):
+            ex = existing["expires_at"]
+            # If DB returns string, attempt parse
+            if isinstance(ex, str):
+                try:
+                    ex = datetime.fromisoformat(ex.replace("Z", "+00:00"))
+                except Exception:
+                    ex = None
+            if isinstance(ex, datetime) and ex.tzinfo is None:
+                ex = ex.replace(tzinfo=timezone.utc)
+            if isinstance(ex, datetime) and ex > now:
+                base = ex
+    except Exception:
+        # Safety: never block checkout on a metadata issue
+        logger.exception("upsert_subscription: failed to read existing subscription")
+
+    starts_at = now
+    expires_at = base + timedelta(days=int(duration_days))
 
     if eng is None:
         return {"plan": plan, "billing_cycle": billing_cycle, "status": "active", "expires_at": expires_at}
