@@ -54,6 +54,20 @@ def billing_me(user=Depends(get_current_user)):
     return {"ok": True, "subscription": sub, "wallet": wallet, "booster_packs": packs}
 
 
+@router.get("/wallet")
+@router.get("/wallet/me")
+def billing_wallet(user=Depends(get_current_user)):
+    """Backward-compatible wallet endpoint for older frontend builds.
+
+    Returns: { ok, subscription, wallet }
+    """
+    uid = int(user["user_id"])
+    sub = get_subscription(uid)
+    plan = (sub.get("plan") or "free").lower().strip() or "free"
+    wallet = billing_store.get_wallet(uid, plan)
+    return {"ok": True, "subscription": sub, "wallet": wallet}
+
+
 @router.post("/consume")
 def billing_consume(payload: Dict[str, Any], user=Depends(get_current_user)):
     """Consume credits for an action.
