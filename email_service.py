@@ -93,7 +93,9 @@ def _choose_provider() -> str:
 
 
 def _build_otp_content(otp: str, minutes_valid: int = 10) -> Tuple[str, str]:
-    subject = "Your KnowEasy login code"
+    # Put the OTP in the subject as a fallback for clients/dark-mode render quirks.
+    # Also improves UX when notifications show only the subject.
+    subject = f"Your KnowEasy login code: {otp}"
     text = (
         f"Your KnowEasy login code is: {otp}\n\n"
         f"This code expires in {minutes_valid} minutes.\n"
@@ -110,7 +112,10 @@ def _build_otp_content(otp: str, minutes_valid: int = 10) -> Tuple[str, str]:
       </div>
       <div style="padding:22px;color:#111827;">
         <div style="font-size:14px;line-height:1.5;">Use this code to login:</div>
-        <div style="margin:14px 0 16px 0;font-size:28px;font-weight:800;letter-spacing:4px;">{otp}</div>
+        <!-- Explicit colors/background so the code stays visible in Gmail dark mode -->
+        <div style="margin:14px 0 16px 0;display:inline-block;padding:10px 14px;border:1px solid #e5e7eb;border-radius:10px;background:#f9fafb;">
+          <span style="font-size:28px;font-weight:900;letter-spacing:4px;color:#111827;">{otp}</span>
+        </div>
         <div style="font-size:12px;color:#6b7280;line-height:1.5;">Expires in {minutes_valid} minutes.</div>
       </div>
       <div style="padding:14px 22px;background:#f9fafb;color:#6b7280;font-size:12px;line-height:1.4;">

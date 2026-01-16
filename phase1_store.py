@@ -922,21 +922,10 @@ def analytics_summary(parent_user_id: int, student_user_id: int) -> Dict[str, An
             meta = meta_raw
         else:
             meta = {}
-        # NOTE: Return both the newer compact keys (type/at/meta) AND the
-        # older UI keys (event_type/created_at/meta_json).
-        # This keeps parent.html dashboards working across multiple frontend
-        # ZIP versions without needing coordinated deploys.
-        ev_type = r.get("event_type")
-        ev_at = r.get("created_at").isoformat() if r.get("created_at") else None
         recent_activity.append({
-            # Newer keys
-            "type": ev_type,
-            "at": ev_at,
+            "type": r.get("event_type"),
+            "at": r.get("created_at").isoformat() if r.get("created_at") else None,
             "meta": meta,
-            # Older keys expected by some frontends
-            "event_type": ev_type,
-            "created_at": ev_at,
-            "meta_json": meta,
         })
 
     return {

@@ -23,7 +23,6 @@ from typing import Any, Dict, Optional
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
 
 from phase1_router import get_current_user
 import billing_store
@@ -103,13 +102,7 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
     amount_paise = _plan_to_amount_paise(plan, billing_cycle)
     currency = (payload.get("currency") or "INR").upper().strip() or "INR"
 
-    # Fetch Razorpay keys. If not configured, return a friendly JSON response instead of raising
-    # an unstructured HTTPException. This keeps the front-end flow consistent and avoids
-    # hard-coded "detail" fields. See upgrade.js for matching client behaviour.
-    try:
-        key_id, key_secret = _get_razorpay_keys()
-    except HTTPException:
-        return JSONResponse(status_code=503, content={"ok": False, "message": "Payments not enabled"})
+    key_id, key_secret = _get_razorpay_keys()
 
     # Create an order in Razorpay
     # https://razorpay.com/docs/api/orders/
@@ -171,11 +164,7 @@ def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)):
     if not (plan and razorpay_order_id and razorpay_payment_id and razorpay_signature):
         raise HTTPException(status_code=400, detail="Missing fields")
 
-    # Fetch Razorpay secret. If not configured, return a friendly JSON response rather than raising
-    try:
-        _, key_secret = _get_razorpay_keys()
-    except HTTPException:
-        return JSONResponse(status_code=503, content={"ok": False, "message": "Payments not enabled"})
+    _, key_secret = _get_razorpay_keys()
 
     # Verify signature
     msg = f"{razorpay_order_id}|{razorpay_payment_id}".encode("utf-8")
