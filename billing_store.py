@@ -419,6 +419,126 @@ def reset_included_credits(user_id: int, plan: str, reason: str = "plan_change")
     now = _now_utc()
     cycle_days = _cycle_length_days()
 
+
+def get_ai_usage_summary(user_id: int, plan: str) -> Dict[str, Any]:
+    """Return AI usage transparency metrics for the logged-in student.
+
+    This is a *read-only trust layer* (Phase-6):
+    - Credits remaining
+    - Last AI usage time
+    - Credits used today
+    - Credits used in current credits cycle
+
+    Stability rules:
+    - Never throws to caller; returns safe defaults on DB issues.
+    - Does not change any balances.
+    """
+    ensure_tables()
+
+    p = (plan or "free").lower().strip() or "free"
+    allowance = _included_allowance(p)
+    w = get_wallet(int(user_id), p)
+
+    included_remaining = int(w.get("included_credits_balance") or 0)
+    booster_remaining = int(w.get("booster_credits_balance") or 0)
+    cycle_start_at = w.get("cycle_start_at")
+    cycle_end_at = w.get("cycle_end_at")
+
+    # Defaults
+    used_today = 0
+    used_cycle = max(0, int(allowance) - int(included_remaining))
+    last_used_at = None
+
+    eng = payments_store.get_engine_safe()
+    if eng is None:
+        return {
+            "ok": True,
+            "plan": p,
+            "credits": {
+                "included_total": int(allowance),
+                "included_remaining": int(included_remaining),
+                "booster_remaining": int(booster_remaining),
+                "total_remaining": int(included_remaining + booster_remaining),
+            },
+            "usage": {
+                "used_today": int(used_today),
+                "used_this_cycle": int(used_cycle),
+                "last_ai_used_at": last_used_at,
+                "cycle_start_at": cycle_start_at,
+                "cycle_end_at": cycle_end_at,
+            },
+        }
+
+    try:
+        with eng.begin() as conn:
+            # Credits used today (UTC). We record consumes with negative units.
+            row_today = conn.execute(
+                text(
+                    """
+                    SELECT COALESCE(SUM(-units), 0) AS used_today
+                    FROM credit_ledger
+                    WHERE user_id=:user_id
+                      AND event_type='consume'
+                      AND source='ai'
+                      AND created_at >= date_trunc('day', now())
+                    """
+                ),
+                {"user_id": int(user_id)},
+            ).mappings().first() or {}
+            used_today = int(row_today.get("used_today") or 0)
+
+            # Credits used this cycle (bounded by wallet cycle).
+            used_cycle_row = conn.execute(
+                text(
+                    """
+                    SELECT COALESCE(SUM(-units), 0) AS used_cycle
+                    FROM credit_ledger
+                    WHERE user_id=:user_id
+                      AND event_type='consume'
+                      AND source='ai'
+                      AND (:cs IS NULL OR created_at >= :cs)
+                      AND (:ce IS NULL OR created_at < :ce)
+                    """
+                ),
+                {"user_id": int(user_id), "cs": cycle_start_at, "ce": cycle_end_at},
+            ).mappings().first() or {}
+            used_cycle = int(used_cycle_row.get("used_cycle") or 0)
+
+            last_row = conn.execute(
+                text(
+                    """
+                    SELECT MAX(created_at) AS last_used
+                    FROM credit_ledger
+                    WHERE user_id=:user_id
+                      AND event_type='consume'
+                      AND source='ai'
+                    """
+                ),
+                {"user_id": int(user_id)},
+            ).mappings().first() or {}
+            last_used_at = last_row.get("last_used")
+
+    except Exception:
+        logger.exception("get_ai_usage_summary failed")
+
+    return {
+        "ok": True,
+        "plan": p,
+        "credits": {
+            "included_total": int(allowance),
+            "included_remaining": int(included_remaining),
+            "booster_remaining": int(booster_remaining),
+            "total_remaining": int(included_remaining + booster_remaining),
+        },
+        "usage": {
+            "used_today": int(max(0, used_today)),
+            "used_this_cycle": int(max(0, used_cycle)),
+            "last_ai_used_at": last_used_at,
+            "cycle_start_at": cycle_start_at,
+            "cycle_end_at": cycle_end_at,
+        },
+    }
+
     if eng is None:
         return {
             "included_credits_balance": int(allowance),
