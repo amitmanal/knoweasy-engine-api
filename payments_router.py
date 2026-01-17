@@ -20,6 +20,7 @@ import hmac
 import logging
 import os
 from typing import Any, Dict, Optional
+from datetime import datetime, timezone
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException
@@ -37,6 +38,33 @@ from payments_store import (
 logger = logging.getLogger("knoweasy-engine-api.payments")
 
 router = APIRouter(prefix="/payments", tags=["payments"])
+
+
+def _plan_rank(plan: str) -> int:
+    p = (plan or "free").lower().strip() or "free"
+    if p == "max":
+        return 2
+    if p == "pro":
+        return 1
+    return 0
+
+
+def _is_active_sub(sub: Dict[str, Any]) -> bool:
+    try:
+        status = str(sub.get("status") or "").lower().strip()
+        exp = sub.get("expires_at")
+        if not exp:
+            return False
+        dt = None
+        if isinstance(exp, datetime):
+            dt = exp
+        else:
+            dt = datetime.fromisoformat(str(exp).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return status == "active" and dt.timestamp() > datetime.now(timezone.utc).timestamp()
+    except Exception:
+        return False
 
 
 def _env_int(name: str, default: int) -> int:
@@ -101,10 +129,32 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
     if role != "student":
         raise HTTPException(status_code=403, detail="Only students can purchase")
 
+    uid = int(user["user_id"])
+
     plan = (payload.get("plan") or "").lower().strip()
     billing_cycle = (payload.get("billing_cycle") or "monthly").lower().strip() or "monthly"
     if billing_cycle not in ("monthly", "yearly"):
         billing_cycle = "monthly"
+    # Phase 1 (trust rules): one active plan at a time.
+    # - No cycle-switch payments while a plan is active (avoids double-payment confusion).
+    # - Allow upgrades (Free->Pro/Max, Pro->Max) only.
+    # - Block "buy same plan again" while active (no stacking).
+    # - Block downgrades while active.
+    cur = get_subscription(uid)
+    cur_plan = (cur.get("plan") or "free").lower().strip() or "free"
+    cur_cycle = (cur.get("billing_cycle") or "").lower().strip() or ""
+
+    if _is_active_sub(cur):
+        if cur_cycle and billing_cycle != cur_cycle:
+            raise HTTPException(
+                status_code=409,
+                detail="Billing cycle change applies at next renewal. To avoid double payments, your current cycle is locked for now.",
+            )
+        if _plan_rank(plan) < _plan_rank(cur_plan):
+            raise HTTPException(status_code=409, detail="Downgrade is not available while your plan is active.")
+        if _plan_rank(plan) == _plan_rank(cur_plan):
+            raise HTTPException(status_code=409, detail="You already have this plan active. No need to buy it again.")
+
     amount_paise = _plan_to_amount_paise(plan, billing_cycle)
     currency = (payload.get("currency") or "INR").upper().strip() or "INR"
 
@@ -139,7 +189,7 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
     if not order_id:
         raise HTTPException(status_code=502, detail="Razorpay order id missing")
 
-    record_order(int(user["user_id"]), plan, int(amount_paise), currency, order_id, payment_type="subscription", billing_cycle=billing_cycle)
+    record_order(uid, plan, int(amount_paise), currency, order_id, payment_type="subscription", billing_cycle=billing_cycle)
 
     return {
         "ok": True,
