@@ -311,3 +311,35 @@ def mark_payment_paid(user_id: int, razorpay_order_id: str, razorpay_payment_id:
             )
     except Exception:
         logger.exception("mark_payment_paid failed")
+
+
+def get_payment_order(razorpay_order_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a payment/order row by Razorpay order id.
+
+    Used to harden verification so the client cannot tamper plan/amount.
+    Returns None if DB is unavailable or order not found.
+    """
+    ensure_tables()
+    eng = _get_engine()
+    if eng is None:
+        return None
+    oid = (razorpay_order_id or "").strip()
+    if not oid:
+        return None
+    try:
+        with eng.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT user_id, plan, payment_type, billing_cycle, booster_sku, amount_paise, currency, status, created_at
+                    FROM payments
+                    WHERE razorpay_order_id=:order_id
+                    LIMIT 1
+                    """
+                ),
+                {"order_id": oid},
+            ).mappings().first()
+            return dict(row) if row else None
+    except Exception:
+        logger.exception("get_payment_order failed")
+        return None

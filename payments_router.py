@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from phase1_router import get_current_user
 import billing_store
-from payments_store import get_subscription, mark_payment_paid, record_order, upsert_subscription
+from payments_store import get_subscription, mark_payment_paid, record_order, upsert_subscription, get_payment_order
 
 logger = logging.getLogger("knoweasy-engine-api.payments")
 
@@ -153,16 +153,39 @@ def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)):
     if role != "student":
         raise HTTPException(status_code=403, detail="Only students can verify")
 
-    plan = (payload.get("plan") or "").lower().strip()
-    billing_cycle = (payload.get("billing_cycle") or "monthly").lower().strip() or "monthly"
-    if billing_cycle not in ("monthly", "yearly"):
-        billing_cycle = "monthly"
+    # Do NOT trust plan/billing_cycle from the client. We validate against the order we recorded.
+    client_plan = (payload.get("plan") or "").lower().strip()
+    client_billing_cycle = (payload.get("billing_cycle") or "monthly").lower().strip() or "monthly"
+    if client_billing_cycle not in ("monthly", "yearly"):
+        client_billing_cycle = "monthly"
     razorpay_order_id = (payload.get("razorpay_order_id") or "").strip()
     razorpay_payment_id = (payload.get("razorpay_payment_id") or "").strip()
     razorpay_signature = (payload.get("razorpay_signature") or "").strip()
 
-    if not (plan and razorpay_order_id and razorpay_payment_id and razorpay_signature):
+    if not (razorpay_order_id and razorpay_payment_id and razorpay_signature):
         raise HTTPException(status_code=400, detail="Missing fields")
+
+    # Load the recorded order row and verify ownership + expected amount.
+    order = get_payment_order(razorpay_order_id)
+    if not order:
+        raise HTTPException(status_code=400, detail="Unknown order")
+    if int(order.get("user_id") or 0) != int(user["user_id"]):
+        raise HTTPException(status_code=403, detail="Order does not belong to you")
+
+    plan = (order.get("plan") or "").lower().strip()
+    billing_cycle = (order.get("billing_cycle") or client_billing_cycle or "monthly").lower().strip() or "monthly"
+    if billing_cycle not in ("monthly", "yearly"):
+        billing_cycle = "monthly"
+
+    expected_amount = int(order.get("amount_paise") or 0)
+    computed_amount = _plan_to_amount_paise(plan, billing_cycle)
+    if expected_amount <= 0 or expected_amount != int(computed_amount):
+        # If amounts don't match, do not activate anything.
+        raise HTTPException(status_code=400, detail="Order amount mismatch")
+
+    # If client supplied plan/cycle, it must match the recorded order (helps detect tampering).
+    if client_plan and client_plan != plan:
+        raise HTTPException(status_code=400, detail="Plan mismatch")
 
     _, key_secret = _get_razorpay_keys()
 
