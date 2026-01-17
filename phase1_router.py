@@ -106,20 +106,17 @@ def student_profile(payload: Dict[str, Any], u: Dict[str, Any] = Depends(require
     return {"ok": True, "profile": prof}
 
 
+
 @router.get("/student/profile")
 def student_profile_get(u: Dict[str, Any] = Depends(require_role("student"))):
-    """Return the current student's profile.
+    """Return the current student's saved profile (if any).
 
-    This endpoint is intentionally lightweight so the frontend can always
-    hydrate the Me/Profile UI from the server and avoid re-asking the user to
-    re-enter details on every login.
+    This enables Google-premium UX:
+    - Me page can hydrate the latest name from server
+    - Parent dashboard always reflects latest saved identity
     """
-    prof = phase1_store.get_student_profile(user_id=_uid(u)) or {}
-    # Normalize key names for frontend convenience
-    if "cls" in prof and "class" not in prof:
-        prof["class"] = prof.get("cls")
+    prof = phase1_store.get_student_profile(user_id=_uid(u))
     return {"ok": True, "profile": prof}
-
 
 # -----------------------------------------------------------------------------
 # Student → generate link code for parent (Phase‑1 persistent parent dashboard)
