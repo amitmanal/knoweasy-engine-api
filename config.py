@@ -129,4 +129,17 @@ CB_COOLDOWN_S = _env_int("CB_COOLDOWN_S", 20)
 # -----------------------------
 # backwards-compatible extras (safe)
 # -----------------------------
-ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=["*"])
+# Security/trust default:
+# - In production, prefer known web origins unless explicitly overridden.
+# - In dev/staging, allow "*" unless ALLOWED_ORIGINS is set.
+_origins_env = os.getenv("ALLOWED_ORIGINS")
+if _origins_env is None or str(_origins_env).strip() == "":
+    if str(ENV).lower().strip() == "production":
+        ALLOWED_ORIGINS = [
+            "https://knoweasylearning.com",
+            "https://www.knoweasylearning.com",
+        ]
+    else:
+        ALLOWED_ORIGINS = ["*"]
+else:
+    ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=[])

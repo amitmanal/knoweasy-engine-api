@@ -100,10 +100,21 @@ def _cache_key(payload: dict) -> str:
     Stable cache key for same user question+context.
     We only use relevant fields so UI noise won't bust cache.
     """
+    # NOTE: `SolveRequest` accepts both `class` and `class_level` on input, but
+    # the Pydantic model field name is `class_`. `req.model_dump()` therefore
+    # contains `class_`.
+    #
+    # IMPORTANT: Include all fields that can change the prompt/answer.
+    # Otherwise, we risk serving a cached answer from a different context
+    # (e.g., wrong chapter/exam_mode/language).
     normalized = {
         "board": (payload.get("board") or "").strip(),
-        "class_level": (payload.get("class_level") or "").strip(),
+        "class": str(payload.get("class_") or payload.get("class_level") or payload.get("class") or "").strip(),
         "subject": (payload.get("subject") or "").strip(),
+        "chapter": (payload.get("chapter") or "").strip(),
+        "exam_mode": str(payload.get("exam_mode") or "").strip(),
+        "language": (payload.get("language") or "").strip(),
+        "answer_mode": (payload.get("answer_mode") or "").strip(),
         "question": (payload.get("question") or "").strip(),
     }
     blob = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
@@ -138,8 +149,9 @@ def solve_route(
             ).model_dump(),
         )
 
-    # -------- Optional auth + credit enforcement (best-effort) --------
-    # If a Bearer token is present, we enforce plan/credits. If not present, we behave as anonymous free.
+    # -------- Optional auth (best-effort) --------
+    # If a Bearer token is present, we validate session and (on cache MISS)
+    # enforce plan/credits. If no token, behave as anonymous free.
     auth_header = (request.headers.get("authorization") or request.headers.get("Authorization") or "").strip()
     user_ctx = None
     sub = None
@@ -159,33 +171,15 @@ def solve_route(
                 ).model_dump(),
             )
 
+        # Subscription lookup is cheap; we do it early so cached responses can
+        # still return plan info in meta (without charging credits).
         try:
             sub = get_subscription(int(user_ctx["user_id"]))
-            plan = (sub.get("plan") or "free").lower().strip() or "free"
-
-            q = (req.question or "").strip()
-            # Simple, stable units estimator (tunable later)
-            units = 120 + max(0, len(q) // 20)
-            units = max(60, min(600, int(units)))
-
-            # Consume credits (402 if insufficient)
-            try:
-                out = billing_store.consume_credits(int(user_ctx["user_id"]), plan, units, meta={"route": "/solve", "answer_mode": req.answer_mode, "subject": req.subject, "board": req.board})
-                wallet = out
-                credits_units_charged = int(out.get("consumed") or units)
-            except ValueError:
-                return JSONResponse(
-                    status_code=402,
-                    content=_safe_failure(
-                        "You have used all your AI credits. Please buy a Booster Pack or upgrade your plan.",
-                        "OUT_OF_CREDITS",
-                    ).model_dump(),
-                )
         except Exception:
-            # If billing fails, we do NOT block solving (stability first)
-            pass
+            sub = None
 
-    # -------- Cache (best-effort) --------
+    # -------- Cache FIRST (best-effort) --------
+    # IMPORTANT: Never charge credits on cache hit.
     payload = req.model_dump()
     cache_key = _cache_key(payload)
 
@@ -197,24 +191,70 @@ def solve_route(
         except Exception:
             pass
 
-        # Attach billing info (best-effort) without breaking old clients
-        try:
-            if user_ctx and isinstance(out, dict):
-                out_flags = list(out.get("flags", []) or [])
-                out_flags.append("BILLED")
-                out["flags"] = out_flags
-        except Exception:
-            pass
+        cached_flags = list(cached.get("flags", []) or [])
+        cached_flags.append("CACHED")
+        if user_ctx:
+            cached_flags.append("AUTH")
 
         return SolveResponse(
             final_answer=cached.get("final_answer", ""),
             steps=cached.get("steps", []),
             assumptions=cached.get("assumptions", []),
             confidence=float(cached.get("confidence", 0.5)),
-            flags=cached.get("flags", []) + ["CACHED"],
+            flags=cached_flags,
             safe_note=cached.get("safe_note"),
-            meta={"engine": "knoweasy-orchestrator-phase1"},
+            meta={
+                "engine": "knoweasy-orchestrator-phase1",
+                "billing": {
+                    "user_id": int(user_ctx["user_id"]) if user_ctx else None,
+                    "plan": (sub.get("plan") if isinstance(sub, dict) else None) if user_ctx else None,
+                    "credits_units_charged": 0,
+                    "wallet": None,
+                    "served_from_cache": True,
+                },
+            },
         )
+
+    # -------- Billing ONLY on cache miss (best-effort) --------
+    if user_ctx:
+        try:
+            plan = (((sub or {}).get("plan") or "free") if isinstance(sub, dict) else "free").lower().strip() or "free"
+
+            q = (req.question or "").strip()
+            # Simple, stable units estimator (tunable later)
+            units = 120 + max(0, len(q) // 20)
+            units = max(60, min(600, int(units)))
+
+            # Consume credits (402 if insufficient)
+            try:
+                wallet_out = billing_store.consume_credits(
+                    int(user_ctx["user_id"]),
+                    plan,
+                    units,
+                    meta={
+                        "route": "/solve",
+                        "answer_mode": req.answer_mode,
+                        "subject": req.subject,
+                        "board": req.board,
+                        "exam_mode": req.exam_mode,
+                        "chapter": req.chapter,
+                        "language": req.language,
+                    },
+                )
+                wallet = wallet_out
+                credits_units_charged = int(wallet_out.get("consumed") or units)
+            except ValueError:
+                return JSONResponse(
+                    status_code=402,
+                    content=_safe_failure(
+                        "You have used all your AI credits. Please buy a Booster Pack or upgrade your plan.",
+                        "OUT_OF_CREDITS",
+                    ).model_dump(),
+                )
+        except Exception:
+            # If billing fails, we do NOT block solving (stability first)
+            wallet = None
+            credits_units_charged = 0
 
     try:
         t0 = time.perf_counter()
@@ -262,6 +302,7 @@ def solve_route(
                     "plan": (sub.get("plan") if isinstance(sub, dict) else None) if user_ctx else None,
                     "credits_units_charged": int(credits_units_charged) if user_ctx else 0,
                     "wallet": wallet if user_ctx else None,
+                    "served_from_cache": False,
                 },
             },
         )
