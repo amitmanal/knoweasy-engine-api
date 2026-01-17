@@ -282,7 +282,10 @@ def solve_route(
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         # Best-effort DB log (never breaks the response)
-        db_log_solve(req=req, out=out, latency_ms=latency_ms, error=None)
+        try:
+            db_log_solve(req=req, out=out, latency_ms=latency_ms, error=None)
+        except Exception:
+            pass
 
         # Cache successful output (best-effort)
         if isinstance(out, dict) and out.get("final_answer"):
