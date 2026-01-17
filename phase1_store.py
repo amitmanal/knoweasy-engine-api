@@ -474,6 +474,19 @@ def upsert_student_profile(
 
     ensure_tables()
 
+    def _parse_meta(v):
+        """Parse event metadata stored as JSON string in `meta_json`."""
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            try:
+                return json.loads(v) or {}
+            except Exception:
+                return {}
+        return {}
+
     with engine.begin() as conn:
         existing = conn.execute(select(student_profiles.c.user_id).where(student_profiles.c.user_id == user_id)).first()
         if existing:
