@@ -189,9 +189,16 @@ def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)):
     if not order:
         raise HTTPException(status_code=400, detail="Order not found or does not belong to user")
 
-    # Ensure the order is still in a payable state
-    if str(order.get("status") or "").lower().strip() != "created":
-        raise HTTPException(status_code=400, detail="Order already processed or cancelled")
+    # Idempotency / retries:
+    # If the client retries verification (network glitches, double-click, refresh),
+    # do NOT throw a scary error. If the order is already marked paid, simply
+    # return the current subscription state.
+    status = str(order.get("status") or "").lower().strip()
+    if status and status != "created":
+        if status == "paid":
+            sub = get_subscription(int(user["user_id"]))
+            return {"ok": True, "subscription": sub, "note": "already_verified"}
+        raise HTTPException(status_code=400, detail="Order already processed")
 
     # Verify plan and billing cycle match what was originally requested
     orig_plan = str(order.get("plan") or "").lower().strip()

@@ -195,11 +195,49 @@ def get_subscription(user_id: int) -> Dict[str, Any]:
 
 
 def upsert_subscription(user_id: int, plan: str, duration_days: int, billing_cycle: str | None = None) -> Dict[str, Any]:
-    """Activate subscription for duration_days from now."""
+    """Activate or extend a subscription.
+
+    Trust-first rule:
+    - If the user already has an active subscription that hasn't expired,
+      a new purchase EXTENDS from the current expiry (does not reset/shorten).
+    - If the existing subscription is expired/missing, start from "now".
+
+    This prevents accidental loss of remaining time when switching cycles
+    (Monthly ↔ Yearly) or upgrading.
+    """
     ensure_tables()
     eng = _get_engine()
-    starts_at = datetime.now(timezone.utc)
-    expires_at = starts_at + timedelta(days=int(duration_days))
+
+    now = datetime.now(timezone.utc)
+    base_start = now
+
+    # If DB is available, extend from the later of (now, current expires_at).
+    if eng is not None:
+        try:
+            with eng.begin() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT expires_at
+                        FROM subscriptions
+                        WHERE user_id=:user_id
+                        LIMIT 1
+                        """
+                    ),
+                    {"user_id": int(user_id)},
+                ).mappings().first()
+                cur_exp = row.get("expires_at") if row else None
+                if cur_exp is not None:
+                    if cur_exp.tzinfo is None:
+                        cur_exp = cur_exp.replace(tzinfo=timezone.utc)
+                    if cur_exp > now:
+                        base_start = cur_exp
+        except Exception:
+            # Non-fatal: fall back to "now".
+            logger.exception("upsert_subscription: failed to read current expiry")
+
+    starts_at = now
+    expires_at = base_start + timedelta(days=int(duration_days))
 
     if eng is None:
         return {"plan": plan, "billing_cycle": billing_cycle, "status": "active", "expires_at": expires_at}
