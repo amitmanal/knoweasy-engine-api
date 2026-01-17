@@ -334,14 +334,22 @@ def get_order_record(user_id: int, order_id: str) -> Optional[Dict[str, Any]]:
             row = conn.execute(
                 text(
                     """
-                    SELECT user_id, plan, billing_cycle, amount_paise, currency, status
+                    SELECT user_id,
+                           plan,
+                           billing_cycle,
+                           amount_paise,
+                           currency,
+                           status,
+                           payment_type,
+                           booster_sku
                     FROM payments
-                    WHERE razorpay_order_id=:order_id AND user_id=:user_id
+                    WHERE razorpay_order_id = :order_id AND user_id = :user_id
                     LIMIT 1
                     """
                 ),
                 {"order_id": order_id, "user_id": int(user_id)},
             ).mappings().first()
+            # Ensure that callers get a plain dict even if additional columns are added in the future.
             return dict(row) if row else None
     except Exception:
         logger.exception("get_order_record failed")

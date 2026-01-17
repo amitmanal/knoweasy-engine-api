@@ -502,6 +502,29 @@ def list_booster_packs() -> list[Dict[str, Any]]:
         return []
 
 
+def get_booster_pack(sku: str) -> Optional[Dict[str, Any]]:
+    """
+    Return a single active booster pack by SKU.
+
+    The lookup is case-insensitive. Returns None if the SKU is not found or
+    the booster pack is inactive. This helper is used by the billing router
+    to validate the canonical price and units of a booster purchase on the
+    server side.
+    """
+    if not sku:
+        return None
+    sku_norm = str(sku).strip().upper()
+    try:
+        packs = list_booster_packs()
+        for pack in packs:
+            if str(pack.get("sku") or "").strip().upper() == sku_norm:
+                return pack
+        return None
+    except Exception:
+        # Safe fallback: no pack found
+        return None
+
+
 def _append_ledger(conn, user_id: int, event_type: str, source: str, units: int, included_after: int, booster_after: int, meta: Dict[str, Any]) -> None:
     """Best-effort credit ledger write.
 

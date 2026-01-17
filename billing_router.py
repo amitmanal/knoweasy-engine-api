@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from phase1_router import get_current_user
 
 import billing_store
-from payments_store import get_subscription, mark_payment_paid, record_order
+from payments_store import get_subscription, mark_payment_paid, record_order, get_order_record
 
 logger = logging.getLogger("knoweasy-engine-api.billing")
 
@@ -174,19 +174,54 @@ def booster_verify(payload: Dict[str, Any], user=Depends(get_current_user)):
     if not (sku and razorpay_order_id and razorpay_payment_id and razorpay_signature):
         raise HTTPException(status_code=400, detail="Missing fields")
 
-    packs = {p["sku"].upper(): p for p in billing_store.list_booster_packs()}
-    if sku not in packs:
+    # Canonical booster pack lookup (case-insensitive).
+    pack = billing_store.get_booster_pack(sku)
+    if not pack:
         raise HTTPException(status_code=400, detail="Invalid booster sku")
 
+    # Verify the Razorpay signature.
     _, key_secret = _get_razorpay_keys()
-
     msg = f"{razorpay_order_id}|{razorpay_payment_id}".encode("utf-8")
     expected = hmac.new(key_secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, razorpay_signature):
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    mark_payment_paid(uid, razorpay_order_id, razorpay_payment_id, razorpay_signature)
+    # Additional server-side verification: fetch the recorded order and validate it.
+    order = get_order_record(uid, razorpay_order_id)
+    if not order:
+        raise HTTPException(status_code=400, detail="Order not found or does not belong to user")
 
-    units = int(packs[sku]["credits_units"])
-    wallet = billing_store.grant_booster_credits(uid, plan, units, meta={"sku": sku, "order": razorpay_order_id})
+    # Extract recorded fields.
+    payment_type = str(order.get("payment_type") or "").lower().strip()
+    recorded_sku = (order.get("booster_sku") or "").strip().upper()
+    status = str(order.get("status") or "").lower().strip()
+    try:
+        recorded_amount = int(order.get("amount_paise")) if order.get("amount_paise") is not None else None
+    except Exception:
+        recorded_amount = None
+    canonical_amount = int(pack.get("price_paise"))
+
+    # If payment_type exists and is not booster, treat as mismatch (independent of SKU).
+    # Do not tie payment_type validation to the recorded SKU.  Any non-booster
+    # payment should fail regardless of which SKU was recorded.
+    if payment_type and payment_type != "booster":
+        raise HTTPException(status_code=400, detail="Order type mismatch")
+    if recorded_sku and recorded_sku != sku:
+        raise HTTPException(status_code=400, detail="Booster SKU mismatch")
+    if recorded_amount is not None and recorded_amount != canonical_amount:
+        raise HTTPException(status_code=400, detail="Booster amount mismatch")
+
+    # Determine the plan snapshot recorded with the order; default to current plan if missing.
+    recorded_plan = (order.get("plan") or plan or "free").lower().strip()
+    # If already paid, do not grant credits again (idempotent). Return wallet based on recorded plan.
+    if status and status != "created":
+        wallet = billing_store.get_wallet(uid, recorded_plan)
+        return {"ok": True, "wallet": wallet, "granted": 0, "sku": sku}
+
+    # Mark payment paid and grant credits exactly once.  Use the recorded plan
+    # snapshot when applying booster credits so changes to the subscription plan
+    # after order creation do not affect credit assignment.
+    mark_payment_paid(uid, razorpay_order_id, razorpay_payment_id, razorpay_signature)
+    units = int(pack.get("credits_units") or 0)
+    wallet = billing_store.grant_booster_credits(uid, recorded_plan, units, meta={"sku": sku, "order": razorpay_order_id})
     return {"ok": True, "wallet": wallet, "granted": units, "sku": sku}

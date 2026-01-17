@@ -225,13 +225,18 @@ def verify_otp(email: str, role: str, otp_plain: str) -> Tuple[bool, str, int]:
             return False, "OTP_EXPIRED", 0
 
         if not constant_time_equal(row["otp_hash"], otp_h):
-            # increment attempts
+            # Wrong code: increment attempts and fail
             conn.execute(
-                text("""UPDATE otp_codes SET attempts = attempts + 1 WHERE id=:id"""),
+                text("UPDATE otp_codes SET attempts = attempts + 1 WHERE id=:id"),
                 {"id": row["id"]},
             )
             return False, "OTP_INVALID", 0
 
+        # OTP is correct: mark it as used by deleting the record. This prevents reuse of the same code
+        conn.execute(
+            text("DELETE FROM otp_codes WHERE id=:id"),
+            {"id": row["id"]},
+        )
         return True, "OK", 0
 
 # -------------------------
