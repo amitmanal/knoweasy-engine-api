@@ -624,11 +624,25 @@ def link_parent_with_code(parent_user_id: int, code: str) -> Tuple[bool, str, Op
         if student_user_id == parent_user_id:
             return False, "You cannot link to yourself.", None
 
-        conn.execute(
+        # Mark the code as used exactly once. We include used_at IS NULL in the
+        # WHERE clause so concurrent requests cannot both succeed. If no rows
+        # are updated, we treat the code as already used and return an error.
+        result = conn.execute(
             parent_codes.update()
-            .where(parent_codes.c.code == code_n)
+            .where(
+                and_(
+                    parent_codes.c.code == code_n,
+                    parent_codes.c.used_at.is_(None),
+                )
+            )
             .values(used_at=now, used_by_parent_user_id=parent_user_id)
         )
+        try:
+            count = result.rowcount
+        except Exception:
+            count = 0
+        if not count:
+            return False, "This code was already used. Ask your child to generate a new one.", None
 
         existing = conn.execute(
             select(parent_links.c.id).where(

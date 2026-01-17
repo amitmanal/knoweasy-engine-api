@@ -313,33 +313,36 @@ def mark_payment_paid(user_id: int, razorpay_order_id: str, razorpay_payment_id:
         logger.exception("mark_payment_paid failed")
 
 
-def get_payment_order(razorpay_order_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a payment/order row by Razorpay order id.
+# -----------------------------------------------------------------------------
+# New helper: fetch order details for verification
+# -----------------------------------------------------------------------------
+def get_order_record(user_id: int, order_id: str) -> Optional[Dict[str, Any]]:
+    """Return a single payment row for the given user and Razorpay order id.
 
-    Used to harden verification so the client cannot tamper plan/amount.
-    Returns None if DB is unavailable or order not found.
+    This is used by the payments_router.verify endpoint to cross-check the
+    incoming verification request against the originally created order. It
+    ensures the order exists, belongs to the current user and is still in
+    a mutable state (e.g., not already marked paid). Returns None if no
+    matching record is found. Never raises.
     """
     ensure_tables()
     eng = _get_engine()
     if eng is None:
-        return None
-    oid = (razorpay_order_id or "").strip()
-    if not oid:
         return None
     try:
         with eng.begin() as conn:
             row = conn.execute(
                 text(
                     """
-                    SELECT user_id, plan, payment_type, billing_cycle, booster_sku, amount_paise, currency, status, created_at
+                    SELECT user_id, plan, billing_cycle, amount_paise, currency, status
                     FROM payments
-                    WHERE razorpay_order_id=:order_id
+                    WHERE razorpay_order_id=:order_id AND user_id=:user_id
                     LIMIT 1
                     """
                 ),
-                {"order_id": oid},
+                {"order_id": order_id, "user_id": int(user_id)},
             ).mappings().first()
             return dict(row) if row else None
     except Exception:
-        logger.exception("get_payment_order failed")
+        logger.exception("get_order_record failed")
         return None

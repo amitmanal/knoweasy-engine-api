@@ -150,14 +150,6 @@ def solve_route(
         token = auth_header.split(" ", 1)[1].strip()
         try:
             user_ctx = session_user(token)
-            if not user_ctx:
-                return JSONResponse(
-                    status_code=401,
-                    content=_safe_failure(
-                        "Session expired. Please login again.",
-                        "AUTH_EXPIRED",
-                    ).model_dump(),
-                )
         except Exception:
             return JSONResponse(
                 status_code=401,
