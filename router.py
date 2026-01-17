@@ -216,33 +216,33 @@ def solve_route(
         )
 
     # -------- Billing ONLY on cache miss (best-effort) --------
+    # TRUST RULE: Never deduct credits unless we are returning a real answer.
+    # We do a lightweight sufficiency check up-front, then deduct only after a successful solve.
+    planned_units = 0
+    planned_plan = None
+
     if user_ctx:
         try:
-            plan = (((sub or {}).get("plan") or "free") if isinstance(sub, dict) else "free").lower().strip() or "free"
+            planned_plan = (((sub or {}).get("plan") or "free") if isinstance(sub, dict) else "free").lower().strip() or "free"
 
             q = (req.question or "").strip()
             # Simple, stable units estimator (tunable later)
-            units = 120 + max(0, len(q) // 20)
-            units = max(60, min(600, int(units)))
+            planned_units = 120 + max(0, len(q) // 20)
+            planned_units = max(60, min(600, int(planned_units)))
 
-            # Consume credits (402 if insufficient)
+            # Pre-check wallet so we can fail fast (no solve) when clearly out of credits.
+            # Note: final atomic deduction happens after solve success.
             try:
-                wallet_out = billing_store.consume_credits(
-                    int(user_ctx["user_id"]),
-                    plan,
-                    units,
-                    meta={
-                        "route": "/solve",
-                        "answer_mode": req.answer_mode,
-                        "subject": req.subject,
-                        "board": req.board,
-                        "exam_mode": req.exam_mode,
-                        "chapter": req.chapter,
-                        "language": req.language,
-                    },
-                )
-                wallet = wallet_out
-                credits_units_charged = int(wallet_out.get("consumed") or units)
+                w_preview = billing_store.get_wallet(int(user_ctx["user_id"]), planned_plan)
+                total_preview = int(w_preview.get("included_credits_balance") or 0) + int(w_preview.get("booster_credits_balance") or 0)
+                if total_preview < int(planned_units):
+                    return JSONResponse(
+                        status_code=402,
+                        content=_safe_failure(
+                            "You have used all your AI credits. Please buy a Booster Pack or upgrade your plan.",
+                            "OUT_OF_CREDITS",
+                        ).model_dump(),
+                    )
             except ValueError:
                 return JSONResponse(
                     status_code=402,
@@ -251,10 +251,13 @@ def solve_route(
                         "OUT_OF_CREDITS",
                     ).model_dump(),
                 )
+            except Exception:
+                # If billing pre-check fails, we do NOT block solving (stability first)
+                planned_units = 0
+                planned_plan = None
         except Exception:
-            # If billing fails, we do NOT block solving (stability first)
-            wallet = None
-            credits_units_charged = 0
+            planned_units = 0
+            planned_plan = None
 
     try:
         t0 = time.perf_counter()
@@ -287,6 +290,46 @@ def solve_route(
                 redis_setex_json(cache_key, SOLVE_CACHE_TTL_SECONDS, out)
             except Exception:
                 pass
+
+
+        # -------- Deduct credits ONLY after successful solve --------
+        # If solve did not produce a final answer, we charge nothing.
+        if user_ctx and planned_plan and planned_units and isinstance(out, dict) and out.get("final_answer"):
+            try:
+                wallet_out = billing_store.consume_credits(
+                    int(user_ctx["user_id"]),
+                    planned_plan,
+                    int(planned_units),
+                    meta={
+                        "route": "/solve",
+                        "answer_mode": req.answer_mode,
+                        "subject": req.subject,
+                        "board": req.board,
+                        "exam_mode": req.exam_mode,
+                        "chapter": req.chapter,
+                        "language": req.language,
+                    },
+                )
+                wallet = wallet_out
+                credits_units_charged = int(wallet_out.get("consumed") or planned_units)
+            except ValueError:
+                # Race/concurrency edge: user spent credits in another request.
+                # Do NOT block the answer; do NOT charge.
+                credits_units_charged = 0
+                try:
+                    wallet = billing_store.get_wallet(int(user_ctx["user_id"]), planned_plan)
+                except Exception:
+                    wallet = None
+                try:
+                    flags = list(out.get("flags", []) or [])
+                    flags.append("BILLING_DESYNC")
+                    out["flags"] = flags
+                except Exception:
+                    pass
+            except Exception:
+                credits_units_charged = 0
+                # Do not block solve on billing write failure.
+                # Keep wallet as None to avoid showing incorrect balances.
 
         return SolveResponse(
             final_answer=out.get("final_answer", ""),
