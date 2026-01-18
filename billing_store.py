@@ -27,6 +27,9 @@ import payments_store
 
 logger = logging.getLogger("knoweasy-engine-api.billing")
 
+# Cache: avoid running DDL on every request per process.
+_TABLES_ENSURED: bool = False
+
 
 # -----------------------------
 # Plan credit allowances (v1)
@@ -71,6 +74,9 @@ def _cycle_length_days() -> int:
 
 def ensure_tables() -> None:
     """Ensure billing tables exist (best-effort)."""
+    global _TABLES_ENSURED
+    if _TABLES_ENSURED:
+        return
     eng = payments_store.get_engine_safe()
     if eng is None:
         return
@@ -124,18 +130,10 @@ def ensure_tables() -> None:
         "ALTER TABLE IF EXISTS booster_packs ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;",
     ]
 
-    # IMPORTANT: In Postgres, *any* SQL error aborts the whole transaction until ROLLBACK.
-    # This function is best-effort and must never poison the connection/transaction.
-    # Therefore, we isolate each statement in a SAVEPOINT via begin_nested().
     try:
         with eng.begin() as conn:
             for stmt in ddl:
-                try:
-                    with conn.begin_nested():
-                        conn.execute(text(stmt))
-                except Exception:
-                    logger.exception("billing_store DDL failed (non-fatal)")
-
+                conn.execute(text(stmt))
             for stmt in repairs:
                 try:
                     with conn.begin_nested():
@@ -150,23 +148,20 @@ def ensure_tables() -> None:
                 ("BOOST_POWER", 5000, 29900),
             ]
             for sku, units, price in seeds:
-                try:
-                    with conn.begin_nested():
-                        conn.execute(
-                            text(
-                                """
-                                INSERT INTO booster_packs (sku, credits_units, price_paise, active)
-                                VALUES (:sku, :units, :price, TRUE)
-                                ON CONFLICT (sku) DO UPDATE SET
-                                    credits_units=EXCLUDED.credits_units,
-                                    price_paise=EXCLUDED.price_paise,
-                                    active=TRUE
-                                """
-                            ),
-                            {"sku": sku, "units": int(units), "price": int(price)},
-                        )
-                except Exception:
-                    logger.exception("billing_store booster seed failed (non-fatal)")
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO booster_packs (sku, credits_units, price_paise, active)
+                        VALUES (:sku, :units, :price, TRUE)
+                        ON CONFLICT (sku) DO UPDATE SET
+                            credits_units=EXCLUDED.credits_units,
+                            price_paise=EXCLUDED.price_paise,
+                            active=TRUE
+                        """
+                    ),
+                    {"sku": sku, "units": int(units), "price": int(price)},
+                )
+        _TABLES_ENSURED = True
     except Exception:
         logger.exception("billing_store.ensure_tables failed (non-fatal)")
 
