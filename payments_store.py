@@ -194,66 +194,6 @@ def get_subscription(user_id: int) -> Dict[str, Any]:
         return {"plan": "free", "billing_cycle": None, "status": "active", "expires_at": None}
 
 
-def list_payments(user_id: int, limit: int = 50) -> list[Dict[str, Any]]:
-    """Return recent payment/order records for a user (newest first)."""
-    ensure_tables()
-    eng = _get_engine()
-    if eng is None:
-        return []
-
-    try:
-        with eng.begin() as conn:
-            rows = conn.execute(
-                text(
-                    """
-                    SELECT
-                        payment_type,
-                        plan,
-                        billing_cycle,
-                        booster_sku,
-                        amount_paise,
-                        currency,
-                        razorpay_order_id,
-                        razorpay_payment_id,
-                        status,
-                        created_at
-                    FROM payments
-                    WHERE user_id=:user_id
-                    ORDER BY created_at DESC
-                    LIMIT :limit
-                    """
-                ),
-                {"user_id": int(user_id), "limit": int(limit)},
-            ).mappings().all()
-
-        out: list[Dict[str, Any]] = []
-        for r in rows:
-            created_at = r.get("created_at")
-            if created_at is not None and getattr(created_at, "tzinfo", None) is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-
-            amount_paise = r.get("amount_paise") or 0
-            out.append(
-                {
-                    "payment_type": r.get("payment_type"),
-                    "plan": r.get("plan"),
-                    "billing_cycle": r.get("billing_cycle"),
-                    "booster_sku": r.get("booster_sku"),
-                    "amount_paise": int(amount_paise),
-                    "amount_inr": round(float(amount_paise) / 100.0, 2),
-                    "currency": r.get("currency") or "INR",
-                    "razorpay_order_id": r.get("razorpay_order_id"),
-                    "razorpay_payment_id": r.get("razorpay_payment_id"),
-                    "status": r.get("status"),
-                    "created_at": created_at.isoformat() if created_at is not None else None,
-                }
-            )
-        return out
-    except Exception:
-        logger.exception("list_payments failed")
-        return []
-
-
 def upsert_subscription(user_id: int, plan: str, duration_days: int, billing_cycle: str | None = None) -> Dict[str, Any]:
     """Activate or extend a subscription.
 
@@ -454,4 +394,37 @@ def get_order_record(user_id: int, order_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-## NOTE: list_payments is defined earlier in this file.
+def list_payments(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    """List recent payment records for a user (newest first)."""
+    ensure_tables()
+    eng = _get_engine()
+    if eng is None:
+        return []
+    try:
+        with eng.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        created_at,
+                        plan,
+                        payment_type,
+                        billing_cycle,
+                        booster_sku,
+                        amount_paise,
+                        currency,
+                        status,
+                        razorpay_order_id,
+                        razorpay_payment_id
+                    FROM payments
+                    WHERE user_id = :user_id
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"user_id": int(user_id), "limit": int(limit)},
+            ).mappings().all()
+            return [dict(r) for r in rows]
+    except Exception:
+        logger.exception("list_payments failed")
+        return []

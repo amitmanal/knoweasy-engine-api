@@ -29,11 +29,11 @@ from phase1_router import get_current_user
 import billing_store
 from payments_store import (
     get_subscription,
-    list_payments,
     mark_payment_paid,
     record_order,
     upsert_subscription,
     get_order_record,
+    list_payments,
 )
 
 logger = logging.getLogger("knoweasy-engine-api.payments")
@@ -126,12 +126,56 @@ def payments_me(user=Depends(get_current_user)):
 
 @router.get("/history")
 def payments_history(limit: int = 50, user=Depends(get_current_user)):
-    """Payment/order history for the logged-in user."""
+    """Student-only: list recent payment attempts (paid/pending/failed).
+
+    This powers the frontend Payment History page.
+    If a user has an active subscription but no payment rows (legacy/manual
+    activation), we also include a single synthetic entry so the UI doesn't
+    look broken.
+    """
+    role = (user.get("role") or "").lower()
+    if role != "student":
+        raise HTTPException(status_code=403, detail="Only students can view payment history")
+
     uid = int(user["user_id"])
-    safe_limit = max(1, min(int(limit or 50), 100))
-    sub = get_subscription(uid)
-    items = list_payments(uid, limit=safe_limit)
-    return {"ok": True, "subscription": sub, "items": items}
+    limit = max(1, min(int(limit or 50), 100))
+
+    rows = list_payments(uid, limit=limit)
+
+    # Normalize datetimes to ISO for JSON
+    for r in rows:
+        ca = r.get("created_at")
+        if isinstance(ca, datetime):
+            r["created_at"] = ca.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # Legacy fallback: if subscription exists but no payment rows
+    if not rows:
+        sub = get_subscription(uid)
+        if sub and (sub.get("plan") or "free").lower() != "free":
+            expires_at = sub.get("expires_at")
+            created_at = sub.get("created_at")
+            if isinstance(expires_at, datetime):
+                expires_at = expires_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            if isinstance(created_at, datetime):
+                created_at = created_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            rows = [
+                {
+                    "created_at": created_at,
+                    "plan": sub.get("plan"),
+                    "payment_type": "subscription",
+                    "billing_cycle": sub.get("billing_cycle"),
+                    "booster_sku": None,
+                    "amount_paise": None,
+                    "currency": "INR",
+                    "status": "ACTIVE",
+                    "razorpay_order_id": None,
+                    "razorpay_payment_id": None,
+                    "note": "Active subscription (legacy activation)",
+                    "expires_at": expires_at,
+                }
+            ]
+
+    return {"ok": True, "items": rows}
 
 
 @router.post("/create_order")
@@ -179,6 +223,7 @@ def create_order(payload: Dict[str, Any], user=Depends(get_current_user)):
         "receipt": f"knoweasy_{user['user_id']}_{plan}",
         "notes": {"user_id": str(user["user_id"]), "plan": plan, "billing_cycle": billing_cycle, "type": "subscription"},
     }
+
     try:
         resp = requests.post(
             "https://api.razorpay.com/v1/orders",
