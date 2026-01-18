@@ -124,13 +124,22 @@ def ensure_tables() -> None:
         "ALTER TABLE IF EXISTS booster_packs ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;",
     ]
 
+    # IMPORTANT: In Postgres, *any* SQL error aborts the whole transaction until ROLLBACK.
+    # This function is best-effort and must never poison the connection/transaction.
+    # Therefore, we isolate each statement in a SAVEPOINT via begin_nested().
     try:
         with eng.begin() as conn:
             for stmt in ddl:
-                conn.execute(text(stmt))
+                try:
+                    with conn.begin_nested():
+                        conn.execute(text(stmt))
+                except Exception:
+                    logger.exception("billing_store DDL failed (non-fatal)")
+
             for stmt in repairs:
                 try:
-                    conn.execute(text(stmt))
+                    with conn.begin_nested():
+                        conn.execute(text(stmt))
                 except Exception:
                     logger.debug("billing_store schema repair skipped: %s", stmt, exc_info=True)
 
@@ -141,19 +150,23 @@ def ensure_tables() -> None:
                 ("BOOST_POWER", 5000, 29900),
             ]
             for sku, units, price in seeds:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO booster_packs (sku, credits_units, price_paise, active)
-                        VALUES (:sku, :units, :price, TRUE)
-                        ON CONFLICT (sku) DO UPDATE SET
-                            credits_units=EXCLUDED.credits_units,
-                            price_paise=EXCLUDED.price_paise,
-                            active=TRUE
-                        """
-                    ),
-                    {"sku": sku, "units": int(units), "price": int(price)},
-                )
+                try:
+                    with conn.begin_nested():
+                        conn.execute(
+                            text(
+                                """
+                                INSERT INTO booster_packs (sku, credits_units, price_paise, active)
+                                VALUES (:sku, :units, :price, TRUE)
+                                ON CONFLICT (sku) DO UPDATE SET
+                                    credits_units=EXCLUDED.credits_units,
+                                    price_paise=EXCLUDED.price_paise,
+                                    active=TRUE
+                                """
+                            ),
+                            {"sku": sku, "units": int(units), "price": int(price)},
+                        )
+                except Exception:
+                    logger.exception("billing_store booster seed failed (non-fatal)")
     except Exception:
         logger.exception("billing_store.ensure_tables failed (non-fatal)")
 
