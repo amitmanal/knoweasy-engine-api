@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.encoders import jsonable_encoder
 
 from phase1_router import get_current_user
 import billing_store
@@ -36,8 +35,6 @@ from payments_store import (
     get_order_record,
     list_payments,
 )
-
-from email_service import email_is_configured, send_payment_receipt_email
 
 logger = logging.getLogger("knoweasy-engine-api.payments")
 
@@ -129,18 +126,56 @@ def payments_me(user=Depends(get_current_user)):
 
 @router.get("/history")
 def payments_history(limit: int = 50, user=Depends(get_current_user)):
-    """Student-only payment history (trust + support).
+    """Student-only: list recent payment attempts (paid/pending/failed).
 
-    Returns the latest payment records; never returns other users' data.
+    This powers the frontend Payment History page.
+    If a user has an active subscription but no payment rows (legacy/manual
+    activation), we also include a single synthetic entry so the UI doesn't
+    look broken.
     """
     role = (user.get("role") or "").lower()
     if role != "student":
         raise HTTPException(status_code=403, detail="Only students can view payment history")
 
     uid = int(user["user_id"])
+    limit = max(1, min(int(limit or 50), 100))
+
     rows = list_payments(uid, limit=limit)
-    # Ensure datetimes (created_at) serialize cleanly
-    return jsonable_encoder({"ok": True, "payments": rows})
+
+    # Normalize datetimes to ISO for JSON
+    for r in rows:
+        ca = r.get("created_at")
+        if isinstance(ca, datetime):
+            r["created_at"] = ca.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # Legacy fallback: if subscription exists but no payment rows
+    if not rows:
+        sub = get_subscription(uid)
+        if sub and (sub.get("plan") or "free").lower() != "free":
+            expires_at = sub.get("expires_at")
+            created_at = sub.get("created_at")
+            if isinstance(expires_at, datetime):
+                expires_at = expires_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            if isinstance(created_at, datetime):
+                created_at = created_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            rows = [
+                {
+                    "created_at": created_at,
+                    "plan": sub.get("plan"),
+                    "payment_type": "subscription",
+                    "billing_cycle": sub.get("billing_cycle"),
+                    "booster_sku": None,
+                    "amount_paise": None,
+                    "currency": "INR",
+                    "status": "ACTIVE",
+                    "razorpay_order_id": None,
+                    "razorpay_payment_id": None,
+                    "note": "Active subscription (legacy activation)",
+                    "expires_at": expires_at,
+                }
+            ]
+
+    return {"ok": True, "items": rows}
 
 
 @router.post("/create_order")
@@ -295,21 +330,5 @@ def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)):
         billing_store.reset_included_credits(int(user["user_id"]), plan, reason=f"subscription_{billing_cycle}")
     except Exception:
         pass
-
-    # Receipt email (best-effort, never blocks the purchase)
-    try:
-        if email_is_configured() and user.get("email"):
-            send_payment_receipt_email(
-                to_email=str(user.get("email")),
-                plan_label=plan.upper(),
-                billing_cycle=billing_cycle,
-                amount_paise=int(order.get("amount_paise") or expected_amount),
-                currency=str(order.get("currency") or "INR"),
-                razorpay_order_id=razorpay_order_id,
-                razorpay_payment_id=razorpay_payment_id,
-                paid_at_iso=datetime.now(timezone.utc).isoformat(),
-            )
-    except Exception:
-        logger.exception("receipt email send failed (ignored)")
 
     return {"ok": True, "subscription": sub}
