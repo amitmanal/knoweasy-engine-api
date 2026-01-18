@@ -392,3 +392,62 @@ def get_order_record(user_id: int, order_id: str) -> Optional[Dict[str, Any]]:
     except Exception:
         logger.exception("get_order_record failed")
         return None
+
+
+def list_payments(user_id: int, limit: int = 50) -> list[Dict[str, Any]]:
+    """Return recent payment records for a user (most recent first).
+
+    Safe for production:
+    - best-effort (never raises)
+    - returns an empty list if DB is unavailable
+    """
+    ensure_tables()
+    eng = _get_engine()
+    if eng is None:
+        return []
+
+    try:
+        lim = int(limit or 50)
+        if lim < 1:
+            lim = 1
+        if lim > 200:
+            lim = 200
+
+        with eng.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, plan, payment_type, billing_cycle, booster_sku,
+                           amount_paise, currency,
+                           razorpay_order_id, razorpay_payment_id,
+                           status, created_at
+                    FROM payments
+                    WHERE user_id=:user_id
+                    ORDER BY created_at DESC
+                    LIMIT :lim
+                    """
+                ),
+                {"user_id": int(user_id), "lim": lim},
+            ).mappings().all()
+
+        out: list[Dict[str, Any]] = []
+        for r in rows or []:
+            out.append(
+                {
+                    "id": int(r.get("id") or 0),
+                    "plan": (r.get("plan") or "").lower().strip() or None,
+                    "payment_type": (r.get("payment_type") or "").lower().strip() or "subscription",
+                    "billing_cycle": (r.get("billing_cycle") or "").lower().strip() or None,
+                    "booster_sku": r.get("booster_sku"),
+                    "amount_paise": int(r.get("amount_paise") or 0),
+                    "currency": (r.get("currency") or "INR").upper().strip() or "INR",
+                    "razorpay_order_id": r.get("razorpay_order_id"),
+                    "razorpay_payment_id": r.get("razorpay_payment_id"),
+                    "status": (r.get("status") or "").lower().strip() or "created",
+                    "created_at": r.get("created_at"),
+                }
+            )
+        return out
+    except Exception:
+        logger.exception("list_payments failed")
+        return []

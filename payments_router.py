@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.encoders import jsonable_encoder
 
 from phase1_router import get_current_user
 import billing_store
@@ -33,7 +34,10 @@ from payments_store import (
     record_order,
     upsert_subscription,
     get_order_record,
+    list_payments,
 )
+
+from email_service import email_is_configured, send_payment_receipt_email
 
 logger = logging.getLogger("knoweasy-engine-api.payments")
 
@@ -121,6 +125,22 @@ def payments_me(user=Depends(get_current_user)):
     plan = (sub.get("plan") or "free").lower().strip() or "free"
     wallet = billing_store.get_wallet(uid, plan)
     return {"ok": True, "subscription": sub, "wallet": wallet}
+
+
+@router.get("/history")
+def payments_history(limit: int = 50, user=Depends(get_current_user)):
+    """Student-only payment history (trust + support).
+
+    Returns the latest payment records; never returns other users' data.
+    """
+    role = (user.get("role") or "").lower()
+    if role != "student":
+        raise HTTPException(status_code=403, detail="Only students can view payment history")
+
+    uid = int(user["user_id"])
+    rows = list_payments(uid, limit=limit)
+    # Ensure datetimes (created_at) serialize cleanly
+    return jsonable_encoder({"ok": True, "payments": rows})
 
 
 @router.post("/create_order")
@@ -275,5 +295,21 @@ def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)):
         billing_store.reset_included_credits(int(user["user_id"]), plan, reason=f"subscription_{billing_cycle}")
     except Exception:
         pass
+
+    # Receipt email (best-effort, never blocks the purchase)
+    try:
+        if email_is_configured() and user.get("email"):
+            send_payment_receipt_email(
+                to_email=str(user.get("email")),
+                plan_label=plan.upper(),
+                billing_cycle=billing_cycle,
+                amount_paise=int(order.get("amount_paise") or expected_amount),
+                currency=str(order.get("currency") or "INR"),
+                razorpay_order_id=razorpay_order_id,
+                razorpay_payment_id=razorpay_payment_id,
+                paid_at_iso=datetime.now(timezone.utc).isoformat(),
+            )
+    except Exception:
+        logger.exception("receipt email send failed (ignored)")
 
     return {"ok": True, "subscription": sub}
