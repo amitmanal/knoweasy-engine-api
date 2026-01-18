@@ -142,6 +142,59 @@ def payments_history(limit: int = 50, user=Depends(get_current_user)):
 
     rows = list_payments(uid, limit=limit)
 
+    # --- TRUST POLISH (display-only cleanup) ---
+    # Goal: keep history confidence-building without changing payment logic.
+    # Rules:
+    # - Always show PAID
+    # - Show PENDING only if created < 60 minutes ago
+    # - Hide legacy/test ₹1 subscription rows (sandbox artifacts)
+    # - Normalize status strings to: PAID | PENDING | FAILED
+    now_utc = datetime.now(timezone.utc)
+    cleaned: list[dict[str, Any]] = []
+    for r in rows:
+        # Normalize created_at to datetime for filtering
+        ca_dt: Optional[datetime] = None
+        ca = r.get("created_at")
+        if isinstance(ca, datetime):
+            ca_dt = ca
+        elif isinstance(ca, str) and ca.strip():
+            try:
+                ca_dt = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+            except Exception:
+                ca_dt = None
+        if ca_dt and ca_dt.tzinfo is None:
+            ca_dt = ca_dt.replace(tzinfo=timezone.utc)
+
+        # Normalize status to a small set
+        raw_status = str(r.get("status") or "").lower().strip()
+        if raw_status in ("paid", "captured", "success", "succeeded"):
+            norm_status = "PAID"
+        elif raw_status in ("created", "pending", "authorized"):
+            norm_status = "PENDING"
+        else:
+            norm_status = "FAILED"
+        r["status"] = norm_status
+
+        # Hide ₹1 subscription artifacts (legacy safety-default pricing)
+        pay_type = str(r.get("payment_type") or "").lower().strip()
+        amt = r.get("amount_paise")
+        try:
+            amt_i = int(amt) if amt is not None else None
+        except Exception:
+            amt_i = None
+        if pay_type == "subscription" and (amt_i is not None and amt_i <= 100):
+            continue
+
+        # Hide old pending rows (>60 minutes)
+        if norm_status == "PENDING" and ca_dt is not None:
+            age_sec = (now_utc - ca_dt.astimezone(timezone.utc)).total_seconds()
+            if age_sec > 60 * 60:
+                continue
+
+        cleaned.append(r)
+
+    rows = cleaned
+
     # Normalize datetimes to ISO for JSON
     for r in rows:
         ca = r.get("created_at")
@@ -153,7 +206,7 @@ def payments_history(limit: int = 50, user=Depends(get_current_user)):
         sub = get_subscription(uid)
         if sub and (sub.get("plan") or "free").lower() != "free":
             expires_at = sub.get("expires_at")
-            created_at = sub.get("created_at") or sub.get("starts_at")
+            created_at = sub.get("created_at")
             if isinstance(expires_at, datetime):
                 expires_at = expires_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
             if isinstance(created_at, datetime):
@@ -167,10 +220,10 @@ def payments_history(limit: int = 50, user=Depends(get_current_user)):
                     "booster_sku": None,
                     "amount_paise": None,
                     "currency": "INR",
-                    "status": "PAID",
+                    "status": "ACTIVE",
                     "razorpay_order_id": None,
                     "razorpay_payment_id": None,
-                    "note": "Active subscription",
+                    "note": "Active subscription (legacy activation)",
                     "expires_at": expires_at,
                 }
             ]
