@@ -107,11 +107,12 @@ def _get_engine() -> Optional[Engine]:
 
 
 def db_init() -> Dict[str, Any]:
+    """Create DB tables used by the API (best-effort)."""
     engine = _get_engine()
     if engine is None:
         return {"ok": True, "enabled": False, "reason": "DB disabled or DATABASE_URL missing/invalid"}
 
-    create_sql = """
+    create_ask_logs_sql = """
     CREATE TABLE IF NOT EXISTS ask_logs (
         id SERIAL PRIMARY KEY,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -125,9 +126,43 @@ def db_init() -> Dict[str, Any]:
     );
     """
 
+    # Phase-4A: internal AI usage telemetry (private; never user-visible)
+    create_ai_usage_sql = """
+    CREATE TABLE IF NOT EXISTS ai_usage_logs (
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+        user_id INTEGER,
+        role TEXT,
+        plan TEXT,
+
+        request_type TEXT,
+        credit_bucket INTEGER,
+        credits_charged INTEGER,
+
+        model_primary TEXT,
+        model_escalated TEXT,
+        cache_hit BOOLEAN,
+
+        tokens_in INTEGER,
+        tokens_out INTEGER,
+        estimated_cost_usd NUMERIC,
+        estimated_cost_inr NUMERIC,
+
+        latency_ms INTEGER,
+        status TEXT,
+
+        question_len INTEGER,
+        answer_len INTEGER,
+
+        error TEXT
+    );
+    """
+
     try:
         with engine.begin() as conn:
-            conn.execute(text(create_sql))
+            conn.execute(text(create_ask_logs_sql))
+            conn.execute(text(create_ai_usage_sql))
         return {"ok": True, "enabled": True}
     except Exception as e:
         logger.exception("db_init failed")
@@ -230,4 +265,81 @@ def db_log_solve(req: Any, out: Any, latency_ms: int, error: Optional[str]) -> N
         return
 
 
-__all__ = ["db_init", "db_health", "db_log_solve"]
+# -----------------------------
+# Logging (ai_usage_logs)
+# -----------------------------
+
+
+def _safe_int(v):
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
+def _safe_float(v):
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
+def db_log_ai_usage(event: dict) -> None:
+    """Best-effort insert into ai_usage_logs. Never raises."""
+    engine = _get_engine()
+    if engine is None:
+        return
+
+    d = event or {}
+
+    insert_sql = """
+    INSERT INTO ai_usage_logs (
+        user_id, role, plan,
+        request_type, credit_bucket, credits_charged,
+        model_primary, model_escalated, cache_hit,
+        tokens_in, tokens_out, estimated_cost_usd, estimated_cost_inr,
+        latency_ms, status, question_len, answer_len, error
+    ) VALUES (
+        :user_id, :role, :plan,
+        :request_type, :credit_bucket, :credits_charged,
+        :model_primary, :model_escalated, :cache_hit,
+        :tokens_in, :tokens_out, :estimated_cost_usd, :estimated_cost_inr,
+        :latency_ms, :status, :question_len, :answer_len, :error
+    );
+    """
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(insert_sql),
+                {
+                    "user_id": _safe_int(d.get("user_id")),
+                    "role": (d.get("role") or None),
+                    "plan": (d.get("plan") or None),
+                    "request_type": (d.get("request_type") or None),
+                    "credit_bucket": _safe_int(d.get("credit_bucket")),
+                    "credits_charged": _safe_int(d.get("credits_charged")),
+                    "model_primary": (d.get("model_primary") or None),
+                    "model_escalated": (d.get("model_escalated") or None),
+                    "cache_hit": bool(d.get("cache_hit")) if d.get("cache_hit") is not None else None,
+                    "tokens_in": _safe_int(d.get("tokens_in")),
+                    "tokens_out": _safe_int(d.get("tokens_out")),
+                    "estimated_cost_usd": d.get("estimated_cost_usd"),
+                    "estimated_cost_inr": d.get("estimated_cost_inr"),
+                    "latency_ms": _safe_int(d.get("latency_ms")),
+                    "status": (d.get("status") or None),
+                    "question_len": _safe_int(d.get("question_len")),
+                    "answer_len": _safe_int(d.get("answer_len")),
+                    "error": (d.get("error") or None),
+                },
+            )
+    except Exception:
+        logger.exception("db_log_ai_usage failed")
+        return
+
+
+__all__ = ["db_init", "db_health", "db_log_solve", "db_log_ai_usage"]

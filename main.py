@@ -19,7 +19,7 @@ from payments_router import router as payments_router
 from billing_router import router as billing_router
 import phase1_store
 from redis_store import redis_health
-from db import db_health
+from db import db_health, db_init
 
 logger = logging.getLogger("knoweasy-engine-api")
 
@@ -210,6 +210,12 @@ def _startup() -> None:
         phase1_store.ensure_tables()
     except Exception:
         # Never crash boot. Health endpoint will still show DB status.
+        pass
+
+    # Phase-4A: ensure telemetry tables exist (best-effort)
+    try:
+        db_init()
+    except Exception:
         pass
 
     try:

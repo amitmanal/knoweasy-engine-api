@@ -16,9 +16,15 @@ from config import (
     KE_API_KEY,
     SOLVE_CACHE_TTL_SECONDS,
 )
+from config import (
+    AI_PROVIDER,
+    AI_MODE,
+    GEMINI_PRIMARY_MODEL,
+    OPENAI_MODEL,
+)
 from schemas import SolveRequest, SolveResponse
 from orchestrator import solve
-from db import db_log_solve
+from db import db_log_solve, db_log_ai_usage
 
 from redis_store import get_json as redis_get_json
 from redis_store import setex_json as redis_setex_json
@@ -40,6 +46,41 @@ _SOLVE_SEM = threading.BoundedSemaphore(value=max(1, _MAX_CONCURRENT_SOLVES))
 # In-memory rate limit buckets: {ip: (window_start_epoch, count)}
 # Used ONLY if Redis is not enabled.
 _BUCKETS: Dict[str, Tuple[float, int]] = {}
+
+_COST_USD_PER_1K = {
+    "gemini": float(os.getenv("COST_USD_PER_1K_GEMINI", "0")) or None,
+    "openai": float(os.getenv("COST_USD_PER_1K_OPENAI", "0")) or None,
+    "claude": float(os.getenv("COST_USD_PER_1K_CLAUDE", "0")) or None,
+}
+
+
+def _estimate_tokens_from_chars(n_chars: int) -> int:
+    # Rough heuristic: ~4 chars per token (works reasonably for English + mixed).
+    try:
+        n = int(n_chars)
+    except Exception:
+        n = 0
+    return max(1, n // 4)
+
+
+def _estimate_cost_usd(provider: str, tokens_total: int) -> float | None:
+    rate = _COST_USD_PER_1K.get((provider or "").lower())
+    if not rate:
+        return None
+    try:
+        return (float(tokens_total) / 1000.0) * float(rate)
+    except Exception:
+        return None
+
+
+def _usd_to_inr(usd: float | None) -> float | None:
+    if usd is None:
+        return None
+    try:
+        fx = float(os.getenv("USD_INR", "83"))
+        return float(usd) * fx
+    except Exception:
+        return None
 
 
 def _client_ip(req: Request) -> str:
@@ -190,6 +231,40 @@ def solve_route(
             db_log_solve(req=req, out=cached, latency_ms=0, error=None)
         except Exception:
             pass
+        # Phase-4A telemetry (best-effort; never affects user)
+        try:
+            q = (req.question or "")
+            question_len = len(q)
+            answer_len = len(str(cached.get("final_answer", "") or ""))
+            tokens_in = _estimate_tokens_from_chars(question_len)
+            tokens_out = _estimate_tokens_from_chars(answer_len)
+            tokens_total = tokens_in + tokens_out
+            provider = (AI_PROVIDER or "gemini").lower()
+            cost_usd = _estimate_cost_usd(provider, tokens_total)
+            db_log_ai_usage(
+                {
+                    "user_id": int(user_ctx["user_id"]) if user_ctx else None,
+                    "role": (user_ctx.get("role") if user_ctx else None),
+                    "plan": (sub.get("plan") if isinstance(sub, dict) else None) if user_ctx else None,
+                    "request_type": "TEXT",
+                    "credit_bucket": 0,
+                    "credits_charged": 0,
+                    "model_primary": provider,
+                    "model_escalated": None,
+                    "cache_hit": True,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "estimated_cost_usd": cost_usd,
+                    "estimated_cost_inr": _usd_to_inr(cost_usd),
+                    "latency_ms": 0,
+                    "status": "CACHE",
+                    "question_len": question_len,
+                    "answer_len": answer_len,
+                    "error": None,
+                }
+            )
+        except Exception:
+            pass
 
         cached_flags = list(cached.get("flags", []) or [])
         cached_flags.append("CACHED")
@@ -334,6 +409,51 @@ def solve_route(
                 # Do not block solve on billing write failure.
                 # Keep wallet as None to avoid showing incorrect balances.
 
+
+        # Phase-4A telemetry (best-effort; never affects user)
+        try:
+            q = (req.question or "")
+            question_len = len(q)
+            # include steps length in answer_len rough
+            ans = str(out.get("final_answer", "") or "")
+            steps = out.get("steps") or []
+            answer_len = len(ans) + sum(len(str(x)) for x in steps)
+            tokens_in = _estimate_tokens_from_chars(question_len)
+            tokens_out = _estimate_tokens_from_chars(answer_len)
+            tokens_total = tokens_in + tokens_out
+            provider = (AI_PROVIDER or "gemini").lower()
+            model_variant = None
+            if provider == "gemini":
+                model_variant = GEMINI_PRIMARY_MODEL
+            elif provider == "openai":
+                model_variant = OPENAI_MODEL
+
+            cost_usd = _estimate_cost_usd(provider, tokens_total)
+            db_log_ai_usage(
+                {
+                    "user_id": int(user_ctx["user_id"]) if user_ctx else None,
+                    "role": (user_ctx.get("role") if user_ctx else None),
+                    "plan": (sub.get("plan") if isinstance(sub, dict) else None) if user_ctx else None,
+                    "request_type": "TEXT",
+                    "credit_bucket": int(planned_units) if planned_units else 0,
+                    "credits_charged": int(credits_units_charged) if credits_units_charged else 0,
+                    "model_primary": provider,
+                    "model_escalated": None,
+                    "cache_hit": False,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "estimated_cost_usd": cost_usd,
+                    "estimated_cost_inr": _usd_to_inr(cost_usd),
+                    "latency_ms": int(latency_ms) if latency_ms is not None else None,
+                    "status": "SUCCESS" if ans else "FAILED",
+                    "question_len": question_len,
+                    "answer_len": answer_len,
+                    "error": None,
+                }
+            )
+        except Exception:
+            pass
+
         return SolveResponse(
             final_answer=out.get("final_answer", ""),
             steps=out.get("steps", []),
@@ -357,6 +477,34 @@ def solve_route(
         # Don't leak raw errors to the student UI; keep response stable + CORS-safe.
         try:
             db_log_solve(req=req, out=None, latency_ms=None, error=str(e))
+        except Exception:
+            pass
+
+        try:
+            q = (req.question or "")
+            question_len = len(q)
+            tokens_in = _estimate_tokens_from_chars(question_len)
+            provider = (AI_PROVIDER or "gemini").lower()
+            db_log_ai_usage({
+                "user_id": int(user_ctx["user_id"]) if user_ctx else None,
+                "role": (user_ctx.get("role") if user_ctx else None),
+                "plan": (sub.get("plan") if isinstance(sub, dict) else None) if user_ctx else None,
+                "request_type": "TEXT",
+                "credit_bucket": int(planned_units) if planned_units else 0,
+                "credits_charged": 0,
+                "model_primary": provider,
+                "model_escalated": None,
+                "cache_hit": False,
+                "tokens_in": tokens_in,
+                "tokens_out": 0,
+                "estimated_cost_usd": None,
+                "estimated_cost_inr": None,
+                "latency_ms": None,
+                "status": "FAILED",
+                "question_len": question_len,
+                "answer_len": 0,
+                "error": str(e),
+            })
         except Exception:
             pass
 
