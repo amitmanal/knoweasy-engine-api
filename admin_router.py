@@ -1,4 +1,3 @@
-# admin_router.py
 """Private internal cost dashboard endpoints (operator-only).
 
 Enabled only when ADMIN_API_KEY is set.
@@ -49,9 +48,17 @@ def _db_not_ready_payload() -> Dict[str, Any]:
     }
 
 
-def _interval_days_expr() -> str:
-    # Postgres: (:days::text || ' days')::interval
-    return "(NOW() - (:days::text || ' days')::interval)"
+def _since_expr() -> str:
+    """SQL snippet for filtering last N days.
+
+    IMPORTANT: keep bind params parseable by SQLAlchemy.
+    Avoid patterns like ":days::text" which can confuse the param parser
+    and leak a literal ':' to Postgres (syntax error).
+
+    Safe Postgres form: NOW() - (:days * INTERVAL '1 day')
+    """
+
+    return "(NOW() - (:days * INTERVAL '1 day'))"
 
 
 @router.get("/cost/summary")
@@ -60,6 +67,7 @@ def cost_summary(
     x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
 ):
     """Aggregate requests/credits/cost over the last N days."""
+
     try:
         _require_admin(x_admin_key)
     except PermissionError as e:
@@ -72,7 +80,7 @@ def cost_summary(
     if engine is None:
         return JSONResponse(status_code=200, content=_db_not_ready_payload())
 
-    since_expr = _interval_days_expr()
+    since = _since_expr()
 
     summary_sql = f"""
     SELECT
@@ -85,7 +93,7 @@ def cost_summary(
       COALESCE(SUM(COALESCE(estimated_cost_inr,0)),0) AS cost_inr,
       COALESCE(AVG(COALESCE(latency_ms,0)),0)::int AS avg_latency_ms
     FROM ai_usage_logs
-    WHERE created_at >= {since_expr};
+    WHERE created_at >= {since};
     """
 
     by_status_sql = f"""
@@ -93,7 +101,7 @@ def cost_summary(
       COALESCE(status,'UNKNOWN') AS status,
       COUNT(*)::int AS count
     FROM ai_usage_logs
-    WHERE created_at >= {since_expr}
+    WHERE created_at >= {since}
     GROUP BY COALESCE(status,'UNKNOWN')
     ORDER BY count DESC;
     """
@@ -106,7 +114,7 @@ def cost_summary(
       COALESCE(SUM(COALESCE(credits_charged,0)),0)::int AS credits_charged,
       COALESCE(SUM(COALESCE(estimated_cost_inr,0)),0) AS cost_inr
     FROM ai_usage_logs
-    WHERE created_at >= {since_expr}
+    WHERE created_at >= {since}
     GROUP BY COALESCE(model_primary,'UNKNOWN')
     ORDER BY requests DESC;
     """
@@ -121,7 +129,7 @@ def cost_summary(
         cache_hits = int(row.get("cache_hits") or 0)
         cache_hit_rate = (cache_hits / requests) if requests else 0.0
 
-        out = {
+        out: Dict[str, Any] = {
             "ok": True,
             "days": days,
             "requests": requests,
@@ -138,14 +146,7 @@ def cost_summary(
         }
         return JSONResponse(status_code=200, content=out)
     except Exception as ex:
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": False,
-                "error": "QUERY_FAILED",
-                "message": str(ex),
-            },
-        )
+        return JSONResponse(status_code=200, content={"ok": False, "error": "QUERY_FAILED", "message": str(ex)})
 
 
 @router.get("/cost/top-users")
@@ -155,6 +156,7 @@ def cost_top_users(
     x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
 ):
     """Top users by estimated cost over the last N days."""
+
     try:
         _require_admin(x_admin_key)
     except PermissionError as e:
@@ -167,7 +169,7 @@ def cost_top_users(
     if engine is None:
         return JSONResponse(status_code=200, content=_db_not_ready_payload())
 
-    since_expr = _interval_days_expr()
+    since = _since_expr()
 
     sql = f"""
     SELECT
@@ -181,7 +183,7 @@ def cost_top_users(
       COALESCE(SUM(COALESCE(estimated_cost_inr,0)),0) AS cost_inr,
       COALESCE(MAX(created_at), NOW()) AS last_seen
     FROM ai_usage_logs
-    WHERE created_at >= {since_expr}
+    WHERE created_at >= {since}
     GROUP BY COALESCE(user_id, -1), COALESCE(role,'UNKNOWN'), COALESCE(plan,'UNKNOWN')
     ORDER BY cost_inr DESC, requests DESC
     LIMIT :limit;
@@ -189,28 +191,16 @@ def cost_top_users(
 
     try:
         with engine.connect() as conn:
-            rows = list(conn.execute(text(sql), {"days": days, "limit": limit}).mappings().all())
+            rows: List[Dict[str, Any]] = list(
+                conn.execute(text(sql), {"days": days, "limit": limit}).mappings().all()
+            )
 
-        # Convert numerics to floats for JSON serialization stability
         for r in rows:
-            if "cost_usd" in r and r["cost_usd"] is not None:
+            if r.get("cost_usd") is not None:
                 r["cost_usd"] = float(r["cost_usd"])
-            if "cost_inr" in r and r["cost_inr"] is not None:
+            if r.get("cost_inr") is not None:
                 r["cost_inr"] = float(r["cost_inr"])
 
-        out: Dict[str, Any] = {
-            "ok": True,
-            "days": days,
-            "limit": limit,
-            "rows": rows,
-        }
-        return JSONResponse(status_code=200, content=out)
+        return JSONResponse(status_code=200, content={"ok": True, "days": days, "limit": limit, "rows": rows})
     except Exception as ex:
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": False,
-                "error": "QUERY_FAILED",
-                "message": str(ex),
-            },
-        )
+        return JSONResponse(status_code=200, content={"ok": False, "error": "QUERY_FAILED", "message": str(ex)})
