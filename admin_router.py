@@ -9,7 +9,7 @@ Security posture:
 
 Read-only: does not modify user state.
 
-This module queries ai_usage_logs directly via SQLAlchemy.
+Queries ai_usage_logs directly.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
@@ -49,15 +50,7 @@ def _db_not_ready_payload() -> Dict[str, Any]:
 
 
 def _since_expr() -> str:
-    """SQL snippet for filtering last N days.
-
-    IMPORTANT: keep bind params parseable by SQLAlchemy.
-    Avoid patterns like ":days::text" which can confuse the param parser
-    and leak a literal ':' to Postgres (syntax error).
-
-    Safe Postgres form: NOW() - (:days * INTERVAL '1 day')
-    """
-
+    # Postgres-safe interval expression with a bound param.
     return "(NOW() - (:days * INTERVAL '1 day'))"
 
 
@@ -67,7 +60,6 @@ def cost_summary(
     x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
 ):
     """Aggregate requests/credits/cost over the last N days."""
-
     try:
         _require_admin(x_admin_key)
     except PermissionError as e:
@@ -80,7 +72,7 @@ def cost_summary(
     if engine is None:
         return JSONResponse(status_code=200, content=_db_not_ready_payload())
 
-    since = _since_expr()
+    since_expr = _since_expr()
 
     summary_sql = f"""
     SELECT
@@ -93,7 +85,7 @@ def cost_summary(
       COALESCE(SUM(COALESCE(estimated_cost_inr,0)),0) AS cost_inr,
       COALESCE(AVG(COALESCE(latency_ms,0)),0)::int AS avg_latency_ms
     FROM ai_usage_logs
-    WHERE created_at >= {since};
+    WHERE created_at >= {since_expr};
     """
 
     by_status_sql = f"""
@@ -101,7 +93,7 @@ def cost_summary(
       COALESCE(status,'UNKNOWN') AS status,
       COUNT(*)::int AS count
     FROM ai_usage_logs
-    WHERE created_at >= {since}
+    WHERE created_at >= {since_expr}
     GROUP BY COALESCE(status,'UNKNOWN')
     ORDER BY count DESC;
     """
@@ -114,22 +106,23 @@ def cost_summary(
       COALESCE(SUM(COALESCE(credits_charged,0)),0)::int AS credits_charged,
       COALESCE(SUM(COALESCE(estimated_cost_inr,0)),0) AS cost_inr
     FROM ai_usage_logs
-    WHERE created_at >= {since}
+    WHERE created_at >= {since_expr}
     GROUP BY COALESCE(model_primary,'UNKNOWN')
     ORDER BY requests DESC;
     """
 
     try:
         with engine.connect() as conn:
-            row = conn.execute(text(summary_sql), {"days": days}).mappings().first() or {}
-            by_status = list(conn.execute(text(by_status_sql), {"days": days}).mappings().all())
-            by_model = list(conn.execute(text(by_model_sql), {"days": days}).mappings().all())
+            row_map = conn.execute(text(summary_sql), {"days": days}).mappings().first()
+            row: Dict[str, Any] = dict(row_map) if row_map else {}
+            by_status = [dict(r) for r in conn.execute(text(by_status_sql), {"days": days}).mappings().all()]
+            by_model = [dict(r) for r in conn.execute(text(by_model_sql), {"days": days}).mappings().all()]
 
         requests = int(row.get("requests") or 0)
         cache_hits = int(row.get("cache_hits") or 0)
         cache_hit_rate = (cache_hits / requests) if requests else 0.0
 
-        out: Dict[str, Any] = {
+        out = {
             "ok": True,
             "days": days,
             "requests": requests,
@@ -144,9 +137,12 @@ def cost_summary(
             "by_status": by_status,
             "by_model": by_model,
         }
-        return JSONResponse(status_code=200, content=out)
+        return JSONResponse(status_code=200, content=jsonable_encoder(out))
     except Exception as ex:
-        return JSONResponse(status_code=200, content={"ok": False, "error": "QUERY_FAILED", "message": str(ex)})
+        return JSONResponse(
+            status_code=200,
+            content={"ok": False, "error": "QUERY_FAILED", "message": str(ex)},
+        )
 
 
 @router.get("/cost/top-users")
@@ -156,7 +152,6 @@ def cost_top_users(
     x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
 ):
     """Top users by estimated cost over the last N days."""
-
     try:
         _require_admin(x_admin_key)
     except PermissionError as e:
@@ -169,7 +164,7 @@ def cost_top_users(
     if engine is None:
         return JSONResponse(status_code=200, content=_db_not_ready_payload())
 
-    since = _since_expr()
+    since_expr = _since_expr()
 
     sql = f"""
     SELECT
@@ -183,7 +178,7 @@ def cost_top_users(
       COALESCE(SUM(COALESCE(estimated_cost_inr,0)),0) AS cost_inr,
       COALESCE(MAX(created_at), NOW()) AS last_seen
     FROM ai_usage_logs
-    WHERE created_at >= {since}
+    WHERE created_at >= {since_expr}
     GROUP BY COALESCE(user_id, -1), COALESCE(role,'UNKNOWN'), COALESCE(plan,'UNKNOWN')
     ORDER BY cost_inr DESC, requests DESC
     LIMIT :limit;
@@ -191,16 +186,19 @@ def cost_top_users(
 
     try:
         with engine.connect() as conn:
-            rows: List[Dict[str, Any]] = list(
-                conn.execute(text(sql), {"days": days, "limit": limit}).mappings().all()
-            )
+            rows = [dict(r) for r in conn.execute(text(sql), {"days": days, "limit": limit}).mappings().all()]
 
+        # Normalize numeric fields for stable output
         for r in rows:
-            if r.get("cost_usd") is not None:
+            if "cost_usd" in r and r["cost_usd"] is not None:
                 r["cost_usd"] = float(r["cost_usd"])
-            if r.get("cost_inr") is not None:
+            if "cost_inr" in r and r["cost_inr"] is not None:
                 r["cost_inr"] = float(r["cost_inr"])
 
-        return JSONResponse(status_code=200, content={"ok": True, "days": days, "limit": limit, "rows": rows})
+        out: Dict[str, Any] = {"ok": True, "days": days, "limit": limit, "rows": rows}
+        return JSONResponse(status_code=200, content=jsonable_encoder(out))
     except Exception as ex:
-        return JSONResponse(status_code=200, content={"ok": False, "error": "QUERY_FAILED", "message": str(ex)})
+        return JSONResponse(
+            status_code=200,
+            content={"ok": False, "error": "QUERY_FAILED", "message": str(ex)},
+        )
