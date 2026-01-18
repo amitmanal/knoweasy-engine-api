@@ -153,7 +153,7 @@ def payments_history(limit: int = 50, user=Depends(get_current_user)):
         sub = get_subscription(uid)
         if sub and (sub.get("plan") or "free").lower() != "free":
             expires_at = sub.get("expires_at")
-            created_at = sub.get("created_at")
+            created_at = sub.get("created_at") or sub.get("starts_at")
             if isinstance(expires_at, datetime):
                 expires_at = expires_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
             if isinstance(created_at, datetime):
@@ -167,10 +167,10 @@ def payments_history(limit: int = 50, user=Depends(get_current_user)):
                     "booster_sku": None,
                     "amount_paise": None,
                     "currency": "INR",
-                    "status": "ACTIVE",
+                    "status": "PAID",
                     "razorpay_order_id": None,
                     "razorpay_payment_id": None,
-                    "note": "Active subscription (legacy activation)",
+                    "note": "Active subscription",
                     "expires_at": expires_at,
                 }
             ]
