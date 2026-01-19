@@ -165,7 +165,7 @@ def get_subscription(user_id: int) -> Dict[str, Any]:
             row = conn.execute(
                 text(
                     """
-                    SELECT plan, billing_cycle, status, expires_at
+                    SELECT plan, billing_cycle, status, starts_at, expires_at, created_at
                     FROM subscriptions
                     WHERE user_id=:user_id
                     LIMIT 1
@@ -187,6 +187,8 @@ def get_subscription(user_id: int) -> Dict[str, Any]:
                 "plan": row.get("plan") or "free",
                 "billing_cycle": row.get("billing_cycle"),
                 "status": row.get("status") or "active",
+                "starts_at": row.get("starts_at"),
+                "created_at": row.get("created_at"),
                 "expires_at": expires_at,
             }
     except Exception:
