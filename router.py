@@ -29,6 +29,7 @@ from db import db_log_solve, db_log_ai_usage
 from redis_store import get_json as redis_get_json
 from redis_store import setex_json as redis_setex_json
 from redis_store import incr_with_ttl as redis_incr_with_ttl
+from redis_store import setnx_ex as redis_setnx_ex
 
 from auth_store import session_user
 from payments_store import get_subscription
@@ -222,6 +223,30 @@ def solve_route(
     # -------- Cache FIRST (best-effort) --------
     # IMPORTANT: Never charge credits on cache hit.
     payload = req.model_dump()
+
+    # -------- Trust-safe retry (idempotency by request_id) --------
+    # If the client provides request_id, we replay the exact prior response
+    # (including billing meta) so offline retries never double-charge.
+    request_id = (getattr(req, "request_id", None) or "").strip() or None
+    if request_id:
+        rid_key = f"rid:solve:{request_id}"
+        prior = redis_get_json(rid_key)
+        if prior and isinstance(prior, dict) and prior.get("final_answer"):
+            return SolveResponse(**prior)
+
+        # Best-effort lock reduces rare parallel double-processing for same request_id.
+        # If Redis is unavailable, we simply proceed (cache behavior remains).
+        try:
+            lock_key = f"lock:rid:solve:{request_id}"
+            got_lock = redis_setnx_ex(lock_key, 30, "1")
+            if not got_lock:
+                # Another worker may be processing. Wait briefly and re-check.
+                time.sleep(0.35)
+                prior2 = redis_get_json(rid_key)
+                if prior2 and isinstance(prior2, dict) and prior2.get("final_answer"):
+                    return SolveResponse(**prior2)
+        except Exception:
+            pass
     cache_key = _cache_key(payload)
 
     cached = redis_get_json(cache_key)
@@ -454,7 +479,7 @@ def solve_route(
         except Exception:
             pass
 
-        return SolveResponse(
+        resp = SolveResponse(
             final_answer=out.get("final_answer", ""),
             steps=out.get("steps", []),
             assumptions=out.get("assumptions", []),
@@ -472,6 +497,18 @@ def solve_route(
                 },
             },
         )
+
+        # Persist idempotent replay (best-effort). This protects trust when
+        # the user retries after network drop: same request_id returns same
+        # response without additional credit deductions.
+        if request_id and resp.final_answer:
+            try:
+                rid_key = f"rid:solve:{request_id}"
+                redis_setex_json(rid_key, 10 * 60, resp.model_dump())
+            except Exception:
+                pass
+
+        return resp
 
     except Exception as e:
         # Don't leak raw errors to the student UI; keep response stable + CORS-safe.

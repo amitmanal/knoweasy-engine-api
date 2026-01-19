@@ -49,6 +49,14 @@ def _normalize_class(v) -> int:
 class SolveRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=4000)
 
+    # Optional idempotency key (trust-safe retries). If provided, backend will
+    # ensure the same request_id returns the same response without double-charging.
+    request_id: Optional[str] = Field(
+        None,
+        max_length=80,
+        description="Client-generated idempotency key for retries (UUID recommended).",
+    )
+
     # ✅ Accept BOTH keys:
     # - "class"      (official API)
     # - "class_level" (current frontend payload)
@@ -70,6 +78,19 @@ class SolveRequest(BaseModel):
 
     # Ignore extra fields for forward-compat (stability)
     model_config = {"extra": "ignore"}
+
+    @field_validator("request_id", mode="before")
+    @classmethod
+    def validate_request_id(cls, v):
+        if v is None:
+            return None
+        v = _clean_text(str(v))
+        if not v:
+            return None
+        # Keep this strict but not fragile (no regex hard requirement).
+        if len(v) > 80:
+            return v[:80]
+        return v
 
     @field_validator("class_")
     @classmethod
