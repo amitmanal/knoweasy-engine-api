@@ -49,6 +49,11 @@ def _normalize_class(v) -> int:
 class SolveRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=4000)
 
+    # Optional idempotency key (frontend-generated). If present, the backend can
+    # safely "resume" a completed response without re-running solve or
+    # re-charging credits when the client lost connection mid-request.
+    request_id: Optional[str] = Field(None, max_length=80)
+
     # ✅ Accept BOTH keys:
     # - "class"      (official API)
     # - "class_level" (current frontend payload)

@@ -37,6 +37,18 @@ import billing_store
 router = APIRouter()
 
 
+# Idempotency / resume support:
+# If the client loses connectivity after the backend solved (and possibly charged
+# credits), the frontend can retry with the same request_id. We will return the
+# stored result without re-running solve and without additional billing.
+_RESUME_TTL_SECONDS = int(os.getenv("SOLVE_RESUME_TTL_SECONDS", "21600"))  # 6 hours
+
+
+def _resume_key(user_id: int, request_id: str) -> str:
+    rid = (request_id or "").strip()
+    return f"ke:solve:resume:{int(user_id)}:{rid}"
+
+
 # Global concurrency guardrail (prevents provider overload under spikes).
 # Limits concurrent /solve executions per instance.
 _MAX_CONCURRENT_SOLVES = int(os.getenv("MAX_CONCURRENT_SOLVES", "40"))
@@ -224,6 +236,45 @@ def solve_route(
     payload = req.model_dump()
     cache_key = _cache_key(payload)
 
+    # -------- Resume / idempotency (best-effort) --------
+    # If the client retries with the same request_id (e.g., network dropped
+    # after the backend completed), return the stored result WITHOUT re-running
+    # solve and WITHOUT additional billing.
+    if user_ctx and getattr(req, "request_id", None):
+        try:
+            rk = _resume_key(int(user_ctx["user_id"]), str(req.request_id))
+            resumed = redis_get_json(rk)
+            if resumed and resumed.get("cache_key") == cache_key and isinstance(resumed.get("out"), dict):
+                out = resumed["out"]
+                flags = list(out.get("flags", []) or [])
+                if "RESUMED" not in flags:
+                    flags.append("RESUMED")
+                if "AUTH" not in flags:
+                    flags.append("AUTH")
+
+                return SolveResponse(
+                    final_answer=out.get("final_answer", ""),
+                    steps=out.get("steps", []),
+                    assumptions=out.get("assumptions", []),
+                    confidence=float(out.get("confidence", 0.5)),
+                    flags=flags,
+                    safe_note=out.get("safe_note"),
+                    meta={
+                        "engine": "knoweasy-orchestrator-phase1",
+                        "billing": {
+                            "user_id": int(user_ctx["user_id"]),
+                            "plan": (sub.get("plan") if isinstance(sub, dict) else None),
+                            "credits_units_charged": 0,
+                            "wallet": None,
+                            "served_from_cache": False,
+                            "served_from_resume": True,
+                        },
+                    },
+                )
+        except Exception:
+            # Resume is best-effort only.
+            pass
+
     cached = redis_get_json(cache_key)
     if cached:
         # Still log "served from cache" as best effort
@@ -270,6 +321,24 @@ def solve_route(
         cached_flags.append("CACHED")
         if user_ctx:
             cached_flags.append("AUTH")
+
+        # Best-effort: if the request had an idempotency key, store the
+        # cached output as a resumable response.
+        if user_ctx and getattr(req, "request_id", None):
+            try:
+                rk = _resume_key(int(user_ctx["user_id"]), str(req.request_id))
+                redis_setex_json(
+                    rk,
+                    _RESUME_TTL_SECONDS,
+                    {
+                        "cache_key": cache_key,
+                        "out": {**cached, "flags": cached_flags},
+                        "credits_units_charged": 0,
+                        "created_at": int(time.time()),
+                    },
+                )
+            except Exception:
+                pass
 
         return SolveResponse(
             final_answer=cached.get("final_answer", ""),
@@ -453,6 +522,23 @@ def solve_route(
             )
         except Exception:
             pass
+
+        # Best-effort: store resumable response (idempotency) for this request.
+        if user_ctx and getattr(req, "request_id", None):
+            try:
+                rk = _resume_key(int(user_ctx["user_id"]), str(req.request_id))
+                redis_setex_json(
+                    rk,
+                    _RESUME_TTL_SECONDS,
+                    {
+                        "cache_key": cache_key,
+                        "out": {**out, "flags": (out.get("flags", []) or []) + ["AUTH"]},
+                        "credits_units_charged": int(credits_units_charged) if credits_units_charged else 0,
+                        "created_at": int(time.time()),
+                    },
+                )
+            except Exception:
+                pass
 
         return SolveResponse(
             final_answer=out.get("final_answer", ""),
