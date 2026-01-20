@@ -18,7 +18,6 @@ from phase1_router import router as phase1_router
 from payments_router import router as payments_router
 from billing_router import router as billing_router
 from admin_router import router as admin_router
-from tests_router import router as tests_router
 import phase1_store
 from redis_store import redis_health
 from db import db_health, db_init
@@ -126,7 +125,6 @@ app.include_router(phase1_router)
 app.include_router(payments_router)
 app.include_router(billing_router)
 app.include_router(admin_router)
-app.include_router(tests_router)
 
 # -----------------------------
 # Razorpay webhook (optional)
@@ -226,12 +224,8 @@ def _startup() -> None:
         import payments_store
         import billing_store
 
-        # Phase-2 Test Engine tables (additive, isolated)
-        import tests_store
-
         payments_store.ensure_tables()
         billing_store.ensure_tables()
-        tests_store.ensure_tables()
     except Exception:
         pass
 
