@@ -74,7 +74,7 @@ def ensure_tables() -> None:
 
     eng = _get_engine()
     if eng is None:
-        _TABLES_READY = True
+        # DB not ready yet (or env missing). Do NOT lock this forever; allow retry on next call.
         return
 
     ddl = [

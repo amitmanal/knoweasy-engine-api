@@ -175,7 +175,7 @@ def payments_history(limit: int = 50, user=Depends(get_current_user)):
             norm_status = "FAILED"
         r["status"] = norm_status
 
-        # Hide ₹1 subscription artifacts (legacy safety-default pricing)
+        # Mark ₹1 subscription rows as TEST instead of hiding (trust: never show empty history after payment)
         pay_type = str(r.get("payment_type") or "").lower().strip()
         amt = r.get("amount_paise")
         try:
@@ -183,7 +183,10 @@ def payments_history(limit: int = 50, user=Depends(get_current_user)):
         except Exception:
             amt_i = None
         if pay_type == "subscription" and (amt_i is not None and amt_i <= 100):
-            continue
+            # Keep it visible, but clearly label it as a test/sandbox price.
+            r["is_test_payment"] = True
+            existing_note = str(r.get("note") or "").strip()
+            r["note"] = (existing_note + (" | " if existing_note else "") + "Test / sandbox price").strip()
 
         # Hide old pending rows (>60 minutes)
         if norm_status == "PENDING" and ca_dt is not None:

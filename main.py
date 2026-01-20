@@ -183,8 +183,12 @@ default_origins = [
     'http://127.0.0.1:5500',
 ]
 
-# Merge env origins with defaults (env can include '*' to allow all origins).
-origins = list(dict.fromkeys((allow_origins or []) + default_origins))
+# If ALLOWED_ORIGINS env is set, we use it EXACTLY (production-safe).
+# If not set, we merge a small default allowlist for Hostinger + local dev.
+if ALLOWED_ORIGINS_EFFECTIVE:
+    origins = allow_origins
+else:
+    origins = list(dict.fromkeys((allow_origins or []) + default_origins))
 
 if any(o == '*' for o in origins):
     # Wildcard mode (no credentials).
