@@ -15,21 +15,11 @@ from ai_router import generate_json as generate_ai_json
 from auth_store import session_user
 from payments_store import get_subscription
 import billing_store
-from redis_store import setnx_ex as redis_setnx_ex, incr_with_ttl as redis_incr_with_ttl, get_json as redis_get_json, setex_json as redis_setex_json
+from redis_store import setnx_ex as redis_setnx_ex
 
 logger = logging.getLogger("knoweasy.tests_router")
 
 router = APIRouter(prefix="/test", tags=["tests"])
-
-def _client_ip(request: Request) -> str:
-    xff = request.headers.get('x-forwarded-for') or request.headers.get('X-Forwarded-For')
-    if xff:
-        return xff.split(',')[0].strip()
-    try:
-        return request.client.host if request.client else 'unknown'
-    except Exception:
-        return 'unknown'
-
 
 
 def _auth_user(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -188,12 +178,10 @@ async def generate_test(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    """Generate a test JSON for the Tests page.
+    """Generate a test JSON for the Tests page (separate from chapter mini-quizzes).
 
-    TRUST RULES:
-    - Never consume credits unless we are returning a real generated test.
-    - Retries must not double-charge: if request_id is present, we replay.
-    - Guests are allowed for Phase-1 stability, but are rate-limited.
+    - If user is authenticated, we consume credits (idempotent).
+    - If guest, we allow generation (no ledger) for Phase-1 stability.
     """
     t0 = time.time()
     try:
@@ -206,17 +194,28 @@ async def generate_test(
     except Exception as e:
         return JSONResponse(status_code=400, content={"ok": False, "error": "BAD_REQUEST", "message": str(e)})
 
+    # Optional idempotency guard (prevents double-credit + double-gen on retries)
+    request_id = (req.request_id or "").strip()
+    idem_key = ""
+    if request_id:
+        idem_key = f"idem:testgen:{request_id}"
+        try:
+            ok = redis_setnx_ex(idem_key, 180, value=str(int(time.time())))
+            if not ok:
+                # Already processing or done recently
+                return JSONResponse(status_code=409, content={"ok": False, "error": "DUPLICATE_REQUEST", "message": "Duplicate request_id. Please retry with a new request_id."})
+        except Exception:
+            # Redis not available: proceed (Phase-1 stability)
+            pass
+
     user_ctx = _auth_user(authorization)
     sub = None
     plan = "free"
-    user_id: int | None = None
+    user_id = None
     if user_ctx:
+        user_id = int(user_ctx.get("user_id"))
         try:
-            user_id = int(user_ctx.get("user_id"))
-        except Exception:
-            user_id = None
-        try:
-            sub = get_subscription(int(user_id)) if user_id is not None else None
+            sub = get_subscription(user_id)
         except Exception:
             sub = None
         try:
@@ -224,139 +223,12 @@ async def generate_test(
         except Exception:
             plan = "free"
 
-    # ---------------- Idempotency (replay) ----------------
-    request_id = (req.request_id or "").strip() or None
-    if request_id:
-        replay_key = f"rid:testgen:{request_id}"
-        try:
-            prior = redis_get_json(replay_key)
-            if isinstance(prior, dict) and prior.get("ok") and prior.get("test"):
-                return prior
-        except Exception:
-            pass
-
-        # lock to avoid rare parallel double-processing for same request_id
-        try:
-            lock_key = f"lock:rid:testgen:{request_id}"
-            got_lock = redis_setnx_ex(lock_key, 30, value="1")
-            if not got_lock:
-                time.sleep(0.25)
-                prior2 = redis_get_json(replay_key)
-                if isinstance(prior2, dict) and prior2.get("ok") and prior2.get("test"):
-                    return prior2
-        except Exception:
-            pass
-
-    # ---------------- Guest rate-limit (cost control) ----------------
-    if not user_id:
-        ip = _client_ip(request)
-        limit = int(os.getenv("GUEST_TESTGEN_PER_HOUR", "6"))
-        key = f"rl:testgen:{ip}:{int(time.time() // 3600)}"
-        try:
-            c = redis_incr_with_ttl(key, 3600)
-            if c is not None and c > limit:
-                return JSONResponse(
-                    status_code=429,
-                    content={
-                        "ok": False,
-                        "error": "RATE_LIMITED",
-                        "message": "Too many test generations right now. Please login or try again later.",
-                    },
-                )
-        except Exception:
-            # If Redis is down, proceed (Phase-1 stability)
-            pass
-
-    # ---------------- Credits (preview only) ----------------
+    # Credit consumption (only for logged-in users)
     credits_units = _credits_for(req.kind, req.n_questions)
     if user_id:
         try:
-            w_preview = billing_store.get_wallet(int(user_id), str(plan))
-            total_preview = int(w_preview.get("included_credits_balance") or 0) + int(w_preview.get("booster_credits_balance") or 0)
-            if total_preview < int(credits_units):
-                return JSONResponse(
-                    status_code=402,
-                    content={
-                        "ok": False,
-                        "error": "INSUFFICIENT_CREDITS",
-                        "message": "You have used all your AI credits. Please buy a Booster Pack or upgrade your plan.",
-                        "required_credits": int(credits_units),
-                    },
-                )
-        except ValueError:
-            return JSONResponse(
-                status_code=402,
-                content={
-                    "ok": False,
-                    "error": "INSUFFICIENT_CREDITS",
-                    "message": "You have used all your AI credits. Please buy a Booster Pack or upgrade your plan.",
-                    "required_credits": int(credits_units),
-                },
-            )
-        except Exception:
-            # Billing preview failure must not block learning (stability first)
-            pass
-
-    # ---------------- AI generation ----------------
-    prompt = _build_prompt(req)
-    paper: Dict[str, Any]
-    try:
-        out = generate_ai_json(prompt)
-        if not out:
-            raise ValueError("Empty AI response")
-        paper = dict(out)
-
-        # Ensure `sections` exists. If only `questions` exists (old format), convert.
-        if "sections" not in paper and "questions" in paper:
-            qs = paper.get("questions") or []
-            section = {"name": "Section", "questions": []}
-            for i, q in enumerate(qs):
-                try:
-                    qid = q.get("id") or f"q{i+1}"
-                    text = q.get("question") or q.get("text") or ""
-                    options = q.get("options") or []
-                    # Convert ["A", "B"] -> [{key:"A", text:"A"}, ...]
-                    opt_objs = []
-                    for j, opt in enumerate(options):
-                        key = chr(ord("A") + j)
-                        opt_objs.append({"key": key, "text": str(opt)})
-                    ans_idx = q.get("answer_index")
-                    ans_key = chr(ord("A") + int(ans_idx)) if isinstance(ans_idx, int) and 0 <= ans_idx < len(opt_objs) else ""
-                    section["questions"].append({
-                        "id": str(qid),
-                        "type": "mcq",
-                        "stem": str(text),
-                        "options": opt_objs,
-                        "answerKey": ans_key,
-                        "explanation": q.get("explanation") or "",
-                        "tags": {"subject": req.subject or "", "chapter": (req.chapters[0] if req.chapters else "")},
-                    })
-                except Exception:
-                    continue
-            paper = {
-                "title": paper.get("title") or f"{req.subject} Test",
-                "duration_minutes": int(paper.get("duration_minutes") or 30),
-                "marking": paper.get("marking") or {"correct": 1, "wrong": 0, "unattempted": 0},
-                "sections": [section],
-            }
-
-        # Minimal validation
-        if not isinstance(paper.get("sections"), list) or not paper.get("sections"):
-            raise ValueError("Paper schema invalid (missing sections)")
-
-    except Exception as e:
-        # IMPORTANT: do not consume credits on AI failure
-        return JSONResponse(
-            status_code=502,
-            content={"ok": False, "error": "AI_FAILED", "message": "Could not generate test right now. Please try again."},
-        )
-
-    # ---------------- Consume credits ONLY after success ----------------
-    wallet_after = None
-    if user_id:
-        try:
-            wallet_after = billing_store.consume_credits(
-                user_id=int(user_id),
+            billing_store.consume_credits(
+                user_id=user_id,
                 plan=str(plan),
                 units=int(credits_units),
                 meta={
@@ -366,42 +238,119 @@ async def generate_test(
                     "board": req.board,
                     "subject": req.subject,
                     "n_questions": req.n_questions,
-                    "request_id": request_id,
                 },
             )
-        except ValueError:
-            # Edge race: credits spent in another request after preview.
+        except ValueError as e:
             return JSONResponse(
                 status_code=402,
                 content={
                     "ok": False,
                     "error": "INSUFFICIENT_CREDITS",
-                    "message": "You have used all your AI credits. Please buy a Booster Pack or upgrade your plan.",
+                    "message": str(e),
                     "required_credits": int(credits_units),
                 },
             )
         except Exception:
-            # DB down: allow, but don't claim wallet numbers.
-            wallet_after = None
-
-    meta = {
-        "generated_ms": int((time.time() - t0) * 1000),
-        "credits_charged": int(credits_units) if user_id else 0,
-        "wallet": wallet_after,
-        "plan": str(plan),
-        "auth": bool(user_id),
-    }
-
-    resp = {"ok": True, "test": paper, "meta": meta}
-
-    # Persist replay cache (best-effort)
-    if request_id:
-        try:
-            redis_setex_json(f"rid:testgen:{request_id}", 10 * 60, resp)
-        except Exception:
+            # If DB is down, allow but report warning (trust-safe)
             pass
 
-    return resp
+    # Build a v2 prompt and attempt to generate a paper with the new schema.  If the
+    # provider fails, we return an error so the client can fall back to a demo test.
+    prompt = _build_prompt(req)
+    paper: Dict[str, Any]
+    try:
+        out = generate_ai_json(prompt)
+        # out should already be a dict representing the paper.  Validate minimal
+        # structure and normalise fields.  If the AI returns the older v1 schema
+        # (questions list), convert it to the v2 sections format.
+        if not out:
+            raise ValueError("Empty AI response")
+
+        paper = dict(out)
+
+        # Ensure `sections` exists.  If only `questions` exists (old format), wrap
+        # into a single section and convert option strings into keyed objects.
+        if "sections" not in paper and "questions" in paper:
+            qs = paper.get("questions") or []
+            section = {"name": "Section", "questions": []}
+            for i, q in enumerate(qs):
+                # Legacy question format: {id:int, question:str, options:[str], answer_index:int, explanation:str}
+                try:
+                    qid = q.get("id") or f"q{i+1}"
+                    text = q.get("question") or q.get("text") or ""
+                    opts = q.get("options") or []
+                    # Convert options array of strings to list of {key,text} dicts
+                    new_opts = []
+                    for j, opt in enumerate(opts):
+                        key = chr(65 + j)  # A,B,C,D
+                        new_opts.append({"key": key, "text": str(opt)})
+                    answer_idx = q.get("answer_index", 0)
+                    answer_key = chr(65 + int(answer_idx)) if 0 <= int(answer_idx) < len(new_opts) else "A"
+                    section["questions"].append({
+                        "id": str(qid),
+                        "text": text,
+                        "options": new_opts,
+                        "answerKey": answer_key,
+                        "explanation": q.get("explanation") or "",
+                        "tags": {"chapter": (q.get("tags", {}) or {}).get("chapter", "")}
+                    })
+                except Exception:
+                    continue
+            paper["sections"] = [section]
+            # remove legacy fields
+            paper.pop("questions", None)
+            paper.pop("duration_minutes", None)
+
+        # Populate mandatory fields if missing
+        paper.setdefault("id", f"test_{int(time.time()*1000)}")
+        paper.setdefault("title", "Generated Test")
+        paper.setdefault("mode", str(req.kind or "quiz"))
+        paper.setdefault("class_n", req.class_n)
+        paper.setdefault("board", req.board)
+        # Normalise goal to lowercase strings
+        goal_map = {
+            "NONE": "boards",
+            "BOARD": "boards",
+            "JEE_PCM": "jee_pcm",
+            "NEET_PCB": "neet_pcb",
+            "CET_PCM": "cet_pcm",
+            "CET_PCB": "cet_pcb",
+        }
+        paper["goal"] = goal_map.get(str(req.goal).upper(), "boards")
+        paper.setdefault("subject", req.subject)
+        paper.setdefault("chapters", req.chapters or [])
+        # Convert duration if provided in minutes by the model; prefer duration_sec
+        if "duration_minutes" in paper and "duration_sec" not in paper:
+            try:
+                paper["duration_sec"] = int(paper["duration_minutes"]) * 60
+                paper.pop("duration_minutes", None)
+            except Exception:
+                pass
+        # Ensure marking exists; default based on mode
+        if "marking" not in paper or not isinstance(paper.get("marking"), dict):
+            if paper.get("mode") == "entrance":
+                paper["marking"] = {"correct": 4, "wrong": -1, "unattempted": 0}
+            else:
+                paper["marking"] = {"correct": 1, "wrong": 0, "unattempted": 0}
+
+        # Validate questions inside sections
+        if not paper.get("sections"):
+            raise ValueError("No sections in generated paper")
+    except Exception as e:
+        logger.exception("test generation failed: %s", e)
+        return JSONResponse(status_code=502, content={"ok": False, "error": "AI_FAILED", "message": "AI failed to generate a valid test. Please try again."})
+
+    # Build meta info
+    ms = int((time.time() - t0) * 1000)
+    meta = {
+        "ms": ms,
+        "credits_charged": int(credits_units) if user_id else 0,
+        "plan": plan if user_id else "guest",
+        "ai_provider": os.getenv("AI_PROVIDER", "gemini"),
+    }
+    return {"ok": True, "test": paper, "meta": meta}
+
+
 @router.post("/submit")
 async def submit_test(request: Request):
     """
@@ -549,36 +498,46 @@ async def get_pyq_paper(path: str):
 
 
 # ------------------- Analysis Endpoint -------------------
-# ------------------- Analysis Endpoint -------------------
 @router.post("/analyze")
 async def analyze_test(request: Request, authorization: Optional[str] = Header(default=None)):
-    """AI-powered analysis of a test result.
+    """
+    Provide an AI‑powered analysis of a test result.  The client sends the test paper and
+    either the answer map or a previously computed result.  We compute per‑chapter
+    statistics and generate a succinct summary of strengths and weaknesses.  If an
+    AI provider fails, we still return the raw stats so the client can render its own
+    charts.
 
-    SECURITY / COST RULES:
-    - Always return stats (local computation) for everyone.
-    - Only call AI analysis if the user is authenticated AND has credits.
-    - Never consume credits unless the AI analysis succeeded.
-    - Guests are rate-limited (even though we won't call AI for them).
+    Expected JSON input:
+      {
+        "paper": { ...paper schema... },
+        "answers": { "q1": "A", ... } OR "result": { ...as returned by /test/submit... }
+      }
+
+    Response JSON:
+      {
+        "ok": true,
+        "stats": { "chapter": { "total": n, "correct": c, "wrong": w, "unattempted": u }, ... },
+        "analysis": "text"  // may be empty if AI fails
+      }
     """
     try:
         data = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"ok": False, "error": "BAD_REQUEST", "message": "Invalid JSON"})
-
     paper = data.get("paper") or {}
     answers = data.get("answers") or {}
     result = data.get("result")
-
+    # Validate paper structure
     if not paper or "sections" not in paper:
         return JSONResponse(status_code=400, content={"ok": False, "error": "INVALID_PAPER", "message": "Paper missing or invalid"})
-
-    # If a full result is not provided, compute it locally
+    # If a full result is not provided, compute it locally using our submission logic
     if result is None:
+        # Flatten questions
         questions = []
         for sec in paper.get("sections") or []:
             for q in sec.get("questions") or []:
                 questions.append(q)
-
+        # Compute result counts per question
         correct = 0
         wrong = 0
         unattempted = 0
@@ -607,6 +566,7 @@ async def analyze_test(request: Request, authorization: Optional[str] = Header(d
         # Ensure details contain chapter info
         for d in result.get("details") or []:
             if "chapter" not in d:
+                # Attempt to map from paper tags
                 qid = d.get("qid")
                 for sec in paper.get("sections") or []:
                     for q in sec.get("questions") or []:
@@ -614,14 +574,16 @@ async def analyze_test(request: Request, authorization: Optional[str] = Header(d
                             d["chapter"] = (q.get("tags") or {}).get("chapter") or ""
                             break
 
-    # Compute per-chapter stats
+    # Compute per‑chapter statistics.  Normalise chapter names and count totals.
     stats: Dict[str, Dict[str, int]] = {}
     for det in result.get("details") or []:
+        # Default to "General" if chapter tag missing or blank
         chap_raw = (det.get("chapter") or "").strip()
         chap = chap_raw.title() if chap_raw else "General"
         if chap not in stats:
             stats[chap] = {"total": 0, "correct": 0, "wrong": 0, "unattempted": 0}
         stats[chap]["total"] += 1
+        # Count based on answer correctness
         ans = det.get("answer")
         if ans is None or ans == "" or ans == "—":
             stats[chap]["unattempted"] += 1
@@ -630,86 +592,44 @@ async def analyze_test(request: Request, authorization: Optional[str] = Header(d
         else:
             stats[chap]["wrong"] += 1
 
-    # ---- Auth + credits gate for AI analysis ----
-    user_ctx = _auth_user(authorization)
-    if not user_ctx:
-        # Guest: return stats only (no AI)
-        return {"ok": True, "stats": stats, "analysis": ""}
-
-    try:
-        user_id = int(user_ctx.get("user_id"))
-    except Exception:
-        return {"ok": True, "stats": stats, "analysis": ""}
-
-    # Determine plan (best-effort)
-    plan = "free"
-    try:
-        sub = get_subscription(user_id)
-        plan = (sub or {}).get("plan") or "free"
-    except Exception:
-        plan = "free"
-
-    # Credits needed (small, fixed)
-    units = int(os.getenv("CREDITS_TEST_ANALYZE", "1"))
-
-    # Preview wallet (fail fast)
-    try:
-        w_preview = billing_store.get_wallet(user_id, str(plan))
-        total_preview = int(w_preview.get("included_credits_balance") or 0) + int(w_preview.get("booster_credits_balance") or 0)
-        if total_preview < units:
-            return JSONResponse(
-                status_code=402,
-                content={
-                    "ok": False,
-                    "error": "INSUFFICIENT_CREDITS",
-                    "message": "You have used all your AI credits. Please buy a Booster Pack or upgrade your plan.",
-                    "stats": stats,
-                    "analysis": "",
-                },
-            )
-    except Exception:
-        # If preview fails, do not block; we will only charge on success.
-        pass
-
-    # Build summary for AI
+    # Build a summary description for AI
     summary_lines = []
     for ch, st in stats.items():
-        summary_lines.append(f"{ch}: {st['correct']} correct, {st['wrong']} wrong, {st['unattempted']} unattempted out of {st['total']}")
+        total = st["total"]
+        cor = st["correct"]
+        w = st["wrong"]
+        u = st["unattempted"]
+        summary_lines.append(f"{ch}: {cor} correct, {w} wrong, {u} unattempted out of {total}")
     summary = "; ".join(summary_lines)
 
+    # Build AI prompt
     prompt = (
-        "You are a senior teacher and mentor. A student took a test and here is their chapter-wise performance: "
+        "You are a senior teacher and mentor. A student took a test and here is their chapter‑wise performance: "
         + summary
-        + ". Provide a concise analysis highlighting strengths and weaknesses. Mention chapters they did well in and chapters to improve. Offer 2-3 actionable study suggestions. Return plain text (no JSON, no markdown)."
+        + ". Provide a concise analysis highlighting the student's strengths and weaknesses. Mention which chapters they performed well in and which chapters need improvement. Offer two or three actionable study suggestions. Return a plain text paragraph with no JSON or markdown."
     )
 
     analysis_text = ""
+    # Try AI provider
     try:
         analysis_resp = generate_ai_json(prompt)
+        # The provider may return a dict or a string; if dict, attempt to extract 'analysis'
         if isinstance(analysis_resp, dict):
+            # Flatten keys and values into a string
             analysis_text = analysis_resp.get("analysis") or analysis_resp.get("text") or ""
             if not analysis_text:
+                # If the dict has only one string value, use it
                 for v in analysis_resp.values():
                     if isinstance(v, str):
                         analysis_text = v
                         break
         elif isinstance(analysis_resp, str):
             analysis_text = analysis_resp
-        analysis_text = str(analysis_text or "").strip()
+        # Sanitize string
+        if analysis_text:
+            analysis_text = str(analysis_text).strip()
     except Exception:
+        # If AI fails, analysis_text remains empty
         analysis_text = ""
-
-    # Charge credits ONLY if we produced a non-empty analysis
-    if analysis_text:
-        try:
-            billing_store.consume_credits(
-                user_id=user_id,
-                plan=str(plan),
-                units=int(units),
-                meta={"feature": "TEST_ANALYZE"},
-            )
-        except Exception:
-            # Never block returning the analysis due to billing write failure.
-            pass
 
     return {"ok": True, "stats": stats, "analysis": analysis_text}
