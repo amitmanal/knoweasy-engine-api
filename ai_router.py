@@ -51,8 +51,10 @@ def _extract_json(text: str) -> Dict[str, Any]:
 def _provider_order() -> List[str]:
     p = (AI_PROVIDER or "gemini").strip().lower()
     if p in {"auto", "multi"}:
-        # Prefer Gemini first (current Phase-1), then OpenAI, then Claude.
-        return ["gemini", "openai", "claude"]
+        # Prefer Gemini first (default), then Claude, then OpenAI.  This order
+        # matches the product requirement: Gemini default, Claude fallback,
+        # OpenAI fallback.
+        return ["gemini", "claude", "openai"]
     return [p]
 
 
