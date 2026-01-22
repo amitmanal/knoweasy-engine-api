@@ -1,0 +1,66 @@
+{
+  "id": "demo_pyq_paper",
+  "title": "PYQ Simulation (Demo Paper)",
+  "durationSec": 1800,
+  "marking": {
+    "correct": 4,
+    "wrong": -1,
+    "unattempted": 0
+  },
+  "sections": [
+    {
+      "name": "Physics",
+      "questions": [
+        {
+          "id": "p1",
+          "text": "A ball is thrown vertically upward. What is the acceleration at the highest point?",
+          "options": [
+            { "key": "A", "text": "0" },
+            { "key": "B", "text": "g downward" },
+            { "key": "C", "text": "g upward" },
+            { "key": "D", "text": "Depends on mass" }
+          ],
+          "answerKey": "B",
+          "explanation": "Acceleration due to gravity acts downward at all points of motion, including the highest point.",
+          "tags": { "subject": "Physics", "year": null }
+        }
+      ]
+    },
+    {
+      "name": "Chemistry",
+      "questions": [
+        {
+          "id": "c1",
+          "text": "Which has the highest electronegativity?",
+          "options": [
+            { "key": "A", "text": "F" },
+            { "key": "B", "text": "Cl" },
+            { "key": "C", "text": "Br" },
+            { "key": "D", "text": "I" }
+          ],
+          "answerKey": "A",
+          "explanation": "Fluorine is the most electronegative element in the periodic table.",
+          "tags": { "subject": "Chemistry", "year": null }
+        }
+      ]
+    },
+    {
+      "name": "Maths",
+      "questions": [
+        {
+          "id": "m1",
+          "text": "If f(x)=x^2, then f'(x) equals:",
+          "options": [
+            { "key": "A", "text": "x" },
+            { "key": "B", "text": "2x" },
+            { "key": "C", "text": "x^2" },
+            { "key": "D", "text": "2" }
+          ],
+          "answerKey": "B",
+          "explanation": "Derivative of x^2 with respect to x is 2x.",
+          "tags": { "subject": "Maths", "year": null }
+        }
+      ]
+    }
+  ]
+}
