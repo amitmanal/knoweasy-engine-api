@@ -19,6 +19,7 @@ from payments_router import router as payments_router
 from billing_router import router as billing_router
 from admin_router import router as admin_router
 from luma_router import router as luma_router
+from router_ai_luma import router as luma_ai_router
 from tests_router import router as tests_router
 import phase1_store
 from redis_store import redis_health
@@ -128,6 +129,7 @@ app.include_router(payments_router)
 app.include_router(billing_router)
 app.include_router(admin_router)
 app.include_router(luma_router)
+app.include_router(luma_ai_router)
 app.include_router(tests_router)
 
 # -----------------------------

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import os
-import re
+import json
 from typing import Any, Dict, List, Optional
 
-import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ai_router import generate_json, ProviderError
 
 router = APIRouter(prefix="/ai/luma", tags=["ai", "luma"])
 
@@ -31,7 +30,7 @@ class LumaLesson(BaseModel):
 class LumaHelpRequest(BaseModel):
     user: LumaUser
     lesson: LumaLesson
-    intent: str
+    intent: str  # "Explain simpler" | "Another example" | "Ask me 3 quick questions" | "Check my steps" | "Free doubt"
     question: Optional[str] = ""
     ai_hints: Dict[str, Any] = Field(default_factory=dict)
 
@@ -43,143 +42,91 @@ class LumaHelpResponse(BaseModel):
     next_options: List[str] = Field(default_factory=list)
 
 
-# ----------------- Gemini call -----------------
-def _env(name: str, default: str = "") -> str:
-    v = os.getenv(name)
-    return v.strip() if v else default
+def _safe_str(x: Any, limit: int = 1800) -> str:
+    s = "" if x is None else str(x)
+    s = s.replace("\x00", "").strip()
+    if len(s) > limit:
+        s = s[:limit] + "…"
+    return s
 
 
 def _build_prompt(req: LumaHelpRequest) -> str:
-    # Hard safety constraints
-    lang = req.user.language or "en"
+    lang = (req.user.language or "en").strip() or "en"
+
+    # Hard scope policy (trust-first)
+    scope = req.ai_hints.get("scope") or "current_card_only"
+    ncert = req.ai_hints.get("ncertAligned", True)
+
     lesson = req.lesson
-    hints = req.ai_hints or {}
+    intent = _safe_str(req.intent, 60)
+    student_q = _safe_str(req.question, 600)
 
-    do_not_say = hints.get("do_not_say") or []
-    if isinstance(do_not_say, str):
-        do_not_say = [do_not_say]
-
-    # Keep the system instruction short & strict
-    sys = (
-        "You are a calm senior teacher helping an Indian school student.\n"
-        "Rules:\n"
-        "1) Explain ONLY the current concept (current card/section). Do not jump ahead.\n"
-        "2) Use simple language. Be brief.\n"
-        "3) Do not copy textbook lines.\n"
-        "4) Do not provide full-chapter teaching.\n"
-        "5) Output must be VALID JSON with keys: explanation, example, check_question, next_options.\n"
-    )
-
-    scope = (
-        f"Lesson context:\n"
-        f"- Subject: {lesson.subject}\n"
-        f"- Chapter: {lesson.chapter}\n"
-        f"- Section: {lesson.section}\n"
-        f"- Card type: {lesson.card_type}\n"
-        f"- Card title: {lesson.card_title}\n"
-        f"- Current card content:\n{lesson.card_content}\n"
-    )
-
-    intent = req.intent or "custom_question"
-    question = (req.question or "").strip()
-
-    guidance = []
-    if hints.get("simple"):
-        guidance.append(f"Simple-explain hint: {hints['simple']}")
-    if hints.get("example"):
-        guidance.append(f"Example hint: {hints['example']}")
-    if hints.get("check_questions"):
-        guidance.append(f"Check-question ideas: {hints['check_questions']}")
-
-    if do_not_say:
-        guidance.append("Avoid these terms/topics: " + ", ".join(map(str, do_not_say)))
-
-    user_task = f"Intent: {intent}\n"
-    if question:
-        user_task += f"Student question: {question}\n"
-
-    user_task += (
-        "Return JSON only. explanation should be 2-4 short sentences. "
-        "example should be max 1 short example/analogy. "
-        "check_question should be 1 short question. "
-        "next_options should be an array of 1-3 short strings like 'Explain even simpler'. "
-        f"Language: {lang}.\n"
-    )
-
-    return sys + "\n" + scope + "\n" + ("\n".join(guidance) + "\n" if guidance else "") + user_task
-
-
-async def _gemini_generate_json(prompt: str) -> Dict[str, Any]:
-    api_key = _env("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=503, detail="GEMINI_API_KEY not set")
-
-    model = _env("GEMINI_MODEL", "gemini-1.5-flash")
-    # Gemini REST endpoint (Generative Language API)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-
-    body = {
-        "contents": [
-            {"role": "user", "parts": [{"text": prompt}]}
-        ],
-        "generationConfig": {
-            "temperature": float(_env("LUMA_AI_TEMPERATURE", "0.4")),
-            "maxOutputTokens": int(_env("LUMA_AI_MAX_TOKENS", "400"))
-        }
+    card_ctx = {
+        "subject": _safe_str(lesson.subject, 80),
+        "chapter": _safe_str(lesson.chapter, 120),
+        "section": _safe_str(lesson.section, 120),
+        "card_type": _safe_str(lesson.card_type, 40),
+        "card_title": _safe_str(lesson.card_title, 120),
+        "card_content": _safe_str(lesson.card_content, 1800),
     }
 
-    timeout = httpx.Timeout(20.0, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(url, json=body)
-        if r.status_code >= 400:
-            raise HTTPException(status_code=503, detail=f"Gemini error HTTP {r.status_code}")
+    # Output contract: keep predictable for UI
+    schema = {
+        "explanation": "string (main helpful reply, calm tone, short)",
+        "example": "string (optional, only when asked or useful)",
+        "check_question": "string (optional, a quick check question)",
+        "next_options": ["string"]
+    }
 
-        data = r.json()
-        # Extract text from Gemini response
-        text = ""
-        try:
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
-        except Exception:
-            raise HTTPException(status_code=503, detail="Gemini response parse error")
+    rules = [
+        "You are Luma: a calm, premium teacher helping an Indian school student.",
+        "Stay strictly within the CURRENT card/context. Do not teach the full chapter.",
+        "If something is missing in the card content, ask ONE short clarifying question inside 'explanation'.",
+        "No hallucinated facts. If unsure, say so and suggest what to check in NCERT.",
+        "Use simple English (unless lang != 'en'). Keep it brief and point-wise when possible.",
+        "Return ONLY valid JSON. No markdown. No extra keys.",
+    ]
+    if ncert:
+        rules.insert(2, "NCERT-aligned only. Avoid out-of-syllabus expansions.")
 
-    # Attempt to extract JSON object from text safely
-    # Some models may wrap in ```json ... ```
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
-        raise HTTPException(status_code=503, detail="AI returned non-JSON output")
-    raw = m.group(0)
-
-    import json
-    try:
-        obj = json.loads(raw)
-        return obj
-    except Exception:
-        raise HTTPException(status_code=503, detail="AI returned invalid JSON")
-
-
-def _normalize_response(obj: Dict[str, Any]) -> LumaHelpResponse:
-    explanation = str(obj.get("explanation") or "").strip()
-    example = str(obj.get("example") or "").strip()
-    check_q = str(obj.get("check_question") or "").strip()
-    next_opts = obj.get("next_options") or []
-    if not isinstance(next_opts, list):
-        next_opts = []
-    next_opts = [str(x).strip() for x in next_opts if str(x).strip()][:3]
-
-    # Minimal guarantees
-    if not explanation:
-        explanation = "Let’s look at it slowly. This part is about the current concept in your card. Try reading it once more and ask me what exactly feels confusing."
-
-    return LumaHelpResponse(
-        explanation=explanation[:800],
-        example=example[:500],
-        check_question=check_q[:250],
-        next_options=next_opts or ["Explain even simpler", "Another example"]
-    )
+    prompt = {
+        "task": "Luma help for a single learning card",
+        "language": lang,
+        "scope": scope,
+        "intent": intent,
+        "student_question": student_q,
+        "card_context": card_ctx,
+        "output_schema": schema,
+        "rules": rules,
+    }
+    return json.dumps(prompt, ensure_ascii=False)
 
 
 @router.post("/help", response_model=LumaHelpResponse)
-async def luma_help(req: LumaHelpRequest):
-    prompt = _build_prompt(req)
-    obj = await _gemini_generate_json(prompt)
-    return _normalize_response(obj)
+def luma_help(req: LumaHelpRequest) -> Dict[str, Any]:
+    try:
+        prompt = _build_prompt(req)
+        out = generate_json(prompt)  # provider-configured (Gemini by default)
+        # Normalize + validate keys (never crash UI)
+        explanation = _safe_str(out.get("explanation") or out.get("answer") or "")
+        example = _safe_str(out.get("example") or "")
+        check_q = _safe_str(out.get("check_question") or out.get("check") or "")
+        next_opts = out.get("next_options") or out.get("next") or []
+        if not isinstance(next_opts, list):
+            next_opts = []
+        next_opts = [ _safe_str(x, 60) for x in next_opts if str(x).strip() ][:6]
+
+        if not explanation:
+            explanation = "I can help — please share the exact line you are stuck on from this card."
+
+        return {
+            "explanation": explanation,
+            "example": example,
+            "check_question": check_q,
+            "next_options": next_opts,
+        }
+    except ProviderError as e:
+        raise HTTPException(status_code=503, detail=f"AI provider error: {e}")
+    except Exception as e:
+        # Safety: never expose stack traces
+        raise HTTPException(status_code=500, detail=f"Luma help failed: {type(e).__name__}")
