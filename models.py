@@ -52,46 +52,61 @@ class GeminiClient:
             _cb_open_until_ts = time.time() + CB_COOLDOWN_S
 
     def generate_json(self, prompt: str, model: str | None = None) -> dict:
-        """Generate strict JSON using Gemini with timeout + circuit breaker."""
+        """Generate strict JSON using Gemini with timeout + circuit breaker.
+
+        Robustness notes (production safety):
+        - Tries primary + fallback + a small built-in safety list (deduped) to avoid model-name drift.
+        - Treats timeouts as hard-fail (bubbles up) so caller can show a clean retry message.
+        """
         self._guard_circuit()
 
-        use_model = model or GEMINI_PRIMARY_MODEL
+        requested = (model or GEMINI_PRIMARY_MODEL or "").strip()
+        fallback = (GEMINI_FALLBACK_MODEL or "").strip()
+
+        # Candidate list (ordered). We keep this tiny to avoid unexpected behavior changes.
+        candidates = [requested, fallback, "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+        seen = set()
+        models_to_try = []
+        for name in candidates:
+            name = (name or "").strip()
+            if not name:
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            models_to_try.append(name)
 
         def _do_call(m: str):
             return self._call_generate_content(m, prompt)
 
-        try:
-            fut = _executor.submit(_do_call, use_model)
-            resp = fut.result(timeout=GEMINI_TIMEOUT_S)
-            text = (resp.text or "").strip()
-            if "{" in text and "}" in text:
-                text = text[text.find("{") : text.rfind("}") + 1]
-            out = json.loads(text)
-            self._record_success()
-            return out
+        last_err: Exception | None = None
 
-        except FuturesTimeoutError:
-            self._record_failure()
-            raise TimeoutError("Gemini request timed out")
-
-        except Exception:
-            # fallback model attempt
+        for use_model in models_to_try:
             try:
-                if use_model != GEMINI_FALLBACK_MODEL:
-                    fut2 = _executor.submit(_do_call, GEMINI_FALLBACK_MODEL)
-                    resp2 = fut2.result(timeout=GEMINI_TIMEOUT_S)
-                    text2 = (resp2.text or "").strip()
-                    if "{" in text2 and "}" in text2:
-                        text2 = text2[text2.find("{") : text2.rfind("}") + 1]
-                    out2 = json.loads(text2)
-                    self._record_success()
-                    return out2
+                fut = _executor.submit(_do_call, use_model)
+                resp = fut.result(timeout=GEMINI_TIMEOUT_S)
+                text = (getattr(resp, "text", "") or "").strip()
+                if "{" in text and "}" in text:
+                    text = text[text.find("{") : text.rfind("}") + 1]
+                out = json.loads(text)
+                self._record_success()
+                return out
+
             except FuturesTimeoutError:
+                # Treat timeouts as hard failures; circuit breaker should learn.
                 self._record_failure()
-                raise TimeoutError("Gemini fallback request timed out")
-            except Exception:
-                self._record_failure()
-                raise
+                raise TimeoutError("Gemini request timed out")
+
+            except Exception as e:
+                # Non-timeout errors: try the next candidate model.
+                last_err = e
+                continue
+
+        # If we exhausted models
+        self._record_failure()
+        if last_err:
+            raise last_err
+        raise RuntimeError("Gemini failed without a specific error")
 
             self._record_failure()
             raise
