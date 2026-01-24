@@ -51,62 +51,67 @@ class GeminiClient:
         if _cb_failures >= CB_FAILURE_THRESHOLD:
             _cb_open_until_ts = time.time() + CB_COOLDOWN_S
 
+    @staticmethod
+    def _normalize_model_name(name: str) -> str:
+        # Some SDK examples use "models/<name>" while config typically uses "<name>".
+        n = (name or "").strip()
+        if n.startswith("models/"):
+            n = n[len("models/") :]
+        return n
+
     def generate_json(self, prompt: str, model: str | None = None) -> dict:
         """Generate strict JSON using Gemini with timeout + circuit breaker.
 
-        Robustness notes (production safety):
-        - Tries primary + fallback + a small built-in safety list (deduped) to avoid model-name drift.
-        - Treats timeouts as hard-fail (bubbles up) so caller can show a clean retry message.
+        Robust model selection:
+        - Tries requested model (if provided), then env primary/fallback, then safe known models.
+        - Never crashes the server on model 404; it will try the next candidate.
         """
         self._guard_circuit()
 
-        requested = (model or GEMINI_PRIMARY_MODEL or "").strip()
-        fallback = (GEMINI_FALLBACK_MODEL or "").strip()
-
-        # Candidate list (ordered). We keep this tiny to avoid unexpected behavior changes.
-        candidates = [requested, fallback, "gemini-2.0-flash", "gemini-1.5-flash-latest"]
-        seen = set()
-        models_to_try = []
-        for name in candidates:
-            name = (name or "").strip()
-            if not name:
+        # Build candidate models in priority order and de-duplicate.
+        raw_candidates = [
+            model,
+            GEMINI_PRIMARY_MODEL,
+            GEMINI_FALLBACK_MODEL,
+            "gemini-2.0-flash",
+            "gemini-1.5-flash-latest",
+        ]
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for c in raw_candidates:
+            if not c:
                 continue
-            if name in seen:
-                continue
-            seen.add(name)
-            models_to_try.append(name)
+            c_norm = self._normalize_model_name(str(c))
+            if c_norm and c_norm not in seen:
+                seen.add(c_norm)
+                candidates.append(c_norm)
 
-        def _do_call(m: str):
-            return self._call_generate_content(m, prompt)
+        if not candidates:
+            raise RuntimeError("No Gemini model configured (GEMINI_PRIMARY_MODEL missing).")
 
-        last_err: Exception | None = None
+        def _extract_json(text: str) -> dict:
+            t = (text or "").strip()
+            if "{" in t and "}" in t:
+                t = t[t.find("{") : t.rfind("}") + 1]
+            return json.loads(t)
 
-        for use_model in models_to_try:
+        last_exc: Exception | None = None
+
+        for m in candidates:
             try:
-                fut = _executor.submit(_do_call, use_model)
+                fut = _executor.submit(self._call_generate_content, m, prompt)
                 resp = fut.result(timeout=GEMINI_TIMEOUT_S)
-                text = (getattr(resp, "text", "") or "").strip()
-                if "{" in text and "}" in text:
-                    text = text[text.find("{") : text.rfind("}") + 1]
-                out = json.loads(text)
+                out = _extract_json(getattr(resp, "text", "") or "")
                 self._record_success()
                 return out
-
-            except FuturesTimeoutError:
-                # Treat timeouts as hard failures; circuit breaker should learn.
-                self._record_failure()
-                raise TimeoutError("Gemini request timed out")
-
+            except FuturesTimeoutError as e:
+                last_exc = TimeoutError(f"Gemini request timed out (model={m})")
             except Exception as e:
-                # Non-timeout errors: try the next candidate model.
-                last_err = e
-                continue
+                # Covers model 404, API errors, JSON parse errors, etc.
+                last_exc = e
 
-        # If we exhausted models
+        # If we reached here, all models failed.
         self._record_failure()
-        if last_err:
-            raise last_err
-        raise RuntimeError("Gemini failed without a specific error")
-
-            self._record_failure()
-            raise
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Gemini request failed for all model candidates.")
