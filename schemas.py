@@ -76,22 +76,6 @@ class SolveRequest(BaseModel):
         description="one_liner / cbse_board / step_by_step / hint_only",
     )
 
-    # --- Optional study context (forward compatible) ---
-    # Used by Learn with Luma to keep AI help context-locked.
-    # Safe: existing clients can omit; old servers ignore.
-    study_mode: Optional[str] = Field(
-        None,
-        max_length=32,
-        description="Optional mode hint: e.g. 'luma' for focused assist.",
-    )
-
-    # Free-form context blob (section/card/visible_text etc.).
-    # Keep as dict to avoid schema churn; validated/trimmed in orchestrator.
-    luma_context: Optional[dict] = Field(
-        None,
-        description="Optional context for focused assist (section, card_type, visible_text, etc.).",
-    )
-
     # Ignore extra fields for forward-compat (stability)
     model_config = {"extra": "ignore"}
 

@@ -38,71 +38,6 @@ def build_prompt(payload: dict) -> str:
     exam_mode = str(_get(payload, "exam_mode", default="BOARD")).strip()
     language = str(_get(payload, "language", default="en")).strip()
 
-    study_mode = str(_get(payload, "study_mode", default="") or "").strip().lower()
-    luma_ctx = _get(payload, "luma_context", default=None) or {}
-
-    # ---------------- LUMA: Focused Assist Mode (context-locked) ----------------
-    if study_mode == "luma":
-        # Trim context defensively (do not let clients send huge blobs)
-        def _clip(v, n=900):
-            v = "" if v is None else str(v)
-            v = v.strip()
-            return v[:n]
-
-        l_section = _clip(luma_ctx.get("section") or "")
-        l_card_type = _clip(luma_ctx.get("card_type") or "")
-        l_visible = _clip(luma_ctx.get("visible_text") or "", 1400)
-
-        # Short response target for Luma (UI is assist-only)
-        luma_answer_cap = 650
-
-        return f"""You are KnowEasy AI in *Focused Assist Mode* inside 'Learn with Luma'.
-You MUST answer strictly in JSON.
-
-Schema:
-{{
-  \"final_answer\": string,
-  \"steps\": [string],
-  \"assumptions\": [string],
-  \"confidence\": number,
-  \"flags\": [string],
-  \"safe_note\": string|null
-}}
-
-Context (LOCKED):
-- You are NOT the teacher. You are only a helper.
-- You MUST stay within the current Luma card context and the student's class/board level.
-- Do NOT introduce advanced concepts not required in this chapter/visible text.
-- Keep it short, clear, and practical.
-- Language MUST match: {language}
-
-Student context:
-- Class: {clazz}
-- Board: {board}
-- Subject: {subject}
-- Chapter: {chapter}
-- Section: {l_section}
-- Card type: {l_card_type}
-
-Visible card text (ONLY source of truth):
-{l_visible}
-
-Output rules:
-- final_answer max {luma_answer_cap} characters.
-- Prefer 2–6 short sentences. Avoid jargon.
-- If user question is 1–2 words, give a 2–3 sentence definition that fits the visible text.
-- MUST end final_answer with exactly ONE nudge phrase (choose one):
-  * "Ready to continue?"
-  * "Shall we move forward?"
-  * "Back to the lesson?"
-- Do NOT suggest external links/videos.
-- Do NOT mention you are following rules.
-- Output ONLY JSON (no markdown).
-
-User question:
-{question}
-"""
-
     return f"""You are KnowEasy AI Mentor. You MUST answer strictly in JSON.
 Schema:
 {{
@@ -258,11 +193,6 @@ def solve(payload: dict) -> dict:
         )
 
     out = _normalize_output(out)
-
-    # Extra safety for Learn with Luma: keep replies short and focused.
-    study_mode = str(_get(payload, "study_mode", default="") or "").strip().lower()
-    if study_mode == "luma":
-        out["final_answer"] = str(out.get("final_answer", ""))[:650]
 
     # Basic verification adds safety flags + minor confidence adjustment
     try:
