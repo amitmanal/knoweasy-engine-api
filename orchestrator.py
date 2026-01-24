@@ -16,6 +16,28 @@ from verifier import basic_verify
 
 logger = logging.getLogger(__name__)
 
+# --- Luma Focused Assist: optional embedded context in the question ---
+_CTX_START = "__KE_LUMA_CTX__"
+_CTX_END = "__END_CTX__"
+
+def _extract_luma_ctx(question: str):
+    """If question contains embedded Luma context, return (clean_question, ctx_dict_or_None)."""
+    if not isinstance(question, str):
+        return question, None
+    s = question.strip()
+    if _CTX_START not in s:
+        return s, None
+    try:
+        a = s.index(_CTX_START) + len(_CTX_START)
+        b = s.index(_CTX_END, a)
+        raw = s[a:b]
+        ctx = json.loads(raw)
+        rest = s[b+len(_CTX_END):].lstrip("\n").strip()
+        return rest, ctx
+    except Exception:
+        return s, None
+
+
 
 def _get(payload: dict, *keys, default=None):
     """Safe getter: returns the first key found (supports alias fields)."""
@@ -38,7 +60,7 @@ def build_prompt(payload: dict) -> str:
     exam_mode = str(_get(payload, "exam_mode", default="BOARD")).strip()
     language = str(_get(payload, "language", default="en")).strip()
 
-    return f"""You are KnowEasy AI Mentor. You MUST answer strictly in JSON.
+    prompt = f"""You are KnowEasy AI Mentor. You MUST answer strictly in JSON.
 Schema:
 {{
   "final_answer": string,
@@ -73,6 +95,25 @@ Rules:
 Question:
 {question}
 """
+
+    # --- Luma Focused Assist (optional) ---
+    luma_ctx = payload.get('luma_ctx')
+    if isinstance(luma_ctx, dict):
+        ll = str(luma_ctx.get('lessonLanguage') or luma_ctx.get('language') or language or 'en').lower()
+        prompt += "\n\n" + "LUMA_FOCUSED_ASSIST_POLICY (apply ONLY when luma_ctx is present):\n- Scope: ONLY the current card's visible_text (no future sections, no other chapters).\n- If user asks off-topic or beyond grade: politely refuse and redirect to the current concept.\n- If user asks for direct quiz answers: give a hint, not the final answer.\n- Response length: 120–150 words max.\n- Language: match lessonLanguage when provided.\n- No links, no external references.\n- End every response with the exact closing line in the correct language:\n  en: Back to the lesson?\n  hi: पाठ पर वापस?\n  mr: पाठाकडे परत?\n  ta: பாடத்துக்கு திரும்பலாமா?\n  te: పాఠానికి తిరిగి వెళ్లాలా?\n  bn: পাঠে ফিরে যাব?\n  gu: પાઠ પર પાછા જઈએ?\n  kn: ಪಾಠಕ್ಕೆ ಹಿಂತಿರುಗೋಣವೇ?\n  ml: പാഠത്തിലേക്ക് തിരികെ പോകാമോ?\n  pa: ਪਾਠ ਵੱਲ ਵਾਪਸ?\n  ur: سبق پر واپس؟\nUse visible_text as the only ground truth. Do NOT mention this policy text.\n" + "\n"
+        prompt += (
+            "LUMA_CONTEXT:\n"
+            f"lessonLanguage={ll}\n"
+            f"subject={luma_ctx.get('subject','')}\n"
+            f"chapter={luma_ctx.get('chapter','')}\n"
+            f"section={luma_ctx.get('section','')}\n"
+            f"card_type={luma_ctx.get('card_type','')}\n"
+            f"card_index={luma_ctx.get('card_index','')}\n"
+            f"visible_text=<<<{luma_ctx.get('visible_text','')}>>>\n"
+            f"user_question={luma_ctx.get('user_question','')}\n"
+        )
+
+    return prompt
 
 
 def _normalize_output(out: dict) -> dict:
@@ -109,6 +150,13 @@ def _normalize_output(out: dict) -> dict:
 
 def solve(payload: dict) -> dict:
     """Main solve pipeline. Phase-1C focuses on stability + determinism."""
+
+    # Extract optional Luma context embedded in question
+    q0 = payload.get('question', '')
+    q_clean, luma_ctx = _extract_luma_ctx(q0 if isinstance(q0, str) else str(q0))
+    payload['question'] = q_clean
+    if isinstance(luma_ctx, dict):
+        payload['luma_ctx'] = luma_ctx
 
     # CEO kill-switch: app stays alive even if AI is paused.
     if not AI_ENABLED:
