@@ -252,22 +252,119 @@ def version():
 
 @app.get("/health")
 def health():
-    # NOTE: Must never crash. Report status even if dependencies are down.
+    """Health + readiness diagnostics.
+
+    - Must never crash.
+    - Never returns secrets.
+    - Helps us quickly see which subsystems are configured in production.
+    """
     redis_info: Dict[str, Any] = {}
     db_info: Dict[str, Any] = {}
+
     try:
         redis_info = redis_health()
     except Exception as e:
         redis_info = {"enabled": True, "connected": False, "reason": str(e)}
+
     try:
         db_info = db_health()
     except Exception as e:
         db_info = {"enabled": True, "connected": False, "reason": str(e)}
 
+    # Auth readiness (AUTH_SECRET_KEY + email provider)
+    auth_cfg = False
+    email_cfg = False
+    email_diag: Dict[str, Any] = {}
+    try:
+        from auth_utils import auth_is_configured  # local import: never crash app startup
+        auth_cfg = bool(auth_is_configured())
+    except Exception:
+        auth_cfg = False
+    try:
+        from email_service import email_is_configured, email_provider_debug  # local import
+        email_cfg = bool(email_is_configured())
+        email_diag = dict(email_provider_debug() or {})
+        # remove any accidental sensitive keys
+        for k in list(email_diag.keys()):
+            if "key" in k.lower() or "secret" in k.lower() or "token" in k.lower():
+                email_diag.pop(k, None)
+    except Exception:
+        email_cfg = False
+        email_diag = {}
+
+    # Payments readiness (Razorpay keys present)
+    payments_cfg = bool((os.getenv("RAZORPAY_KEY_ID") or "").strip() and (os.getenv("RAZORPAY_KEY_SECRET") or "").strip())
+
+    # AI readiness (provider key present if AI enabled)
+    try:
+        from config import AI_ENABLED, AI_PROVIDER, AI_MODE, GEMINI_PRIMARY_MODEL, OPENAI_MODEL, CLAUDE_MODEL  # type: ignore
+    except Exception:
+        AI_ENABLED = True
+        AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini")
+        AI_MODE = os.getenv("AI_MODE", "balanced")
+        GEMINI_PRIMARY_MODEL = os.getenv("GEMINI_PRIMARY_MODEL", "")
+        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "")
+        CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "")
+
+    provider = (AI_PROVIDER or "gemini").strip().lower()
+    gem_ok = bool((os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip())
+    oai_ok = bool((os.getenv("OPENAI_API_KEY") or "").strip())
+    cla_ok = bool((os.getenv("ANTHROPIC_API_KEY") or "").strip())
+    if provider == "openai":
+        ai_cfg = oai_ok
+    elif provider == "claude":
+        ai_cfg = cla_ok
+    else:
+        ai_cfg = gem_ok
+
+    # CORS summary (no secrets)
+    cors_effective = os.getenv("ALLOWED_ORIGINS", "").strip()
+    cors_mode = "env" if cors_effective else "default"
+    cors_wildcard = bool(cors_effective and "*" in [o.strip() for o in cors_effective.split(",") if o.strip()])
+
+    # Readiness rules:
+    # - DB: if enabled, must be connected; else OK (Phase-1 supports DB-less mode but we prefer DB in prod)
+    # - Auth: requires AUTH_SECRET_KEY AND email configured (so OTP can actually send)
+    # - AI: if AI enabled, provider key must exist
+    db_ready = (not bool(db_info.get("enabled"))) or bool(db_info.get("connected"))
+    auth_ready = bool(auth_cfg) and bool(email_cfg)
+    ai_ready = (not bool(AI_ENABLED)) or bool(ai_cfg)
+
+    overall_ready = bool(db_ready and auth_ready and ai_ready)
+
     return {
         "ok": True,
+        "ready": overall_ready,
         "service": SERVICE_NAME,
         "version": str(SERVICE_VERSION),
-        "redis": redis_info,
-        "db": db_info,
+        "env": ENV,
+        "deps": {
+            "redis": redis_info,
+            "db": db_info,
+        },
+        "subsystems": {
+            "auth": {
+                "configured": auth_cfg,
+                "email_configured": email_cfg,
+                "email_provider": (email_diag.get("provider") if isinstance(email_diag, dict) else None),
+            },
+            "payments": {
+                "enabled": payments_cfg,
+            },
+            "ai": {
+                "enabled": bool(AI_ENABLED),
+                "provider": provider,
+                "mode": str(AI_MODE),
+                "configured": bool(ai_cfg),
+                "model": (
+                    str(OPENAI_MODEL) if provider == "openai"
+                    else str(CLAUDE_MODEL) if provider == "claude"
+                    else str(GEMINI_PRIMARY_MODEL)
+                ),
+            },
+        },
+        "cors": {
+            "mode": cors_mode,
+            "wildcard": cors_wildcard,
+        },
     }
