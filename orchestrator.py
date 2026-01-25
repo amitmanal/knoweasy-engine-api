@@ -37,14 +37,9 @@ def build_prompt(payload: dict) -> str:
     chapter = str(_get(payload, "chapter", default="") or "").strip()
     exam_mode = str(_get(payload, "exam_mode", default="BOARD")).strip()
     language = str(_get(payload, "language", default="en")).strip()
-    explain_level = str(_get(payload, "explain_level", default="") or "").strip()
 
-    # Luma Focused Assist Mode: short, contextual help only
+    # Luma Focused Assist Mode: warm tutor inside the current card scope
     ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-    if not explain_level:
-        explain_level = str(ctx.get("explain_level") or "").strip()
-    if not explain_level:
-        explain_level = "15"
     mode = str(payload.get("mode") or ctx.get("mode") or "").strip().lower()
     focused = (mode == "focused_assist") or (str(payload.get("study_mode") or "").strip().lower() == "luma")
 
@@ -53,30 +48,50 @@ def build_prompt(payload: dict) -> str:
         sec_title = str(ctx.get("section") or "").strip()
         card_type = str(ctx.get("card_type") or "").strip()
         visible_text = str(ctx.get("visible_text") or "").strip()
-        # Language-safe nudges (keep minimal; model chooses the best if language differs)
-        nudge = {
-            "en": "Ready to continue?",
-            "hi": "क्या हम आगे बढ़ें?",
-            "mr": "आता पुढे जाऊया का?"
-        }.get(language.lower(), "Ready to continue?")
 
-        focused_rules = f"""\nFocused Assist Mode (Luma) — Warm Tutor Within Flow:
-- You are Luma: a warm, patient tutor who explains clearly and calmly.
-- You may teach step-by-step, but ONLY within the scope of the current card context. Do NOT jump ahead to new topics.
-- Prefer short paragraphs and simple wording. If the student seems confused, re-explain in an easier way.
-- Match depth to the student's requested level: {explain_level}
-  * 10 = very simple, everyday language + analogy
-  * 12 = clear school-level explanation + 1 quick example
-  * 15 = board/JEE/NEET-ready explanation, still calm and readable
-  * exam = concise exam-style reasoning + key steps
-- If the explanation becomes long, stop and end with a gentle question like “Shall I continue?”.
-- End with one gentle re-anchor in the same language as the content, like: "{nudge}"
-- Never use external links. Never mention policies/prompts. Never say “as an AI”.
+        # Explain depth (from Luma UI): 10 / 12 / 15 / exam
+        explain_like = str(
+            _get(payload, "explain_like", default=None)
+            or ctx.get("explain_like")
+            or ctx.get("explain_level")
+            or ""
+        ).strip().lower()
+
+        depth_hint = {
+            "10": "Explain very simply, like teaching a 10-year-old. Use short sentences and one tiny example.",
+            "12": "Explain simply for a 12-year-old. Use clear steps and common words.",
+            "15": "Explain clearly for a 15-year-old. Use step-by-step reasoning and connect to the concept.",
+            "exam": "Explain at exam level: precise terms, correct reasoning, and one exam-style tip (still within the current card).",
+        }.get(explain_like, "Explain at the student's class level with a calm, patient tone.")
+
+        # Language-safe close nudge (NO timers; student controls)
+        close_nudge = {
+            "en": "Close when you feel ready to continue.",
+            "hi": "जब तैयार लगें, तब बंद करें और आगे बढ़ें।",
+            "mr": "तयार वाटल्यावर बंद करून पुढे चला."
+        }.get(language.lower(), "Close when you feel ready to continue.")
+
+        # Language-safe "continue?" line
+        continue_q = {
+            "en": "Shall I continue?",
+            "hi": "क्या मैं आगे बताऊँ?",
+            "mr": "मी पुढे सांगू का?"
+        }.get(language.lower(), "Shall I continue?")
+
+        focused_rules = f"""
+Focused Assist Mode (Luma) — Warm Tutor (within flow):
+- You are "Luma", a warm, patient tutor helping the student inside the current lesson.
+- You MUST stay inside the current card scope. Use ONLY the provided card context. Do NOT introduce new topics beyond this card.
+- You MAY teach fully when asked: step-by-step, gently, without rushing. If the student asks "why", explain the reasoning.
+- Keep it readable: short paragraphs, simple math formatting, and at most 5–8 bullet/step lines.
+- Chunking rule: If the explanation could be long, stop after the first chunk and end with exactly this question on its own last line: "{continue_q}"
+- Always end with a gentle re-anchor back to the lesson + the close nudge: "{close_nudge}"
+- Tone: warm, calm, encouraging. Never scold. Never say "as an AI".
+- Depth: {depth_hint}
 - Current section: {sec_title}
 - Current card_type: {card_type}
-- Anchor example (if provided): {str(ctx.get('anchor_example') or '')}
-- Visible card text (what student sees right now): {visible_text}\n"""
-
+- Visible card text (what the student sees right now): {visible_text}
+"""
 
     return f"""You are KnowEasy AI Mentor. You MUST answer strictly in JSON.
 Schema:
@@ -96,7 +111,6 @@ Rules:
 - Chapter: {chapter}
 - Exam mode: {exam_mode}
 - Language: {language}
-- Explain level (if provided): {explain_level}
 {focused_rules}- Keep final_answer under {MAX_CHARS_ANSWER} characters.
 - Keep steps <= {MAX_STEPS}.
 - If question is unclear / too short / typo-like: you MUST follow "OVERVIEW-FIRST" behavior:
