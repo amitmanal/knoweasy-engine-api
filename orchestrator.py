@@ -617,3 +617,18 @@ orchestrator = EnhancedOrchestrator()
 async def solve_question(question: str, context: Dict, user_tier: str = "free") -> Dict:
     """Legacy function name support"""
     return await orchestrator.solve(question, context, user_tier)
+# ============================================================================
+# COMPATIBILITY WITH EXISTING ROUTER.PY
+# ============================================================================
+
+async def solve(
+    question: str,
+    context: dict,
+    user_tier: str = "free",
+    **kwargs
+):
+    """
+    Main solve function for router.py compatibility
+    This is what router.py imports and calls
+    """
+    return await orchestrator.solve(question, context, user_tier, **kwargs)
