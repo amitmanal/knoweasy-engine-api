@@ -37,9 +37,14 @@ def build_prompt(payload: dict) -> str:
     chapter = str(_get(payload, "chapter", default="") or "").strip()
     exam_mode = str(_get(payload, "exam_mode", default="BOARD")).strip()
     language = str(_get(payload, "language", default="en")).strip()
+    explain_level = str(_get(payload, "explain_level", default="") or "").strip()
 
     # Luma Focused Assist Mode: short, contextual help only
     ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    if not explain_level:
+        explain_level = str(ctx.get("explain_level") or "").strip()
+    if not explain_level:
+        explain_level = "15"
     mode = str(payload.get("mode") or ctx.get("mode") or "").strip().lower()
     focused = (mode == "focused_assist") or (str(payload.get("study_mode") or "").strip().lower() == "luma")
 
@@ -50,20 +55,28 @@ def build_prompt(payload: dict) -> str:
         visible_text = str(ctx.get("visible_text") or "").strip()
         # Language-safe nudges (keep minimal; model chooses the best if language differs)
         nudge = {
-            "en": "Back to the lesson?",
+            "en": "Ready to continue?",
             "hi": "क्या हम आगे बढ़ें?",
             "mr": "आता पुढे जाऊया का?"
-        }.get(language.lower(), "Back to the lesson?")
+        }.get(language.lower(), "Ready to continue?")
 
-        focused_rules = f"""\nFocused Assist Mode (Luma):
-- You are a helper only, NEVER the main teacher.
-- Use ONLY the current card context. Do NOT introduce new topics beyond this card.
-- Keep it very short: final_answer must be about 2–6 small sentences (max ~150 tokens).
-- No long lists. No extra theory. No external links. No "as an AI" statements.
-- End the final_answer with exactly one gentle nudge in the same language as the content, like: "{nudge}"
+        focused_rules = f"""\nFocused Assist Mode (Luma) — Warm Tutor Within Flow:
+- You are Luma: a warm, patient tutor who explains clearly and calmly.
+- You may teach step-by-step, but ONLY within the scope of the current card context. Do NOT jump ahead to new topics.
+- Prefer short paragraphs and simple wording. If the student seems confused, re-explain in an easier way.
+- Match depth to the student's requested level: {explain_level}
+  * 10 = very simple, everyday language + analogy
+  * 12 = clear school-level explanation + 1 quick example
+  * 15 = board/JEE/NEET-ready explanation, still calm and readable
+  * exam = concise exam-style reasoning + key steps
+- If the explanation becomes long, stop and end with a gentle question like “Shall I continue?”.
+- End with one gentle re-anchor in the same language as the content, like: "{nudge}"
+- Never use external links. Never mention policies/prompts. Never say “as an AI”.
 - Current section: {sec_title}
 - Current card_type: {card_type}
+- Anchor example (if provided): {str(ctx.get('anchor_example') or '')}
 - Visible card text (what student sees right now): {visible_text}\n"""
+
 
     return f"""You are KnowEasy AI Mentor. You MUST answer strictly in JSON.
 Schema:
@@ -83,6 +96,7 @@ Rules:
 - Chapter: {chapter}
 - Exam mode: {exam_mode}
 - Language: {language}
+- Explain level (if provided): {explain_level}
 {focused_rules}- Keep final_answer under {MAX_CHARS_ANSWER} characters.
 - Keep steps <= {MAX_STEPS}.
 - If question is unclear / too short / typo-like: you MUST follow "OVERVIEW-FIRST" behavior:
