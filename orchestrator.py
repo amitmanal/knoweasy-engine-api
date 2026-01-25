@@ -1,239 +1,634 @@
-"""KnowEasy Engine — Orchestrator (Gemini-only, router-compatible)
+"""
+KnowEasy Premium - Enhanced AI Orchestrator
+CEO Decision: Production-ready multi-AI system
+Integrates: Gemini + GPT-4o-mini + Claude Sonnet
 
-This module MUST provide: `solve(payload: dict) -> dict`
-because `router.py` imports `solve` and calls it synchronously as: `out = solve(payload)`.
-
-Design goals:
-- Production-stable (never crash / never raise to router)
-- Gemini-only today (future providers can be added without changing router)
-- Returns a dict shaped exactly like router expects:
-  { final_answer, steps, assumptions, confidence, flags, safe_note, ... }
+This file REPLACES your existing orchestrator.py
 """
 
-from __future__ import annotations
-
+import asyncio
+import os
 import time
-from typing import Any, Dict, Optional
-
+from typing import Dict, Any, Optional, List
+import httpx
 import google.generativeai as genai
-
-from config import (
-    AI_ENABLED,
-    AI_PROVIDER,
-    AI_TIMEOUT_SECONDS,
-    GEMINI_API_KEY,
-    GEMINI_PRIMARY_MODEL,
-    GEMINI_FALLBACK_MODEL,
-)
-
-# -----------------------------
-# Lazy, safe init
-# -----------------------------
-_CONFIGURED = False
-_PRIMARY_MODEL = None
-_FALLBACK_MODEL = None
+from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
+import json
 
 
-def _init() -> None:
-    global _CONFIGURED, _PRIMARY_MODEL, _FALLBACK_MODEL
-    if _CONFIGURED:
-        return
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-    # Configure SDK (does not validate key yet)
-    try:
-        if GEMINI_API_KEY:
-            genai.configure(api_key=GEMINI_API_KEY)
-    except Exception:
-        # Keep going; errors handled during call
-        pass
-
-    try:
-        _PRIMARY_MODEL = genai.GenerativeModel(GEMINI_PRIMARY_MODEL or "gemini-2.0-flash")
-    except Exception:
-        _PRIMARY_MODEL = None
-
-    try:
-        _FALLBACK_MODEL = genai.GenerativeModel(GEMINI_FALLBACK_MODEL or "gemini-1.5-flash")
-    except Exception:
-        _FALLBACK_MODEL = None
-
-    _CONFIGURED = True
-
-
-def _lang_name(lang: str) -> str:
-    l = (lang or "").strip().lower()
-    if l.startswith("hi"):
-        return "Hindi"
-    if l.startswith("mr"):
-        return "Marathi"
-    return "English"
-
-
-def _build_prompt(payload: Dict[str, Any]) -> str:
-    q = (payload.get("question") or "").strip()
-    board = (payload.get("board") or "").strip()
-    cls = str(payload.get("class_") or payload.get("class") or payload.get("class_level") or "").strip()
-    subject = (payload.get("subject") or "").strip()
-    chapter = (payload.get("chapter") or "").strip()
-    exam_mode = (payload.get("exam_mode") or "").strip()
-    answer_mode = (payload.get("answer_mode") or "").strip()
-    explain_like = str(payload.get("explain_like") or payload.get("explain_level") or "").strip()
-    study_mode = (payload.get("study_mode") or payload.get("mode") or payload.get("source") or "").strip()
-    lang = _lang_name(payload.get("language") or "en")
-
-    # Keep prompt short + structured for latency
-    system = (
-        "You are KnowEasy AI Tutor.
-"
-        "Rules:
-"
-        "- Be correct and student-friendly.
-"
-        "- Use simple language and short paragraphs.
-"
-        "- If question is ambiguous, ask ONE clarifying question.
-"
-        "- If user asks for a definition or example, provide it.
-"
-        "- Do not mention internal tools, tokens, or policies.
-"
-    )
-
-    context_lines = []
-    if cls:
-        context_lines.append(f"Class: {cls}")
-    if board:
-        context_lines.append(f"Board: {board}")
-    if subject:
-        context_lines.append(f"Subject: {subject}")
-    if chapter:
-        context_lines.append(f"Chapter: {chapter}")
-    if exam_mode:
-        context_lines.append(f"Exam focus: {exam_mode}")
-    if answer_mode:
-        context_lines.append(f"Answer style: {answer_mode}")
-    if explain_like:
-        context_lines.append(f"Explain like: {explain_like}")
-    if study_mode:
-        context_lines.append(f"Study mode: {study_mode}")
-
-    context = "\n".join(context_lines) if context_lines else "Context: (not provided)"
-
-    return (
-        f"{system}\n"
-        f"Reply language: {lang}\n\n"
-        f"{context}\n\n"
-        f"Student question: {q}\n\n"
-        "Answer:"
-    )
-
-
-def _call_model(model, prompt: str, timeout_s: int) -> str:
-    # google.generativeai SDK is sync; we approximate timeout by checking elapsed
-    t0 = time.perf_counter()
-    # A small safety: set generation config conservatively
-    try:
-        resp = model.generate_content(
-            prompt,
-            generation_config={
-                "temperature": 0.4,
-                "max_output_tokens": 800,
-            },
-        )
-        # If it took too long, still return what we got (router will log latency)
-        _ = (time.perf_counter() - t0)
-        text = getattr(resp, "text", None)
-        if text is None:
-            # Some SDK variants store candidates differently
-            try:
-                text = resp.candidates[0].content.parts[0].text  # type: ignore
-            except Exception:
-                text = ""
-        return (text or "").strip()
-    except Exception:
-        return ""
-
-
-def solve(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Router-compatible solve.
-
-    Input: payload dict from SolveRequest.model_dump()
-    Output: dict with `final_answer` at minimum.
-    """
-    _init()
-
-    # Hard disable switch
-    if not AI_ENABLED:
-        return {
-            "final_answer": "AI is temporarily disabled. Please try again later.",
-            "steps": [],
-            "assumptions": [],
-            "confidence": 0.2,
-            "flags": ["AI_DISABLED"],
-            "safe_note": "Try again in a minute.",
-        }
-
-    # Provider guardrail (we are Gemini-only in this build)
-    if (AI_PROVIDER or "gemini").lower() not in ("gemini", "google", "genai"):
-        # Still try Gemini if configured, but flag the mismatch
-        provider_flag = "PROVIDER_MISMATCH"
-    else:
-        provider_flag = None
-
-    q = (payload.get("question") or "").strip()
-    if not q:
-        return {
-            "final_answer": "Please type your question so I can help 😊",
-            "steps": [],
-            "assumptions": [],
-            "confidence": 0.2,
-            "flags": ["NO_QUESTION"],
-            "safe_note": "Add the exact doubt (1–2 lines) and I'll answer.",
-        }
-
-    if not GEMINI_API_KEY:
-        return {
-            "final_answer": "AI is not configured on the server (missing GEMINI_API_KEY).",
-            "steps": [],
-            "assumptions": [],
-            "confidence": 0.2,
-            "flags": ["MISSING_API_KEY"],
-            "safe_note": "Admin: set GEMINI_API_KEY in Render environment variables.",
-        }
-
-    prompt = _build_prompt(payload)
-
-    timeout_s = int(AI_TIMEOUT_SECONDS or 60)
-    timeout_s = max(10, min(timeout_s, 120))
-
-    answer = ""
-    # Primary model
-    if _PRIMARY_MODEL is not None:
-        answer = _call_model(_PRIMARY_MODEL, prompt, timeout_s)
-
-    # Fallback model
-    if not answer and _FALLBACK_MODEL is not None:
-        answer = _call_model(_FALLBACK_MODEL, prompt, timeout_s)
-
-    if not answer:
-        return {
-            "final_answer": "I couldn't generate an answer right now. Please try again in a few seconds 😊",
-            "steps": [],
-            "assumptions": [],
-            "confidence": 0.2,
-            "flags": ["AI_NO_RESPONSE"],
-            "safe_note": "If it repeats, refresh once and try again.",
-        }
-
-    flags = ["GEMINI"]
-    if provider_flag:
-        flags.append(provider_flag)
-
-    return {
-        "final_answer": answer,
-        "steps": [],
-        "assumptions": [],
-        "confidence": 0.75,
-        "flags": flags,
-        "safe_note": "If you want, ask for an example or a quick MCQ.",
+class Config:
+    """Production configuration"""
+    
+    # API Keys
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "")
+    
+    # Model Selection (CEO Decision)
+    GEMINI_MODEL = "gemini-2.0-flash-exp"  # Fastest for free/simple
+    OPENAI_MODEL = "gpt-4o-mini"  # Best value
+    CLAUDE_MODEL = "claude-sonnet-4-20250514"  # Best quality
+    
+    # Timeouts
+    TIMEOUT = 25
+    
+    # Cost per question (in rupees) - for billing calculation
+    COST_PER_CREDIT = {
+        "gemini_simple": 0.03,
+        "gemini_gpt": 0.50,
+        "triple_ai": 2.00
     }
+    
+    # Credits per question type
+    CREDITS_PER_QUESTION = {
+        "simple": 80,
+        "medium": 100,
+        "complex": 150
+    }
+
+
+# ============================================================================
+# AI CLIENTS
+# ============================================================================
+
+class AIClient:
+    """Base class for all AI providers"""
+    
+    def __init__(self, name: str):
+        self.name = name
+        self.calls_made = 0
+        self.tokens_used = 0
+        self.errors = 0
+    
+    async def ask(self, prompt: str, system: str = "") -> Dict[str, Any]:
+        """Override in subclasses"""
+        raise NotImplementedError
+    
+    def get_stats(self) -> Dict:
+        """Return usage statistics"""
+        return {
+            "provider": self.name,
+            "calls": self.calls_made,
+            "tokens": self.tokens_used,
+            "errors": self.errors
+        }
+
+
+class GeminiClient(AIClient):
+    """Google Gemini client"""
+    
+    def __init__(self):
+        super().__init__("gemini")
+        if Config.GEMINI_API_KEY:
+            genai.configure(api_key=Config.GEMINI_API_KEY)
+            self.model = genai.GenerativeModel(Config.GEMINI_MODEL)
+        else:
+            self.model = None
+    
+    async def ask(self, prompt: str, system: str = "") -> Dict[str, Any]:
+        """Ask Gemini"""
+        if not self.model:
+            return {"answer": "", "error": "Gemini not configured"}
+        
+        try:
+            self.calls_made += 1
+            start = time.time()
+            
+            # Combine system + prompt
+            full_prompt = f"{system}\n\n{prompt}" if system else prompt
+            
+            # Call Gemini
+            response = await asyncio.to_thread(
+                self.model.generate_content,
+                full_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.7,
+                    max_output_tokens=2000,
+                )
+            )
+            
+            answer = response.text
+            elapsed = time.time() - start
+            
+            # Estimate tokens
+            tokens = len(full_prompt.split()) + len(answer.split())
+            self.tokens_used += tokens
+            
+            return {
+                "answer": answer,
+                "provider": "gemini",
+                "tokens": tokens,
+                "time": elapsed,
+                "success": True
+            }
+            
+        except Exception as e:
+            self.errors += 1
+            return {
+                "answer": "",
+                "error": str(e),
+                "provider": "gemini",
+                "success": False
+            }
+
+
+class OpenAIClient(AIClient):
+    """OpenAI GPT client"""
+    
+    def __init__(self):
+        super().__init__("openai")
+        if Config.OPENAI_API_KEY:
+            self.client = AsyncOpenAI(api_key=Config.OPENAI_API_KEY)
+        else:
+            self.client = None
+    
+    async def ask(self, prompt: str, system: str = "") -> Dict[str, Any]:
+        """Ask GPT"""
+        if not self.client:
+            return {"answer": "", "error": "OpenAI not configured"}
+        
+        try:
+            self.calls_made += 1
+            start = time.time()
+            
+            messages = []
+            if system:
+                messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": prompt})
+            
+            response = await self.client.chat.completions.create(
+                model=Config.OPENAI_MODEL,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=2000,
+                timeout=Config.TIMEOUT
+            )
+            
+            answer = response.choices[0].message.content
+            tokens = response.usage.total_tokens
+            elapsed = time.time() - start
+            
+            self.tokens_used += tokens
+            
+            return {
+                "answer": answer,
+                "provider": "openai",
+                "tokens": tokens,
+                "time": elapsed,
+                "success": True
+            }
+            
+        except Exception as e:
+            self.errors += 1
+            return {
+                "answer": "",
+                "error": str(e),
+                "provider": "openai",
+                "success": False
+            }
+
+
+class ClaudeClient(AIClient):
+    """Anthropic Claude client"""
+    
+    def __init__(self):
+        super().__init__("claude")
+        if Config.CLAUDE_API_KEY:
+            self.client = AsyncAnthropic(api_key=Config.CLAUDE_API_KEY)
+        else:
+            self.client = None
+    
+    async def ask(self, prompt: str, system: str = "") -> Dict[str, Any]:
+        """Ask Claude"""
+        if not self.client:
+            return {"answer": "", "error": "Claude not configured"}
+        
+        try:
+            self.calls_made += 1
+            start = time.time()
+            
+            response = await self.client.messages.create(
+                model=Config.CLAUDE_MODEL,
+                max_tokens=2000,
+                system=system if system else "You are a helpful AI tutor.",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                timeout=Config.TIMEOUT
+            )
+            
+            answer = response.content[0].text
+            tokens = response.usage.input_tokens + response.usage.output_tokens
+            elapsed = time.time() - start
+            
+            self.tokens_used += tokens
+            
+            return {
+                "answer": answer,
+                "provider": "claude",
+                "tokens": tokens,
+                "time": elapsed,
+                "success": True
+            }
+            
+        except Exception as e:
+            self.errors += 1
+            return {
+                "answer": "",
+                "error": str(e),
+                "provider": "claude",
+                "success": False
+            }
+
+
+# ============================================================================
+# PROMPT BUILDER
+# ============================================================================
+
+class PromptBuilder:
+    """Builds smart prompts based on context"""
+    
+    @staticmethod
+    def build_system_prompt(context: Dict[str, Any]) -> str:
+        """Build system prompt from context"""
+        
+        parts = []
+        
+        # Identity
+        parts.append("You are Luma, a patient and encouraging AI tutor for Indian students.")
+        
+        # Context
+        if context.get("class"):
+            parts.append(f"\nTeaching: Class {context['class']} {context.get('board', 'CBSE').upper()}")
+        
+        if context.get("subject"):
+            parts.append(f"Subject: {context['subject'].title()}")
+        
+        if context.get("chapter"):
+            chapter = context['chapter'].replace('_', ' ').title()
+            parts.append(f"Chapter: {chapter}")
+        
+        # Mode-specific instructions
+        study_mode = context.get("study_mode", "chat")
+        
+        if study_mode == "luma":
+            parts.append("\n📚 TEACHING STYLE:")
+            parts.append("- Provide structured, step-by-step explanations")
+            parts.append("- Break complex concepts into simple parts")
+            parts.append("- Use examples relatable to Indian students")
+            parts.append("- Encourage and build confidence")
+            parts.append("- Add practice questions when appropriate")
+        else:
+            parts.append("\n💬 CHAT STYLE:")
+            parts.append("- Provide direct, helpful answers")
+            parts.append("- Be concise but clear")
+            parts.append("- Friendly and encouraging tone")
+        
+        # Language
+        language = context.get("language", "en")
+        if language == "hi":
+            parts.append("\n🇮🇳 भाषा: हिंदी में उत्तर दें जब उपयुक्त हो")
+        elif language == "mr":
+            parts.append("\n🇮🇳 भाषा: मराठीमध्ये उत्तर द्या")
+        
+        return "\n".join(parts)
+    
+    @staticmethod
+    def build_user_prompt(question: str, context: Dict[str, Any]) -> str:
+        """Build user prompt with lesson context"""
+        
+        parts = [f"Student's question: {question}"]
+        
+        # Add visible lesson content if available (Luma mode)
+        if context.get("visible_text"):
+            visible = context["visible_text"][:600]  # Limit context size
+            parts.append(f"\n📖 Current lesson content:\n{visible}")
+        
+        # Add anchor example if available
+        if context.get("anchor_example"):
+            example = context["anchor_example"][:300]
+            parts.append(f"\n📌 Example from lesson:\n{example}")
+        
+        return "\n".join(parts)
+
+
+# ============================================================================
+# COMPLEXITY ANALYZER
+# ============================================================================
+
+class ComplexityAnalyzer:
+    """Determines question complexity for smart routing"""
+    
+    SIMPLE_TRIGGERS = [
+        "what is", "define", "meaning of", "full form",
+        "formula for", "value of", "who is", "when was",
+        "which is", "where is"
+    ]
+    
+    COMPLEX_TRIGGERS = [
+        "explain in detail", "step by step", "derive", "prove",
+        "compare and contrast", "analyze", "evaluate",
+        "why and how", "reasoning", "solve", "calculate"
+    ]
+    
+    @classmethod
+    def analyze(cls, question: str) -> str:
+        """
+        Returns: "simple", "medium", or "complex"
+        """
+        q_lower = question.lower()
+        word_count = len(question.split())
+        
+        # Simple questions
+        if any(trigger in q_lower for trigger in cls.SIMPLE_TRIGGERS):
+            if word_count < 10:
+                return "simple"
+        
+        # Complex questions
+        if any(trigger in q_lower for trigger in cls.COMPLEX_TRIGGERS):
+            return "complex"
+        
+        # Length-based
+        if word_count < 8:
+            return "simple"
+        elif word_count > 20:
+            return "complex"
+        else:
+            return "medium"
+
+
+# ============================================================================
+# MAIN ORCHESTRATOR
+# ============================================================================
+
+class EnhancedOrchestrator:
+    """
+    CEO Decision: Smart AI orchestration for premium experience
+    Routes questions to appropriate AI(s) based on complexity and user tier
+    """
+    
+    def __init__(self):
+        self.gemini = GeminiClient()
+        self.openai = OpenAIClient()
+        self.claude = ClaudeClient()
+        self.prompt_builder = PromptBuilder()
+        self.analyzer = ComplexityAnalyzer()
+    
+    async def solve(
+        self,
+        question: str,
+        context: Dict[str, Any],
+        user_tier: str = "free",
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Main solving function
+        Returns structured response with answer, metadata, and billing info
+        """
+        
+        # Analyze complexity
+        complexity = self.analyzer.analyze(question)
+        
+        # Build prompts
+        system_prompt = self.prompt_builder.build_system_prompt(context)
+        user_prompt = self.prompt_builder.build_user_prompt(question, context)
+        
+        # Route based on tier and complexity
+        study_mode = context.get("study_mode", "chat")
+        
+        # ================================================================
+        # CHAT AI MODE (Simple, fast)
+        # ================================================================
+        if study_mode == "chat":
+            result = await self._chat_mode(user_prompt, system_prompt, complexity, user_tier)
+        
+        # ================================================================
+        # LUMA AI MODE (Premium, structured)
+        # ================================================================
+        else:
+            result = await self._luma_mode(user_prompt, system_prompt, complexity, user_tier)
+        
+        # Add metadata
+        result["complexity"] = complexity
+        result["study_mode"] = study_mode
+        result["credits_used"] = Config.CREDITS_PER_QUESTION.get(complexity, 100)
+        
+        return result
+    
+    async def _chat_mode(
+        self,
+        prompt: str,
+        system: str,
+        complexity: str,
+        user_tier: str
+    ) -> Dict[str, Any]:
+        """
+        Chat AI: Fast responses using primarily Gemini
+        Pro/Max can get GPT enhancement on medium+ questions
+        """
+        
+        # Free tier: Gemini only
+        if user_tier == "free":
+            result = await self.gemini.ask(prompt, system)
+            result["ai_strategy"] = "gemini_only"
+            result["tier"] = "free"
+            return result
+        
+        # Pro/Max: Smart enhancement
+        if complexity == "simple":
+            result = await self.gemini.ask(prompt, system)
+            result["ai_strategy"] = "gemini_simple"
+            result["tier"] = user_tier
+            return result
+        else:
+            # Use Gemini + GPT for better quality
+            try:
+                responses = await asyncio.gather(
+                    self.gemini.ask(prompt, system),
+                    self.openai.ask(prompt, system),
+                    return_exceptions=True
+                )
+                
+                result = self._merge_two(responses[0], responses[1])
+                result["ai_strategy"] = "gemini_gpt"
+                result["tier"] = user_tier
+                return result
+            except:
+                result = await self.gemini.ask(prompt, system)
+                result["ai_strategy"] = "gemini_fallback"
+                return result
+    
+    async def _luma_mode(
+        self,
+        prompt: str,
+        system: str,
+        complexity: str,
+        user_tier: str
+    ) -> Dict[str, Any]:
+        """
+        Luma AI: Premium teaching mode
+        Pro gets Gemini + GPT
+        Max gets all 3 AIs on complex questions
+        """
+        
+        # Free tier shouldn't reach here, but just in case
+        if user_tier == "free":
+            result = await self.gemini.ask(prompt, system)
+            result["ai_strategy"] = "gemini_only"
+            return result
+        
+        # Pro tier
+        if user_tier == "pro":
+            if complexity == "simple":
+                result = await self.gemini.ask(prompt, system)
+                result["ai_strategy"] = "gemini_simple"
+            else:
+                try:
+                    responses = await asyncio.gather(
+                        self.gemini.ask(prompt, system),
+                        self.openai.ask(prompt, system),
+                        return_exceptions=True
+                    )
+                    result = self._merge_two(responses[0], responses[1])
+                    result["ai_strategy"] = "gemini_gpt"
+                except:
+                    result = await self.gemini.ask(prompt, system)
+                    result["ai_strategy"] = "gemini_fallback"
+            
+            result["tier"] = "pro"
+            result["premium_formatting"] = True
+            return result
+        
+        # Max/Family tier - FULL POWER
+        if complexity == "simple":
+            result = await self.gemini.ask(prompt, system)
+            result["ai_strategy"] = "gemini_simple"
+        
+        elif complexity == "medium":
+            try:
+                responses = await asyncio.gather(
+                    self.gemini.ask(prompt, system),
+                    self.openai.ask(prompt, system),
+                    return_exceptions=True
+                )
+                result = self._merge_two(responses[0], responses[1])
+                result["ai_strategy"] = "gemini_gpt"
+            except:
+                result = await self.gemini.ask(prompt, system)
+                result["ai_strategy"] = "gemini_fallback"
+        
+        else:  # complex - USE ALL THREE!
+            try:
+                responses = await asyncio.gather(
+                    self.gemini.ask(prompt, system),
+                    self.openai.ask(prompt, system),
+                    self.claude.ask(prompt, system),
+                    return_exceptions=True
+                )
+                result = self._fusion_three(responses[0], responses[1], responses[2])
+                result["ai_strategy"] = "triple_ai"
+                result["premium_badge"] = True  # Show "Powered by 3 AIs" badge
+            except:
+                result = await self.claude.ask(prompt, system)
+                if not result.get("success"):
+                    result = await self.gemini.ask(prompt, system)
+                result["ai_strategy"] = "fallback"
+        
+        result["tier"] = user_tier
+        result["premium_formatting"] = True
+        return result
+    
+    def _merge_two(self, resp1: Dict, resp2: Dict) -> Dict:
+        """Merge two AI responses - pick better one"""
+        
+        if not resp1.get("success"):
+            return resp2
+        if not resp2.get("success"):
+            return resp1
+        
+        # Use longer/more detailed response
+        answer1 = resp1.get("answer", "")
+        answer2 = resp2.get("answer", "")
+        
+        if len(answer2) > len(answer1) * 1.2:
+            chosen = resp2
+            providers = [resp2["provider"], resp1["provider"]]
+        else:
+            chosen = resp1
+            providers = [resp1["provider"], resp2["provider"]]
+        
+        return {
+            "answer": chosen["answer"],
+            "providers_used": providers,
+            "tokens": resp1.get("tokens", 0) + resp2.get("tokens", 0),
+            "time": max(resp1.get("time", 0), resp2.get("time", 0)),
+            "success": True
+        }
+    
+    def _fusion_three(self, gemini: Dict, gpt: Dict, claude: Dict) -> Dict:
+        """Fusion of all 3 AIs - premium experience"""
+        
+        valid = [r for r in [gemini, gpt, claude] if r.get("success")]
+        
+        if len(valid) == 0:
+            return {"answer": "All AI services unavailable", "error": True, "success": False}
+        elif len(valid) == 1:
+            return valid[0]
+        elif len(valid) == 2:
+            return self._merge_two(valid[0], valid[1])
+        
+        # All 3 valid - use Claude's answer (best quality) but note all 3 used
+        answer = claude.get("answer", "") or gpt.get("answer", "") or gemini.get("answer", "")
+        
+        return {
+            "answer": answer,
+            "providers_used": ["claude", "openai", "gemini"],
+            "tokens": sum(r.get("tokens", 0) for r in [gemini, gpt, claude]),
+            "time": max(r.get("time", 0) for r in [gemini, gpt, claude]),
+            "success": True
+        }
+    
+    def get_stats(self) -> Dict:
+        """Get usage statistics for all providers"""
+        return {
+            "gemini": self.gemini.get_stats(),
+            "openai": self.openai.get_stats(),
+            "claude": self.claude.get_stats()
+        }
+
+
+# ============================================================================
+# SINGLETON INSTANCE (for import)
+# ============================================================================
+
+# Create single instance to be imported
+orchestrator = EnhancedOrchestrator()
+
+
+# ============================================================================
+# LEGACY COMPATIBILITY
+# ============================================================================
+
+# For backward compatibility with existing code
+async def solve_question(question: str, context: Dict, user_tier: str = "free") -> Dict:
+    """Legacy function name support"""
+    return await orchestrator.solve(question, context, user_tier)
+# ============================================================================
+# COMPATIBILITY WITH EXISTING ROUTER.PY
+# ============================================================================
+
+async def solve(
+    question: str,
+    context: dict,
+    user_tier: str = "free",
+    **kwargs
+):
+    """
+    Main solve function for router.py compatibility
+    This is what router.py imports and calls
+    """
+    return await orchestrator.solve(question, context, user_tier, **kwargs)

@@ -388,23 +388,10 @@ def solve_route(
         except Exception:
             pass
 
-        # Cache successful output (best-effort) — ONLY cache non-error answers
+        # Cache successful output (best-effort)
         if isinstance(out, dict) and out.get("final_answer"):
             try:
-                flags = set([str(x) for x in (out.get("flags") or [])])
-                non_cache_flags = {
-                    "SERVER_ERROR",
-                    "AI_NO_RESPONSE",
-                    "MISSING_API_KEY",
-                    "AI_DISABLED",
-                    "UNAUTHORIZED",
-                    "AUTH_EXPIRED",
-                    "RATE_LIMITED",
-                    "OVERLOADED",
-                    "OUT_OF_CREDITS",
-                }
-                if not (flags & non_cache_flags):
-                    redis_setex_json(cache_key, SOLVE_CACHE_TTL_SECONDS, out)
+                redis_setex_json(cache_key, SOLVE_CACHE_TTL_SECONDS, out)
             except Exception:
                 pass
 
