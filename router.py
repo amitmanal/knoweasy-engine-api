@@ -157,6 +157,9 @@ def _cache_key(payload: dict) -> str:
         "exam_mode": str(payload.get("exam_mode") or "").strip(),
         "language": (payload.get("language") or "").strip(),
         "answer_mode": (payload.get("answer_mode") or "").strip(),
+        "study_mode": (payload.get("study_mode") or "").strip(),
+        "mode": (payload.get("mode") or "").strip(),
+        "explain_level": str(payload.get("explain_level") or "").strip(),
         "question": (payload.get("question") or "").strip(),
     }
     blob = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
