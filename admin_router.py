@@ -23,7 +23,6 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from db import _get_engine
-from email_service import email_provider_debug, send_otp_email
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -203,35 +202,3 @@ def cost_top_users(
             status_code=200,
             content={"ok": False, "error": "QUERY_FAILED", "message": str(ex)},
         )
-
-
-# -----------------------------
-# Email diagnostics (operator-only)
-# -----------------------------
-
-
-@router.post("/email/test")
-def email_test(
-    to: str = Query(..., min_length=3, description="Recipient email"),
-    x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
-):
-    """Send a one-time test email (OTP-style) to validate email delivery.
-
-    This endpoint is protected by ADMIN_API_KEY.
-    Returns provider diagnostics and any send error.
-    """
-    try:
-        _require_admin(x_admin_key)
-    except PermissionError as e:
-        code = str(e)
-        if code == "ADMIN_DISABLED":
-            return JSONResponse(status_code=404, content={"ok": False, "error": "NOT_FOUND"})
-        return JSONResponse(status_code=403, content={"ok": False, "error": "FORBIDDEN"})
-
-    dbg = email_provider_debug()
-    try:
-        # Reuse the OTP email template for maximum similarity with real login flow.
-        send_otp_email(to_email=to, otp="123456")
-        return JSONResponse(status_code=200, content={"ok": True, "debug": dbg})
-    except Exception as ex:
-        return JSONResponse(status_code=200, content={"ok": False, "debug": dbg, "error": str(ex)[:500]})

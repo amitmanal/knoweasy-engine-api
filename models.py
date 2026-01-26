@@ -1,8 +1,17 @@
+"""Model clients used by KnowEasy Engine API.
+
+This file provides `GeminiClient` used by `ai_router.py`.
+
+Dependency: google-generativeai (import path: `google.generativeai`).
+"""
+
+from __future__ import annotations
+
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
-from google import genai
+import google.generativeai as genai
 
 from config import (
     GEMINI_API_KEY,
@@ -13,8 +22,7 @@ from config import (
     CB_COOLDOWN_S,
 )
 
-# Simple circuit breaker state (module-level; per-process).
-# On Render free tier you typically run 1 instance, so this works well for Phase-1.
+# Simple in-process circuit breaker.
 _cb_failures = 0
 _cb_open_until_ts = 0.0
 
@@ -22,17 +30,27 @@ _executor = ThreadPoolExecutor(max_workers=8)
 
 
 class GeminiCircuitOpen(RuntimeError):
-    pass
+    """Raised when the circuit breaker is open."""
 
 
 class GeminiClient:
+    """Stable Gemini JSON generator for legacy paths.
+
+    NOTE: The main premium orchestration is implemented in `orchestrator.py`.
+    This client is here so `ai_router.py` can call Gemini reliably.
+    """
+
     def __init__(self) -> None:
         if not GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY is missing. Set it in Render env vars.")
-        self.client = genai.Client(api_key=GEMINI_API_KEY)
+        genai.configure(api_key=GEMINI_API_KEY)
 
-    def _call_generate_content(self, model: str, prompt: str):
-        return self.client.models.generate_content(model=model, contents=prompt)
+    @staticmethod
+    def _normalize_model_name(name: str) -> str:
+        n = (name or "").strip()
+        if n.startswith("models/"):
+            n = n.split("/", 1)[1]
+        return n
 
     def _guard_circuit(self) -> None:
         global _cb_open_until_ts
@@ -48,27 +66,25 @@ class GeminiClient:
     def _record_failure(self) -> None:
         global _cb_failures, _cb_open_until_ts
         _cb_failures += 1
-        if _cb_failures >= CB_FAILURE_THRESHOLD:
-            _cb_open_until_ts = time.time() + CB_COOLDOWN_S
+        if _cb_failures >= int(CB_FAILURE_THRESHOLD or 3):
+            _cb_open_until_ts = time.time() + int(CB_COOLDOWN_S or 20)
+
+    def _call_generate_content(self, model: str, prompt: str) -> str:
+        m = genai.GenerativeModel(model)
+        resp = m.generate_content(prompt)
+        return getattr(resp, "text", "") or ""
 
     @staticmethod
-    def _normalize_model_name(name: str) -> str:
-        # Some SDK examples use "models/<name>" while config typically uses "<name>".
-        n = (name or "").strip()
-        if n.startswith("models/"):
-            n = n[len("models/") :]
-        return n
+    def _extract_json(text: str) -> dict:
+        t = (text or "").strip()
+        if "{" in t and "}" in t:
+            t = t[t.find("{") : t.rfind("}") + 1]
+        return json.loads(t)
 
     def generate_json(self, prompt: str, model: str | None = None) -> dict:
-        """Generate strict JSON using Gemini with timeout + circuit breaker.
-
-        Robust model selection:
-        - Tries requested model (if provided), then env primary/fallback, then safe known models.
-        - Never crashes the server on model 404; it will try the next candidate.
-        """
+        """Generate strict JSON using Gemini with timeout + model fallback."""
         self._guard_circuit()
 
-        # Build candidate models in priority order and de-duplicate.
         raw_candidates = [
             model,
             GEMINI_PRIMARY_MODEL,
@@ -76,41 +92,35 @@ class GeminiClient:
             "gemini-2.0-flash",
             "gemini-1.5-flash-latest",
         ]
+
         candidates: list[str] = []
         seen: set[str] = set()
         for c in raw_candidates:
             if not c:
                 continue
-            c_norm = self._normalize_model_name(str(c))
-            if c_norm and c_norm not in seen:
-                seen.add(c_norm)
-                candidates.append(c_norm)
+            cn = self._normalize_model_name(str(c))
+            if cn and cn not in seen:
+                seen.add(cn)
+                candidates.append(cn)
 
         if not candidates:
             raise RuntimeError("No Gemini model configured (GEMINI_PRIMARY_MODEL missing).")
 
-        def _extract_json(text: str) -> dict:
-            t = (text or "").strip()
-            if "{" in t and "}" in t:
-                t = t[t.find("{") : t.rfind("}") + 1]
-            return json.loads(t)
-
         last_exc: Exception | None = None
+        timeout_s = int(GEMINI_TIMEOUT_S or 40)
 
         for m in candidates:
             try:
                 fut = _executor.submit(self._call_generate_content, m, prompt)
-                resp = fut.result(timeout=GEMINI_TIMEOUT_S)
-                out = _extract_json(getattr(resp, "text", "") or "")
+                text = fut.result(timeout=timeout_s)
+                out = self._extract_json(text)
                 self._record_success()
                 return out
-            except FuturesTimeoutError as e:
+            except FuturesTimeoutError:
                 last_exc = TimeoutError(f"Gemini request timed out (model={m})")
             except Exception as e:
-                # Covers model 404, API errors, JSON parse errors, etc.
                 last_exc = e
 
-        # If we reached here, all models failed.
         self._record_failure()
         if last_exc:
             raise last_exc
