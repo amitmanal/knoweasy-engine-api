@@ -166,7 +166,7 @@ def _cache_key(payload: dict) -> str:
 
 
 @router.post("/solve", response_model=SolveResponse)
-def solve_route(
+async def solve_route(
     req: SolveRequest,
     request: Request,
     x_ke_key: str | None = Header(default=None, alias="X-KE-KEY"),
@@ -373,7 +373,25 @@ def solve_route(
             )
 
         try:
-            out = solve(payload)
+            # --- FIX: call async orchestrator properly (await + correct args) ---
+            question = (payload.get('question') or '').strip()
+            # Everything else becomes context (board/class/subject/chapter/study_mode/luma context etc.)
+            context = dict(payload)
+            context.pop('question', None)
+            user_tier = (planned_plan or (sub.get('plan') if isinstance(sub, dict) else None) or 'free')
+            raw_result = await solve(question=question, context=context, user_tier=user_tier)
+            # Map orchestrator response -> legacy SolveResponse shape expected by frontend
+            if isinstance(raw_result, dict) and 'final_answer' not in raw_result and 'answer' in raw_result:
+                out = {
+                    'final_answer': raw_result.get('answer', ''),
+                    'steps': raw_result.get('steps', []) or [],
+                    'assumptions': raw_result.get('assumptions', []) or [],
+                    'confidence': float(raw_result.get('confidence', 0.7) or 0.7),
+                    'flags': raw_result.get('flags', []) or [],
+                    'safe_note': raw_result.get('safe_note'),
+                }
+            else:
+                out = raw_result
         finally:
             try:
                 _SOLVE_SEM.release()
@@ -554,9 +572,9 @@ def solve_route(
 
 # Backward-compatible alias (some older frontends may call /ask)
 @router.post("/ask", response_model=SolveResponse)
-def ask_route(
+async def ask_route(
     req: SolveRequest,
     request: Request,
     x_ke_key: str | None = Header(default=None, alias="X-KE-KEY"),
 ):
-    return solve_route(req, request, x_ke_key=x_ke_key)
+    return await solve_route(req, request, x_ke_key=x_ke_key)
