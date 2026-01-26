@@ -85,6 +85,17 @@ class Config:
         "fallback": 80
     }
 
+    # Premium accuracy guardrail (Verifier)
+    # If enabled, Pro/Max answers get an additional verification pass
+    # (best-effort) to catch mistakes and improve clarity.
+    VERIFY_ENABLED = os.getenv("AI_VERIFY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    # Extra credits when verifier is used (added on top of strategy credits)
+    VERIFY_CREDITS = int(os.getenv("AI_VERIFY_CREDITS", "40") or "40")
+
+    # Timeout for verifier pass (kept small to avoid slowing UX)
+    VERIFY_TIMEOUT = int(os.getenv("AI_VERIFY_TIMEOUT_SECONDS", "18") or "18")
+
 
 # ============================================================================
 # ENUMS AND DATA CLASSES
@@ -912,10 +923,74 @@ class WorldClassOrchestrator:
                 result = await self._single_ai_call(providers[0], user_prompt, system_prompt, timeout)
             else:
                 result = await self._multi_ai_call(providers, user_prompt, system_prompt, timeout)
+
+            # ----------------------------------------------------------------
+            # Premium Accuracy Layer: verifier pass (Pro/Max only)
+            # Goal: answers should be "better than raw model" by catching
+            # factual mistakes, step errors, and poor explanations.
+            # This is best-effort and never blocks a response.
+            # ----------------------------------------------------------------
+            verifier_used = False
+            if (
+                Config.VERIFY_ENABLED
+                and result.get("success")
+                and ctx.user_tier in ("pro", "max")
+                and complexity != Complexity.SIMPLE
+            ):
+                try:
+                    draft = str(result.get("answer") or "").strip()
+                    if draft:
+                        # Pick a verifier provider that complements the routing.
+                        # - Math/Physics: OpenAI tends to be strong on structured steps.
+                        # - Organic/Essay-heavy: Claude is a strong checker.
+                        subj = (ctx.subject or "").lower()
+                        if any(k in subj for k in ("math", "physics")):
+                            verifier_provider = "openai" if getattr(self.openai, "configured", False) else "gemini"
+                        elif any(k in subj for k in ("organic", "chem", "biology")):
+                            verifier_provider = "claude" if getattr(self.claude, "configured", False) else "gemini"
+                        else:
+                            # Default: try Claude → OpenAI → Gemini
+                            verifier_provider = "claude" if getattr(self.claude, "configured", False) else ("openai" if getattr(self.openai, "configured", False) else "gemini")
+
+                        verifier_client = self._get_client(verifier_provider)
+                        verify_system = (
+                            "You are a strict academic verifier for Indian school/competitive exam answers. "
+                            "Your job: check the draft answer for factual mistakes, wrong steps, missing key points, "
+                            "and unclear explanations. Then return a corrected final answer that is:\n"
+                            "- accurate and exam-safe\n"
+                            "- step-by-step where needed\n"
+                            "- uses simple language for the given class level\n"
+                            "- includes formulas/units where relevant\n"
+                            "IMPORTANT: Output ONLY the improved final answer text. No JSON, no markdown fences."
+                        )
+                        verify_prompt = (
+                            f"Question:\n{question}\n\n"
+                            f"Context: Class {ctx.class_level} {ctx.board}, Subject={ctx.subject}, Exam={ctx.exam_mode}, Language={ctx.language}\n\n"
+                            f"Draft Answer (to verify and improve):\n{draft}\n\n"
+                            "Now provide the corrected FINAL answer." 
+                        )
+
+                        vres = await verifier_client.ask(verify_prompt, verify_system, Config.VERIFY_TIMEOUT)
+                        if vres and vres.get("success"):
+                            vtxt = str(vres.get("answer") or "").strip()
+                            if len(vtxt) >= max(80, int(len(draft) * 0.5)):
+                                result["answer"] = vtxt
+                                # Track provider usage/tokens
+                                used = list(result.get("providers_used") or [])
+                                if verifier_provider not in used:
+                                    used.append(verifier_provider)
+                                result["providers_used"] = used
+                                result["tokens"] = int(result.get("tokens", 0) or 0) + int(vres.get("tokens", 0) or 0)
+                                verifier_used = True
+                                logger.info(f"🛡️  [{request_id}] Verifier applied via {verifier_provider}")
+                except Exception as ve:
+                    logger.warning(f"🛡️  [{request_id}] Verifier skipped: {str(ve)[:160]}")
             
             # Calculate metrics
             elapsed_ms = int((time.time() - start_time) * 1000)
             credits = Config.CREDITS_BY_STRATEGY.get(strategy, 100)
+            if verifier_used:
+                credits = int(credits) + int(Config.VERIFY_CREDITS)
             cost = ResponseFormatter.estimate_cost(result.get("tokens", 0), result.get("providers_used", providers[:1]))
             
             # Create premium sections for Luma mode
