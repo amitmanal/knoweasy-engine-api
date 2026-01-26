@@ -125,16 +125,7 @@ def _rate_limit_ok(ip: str) -> bool:
     return True
 
 
-def _safe_failure(message: str, code: str, *, error: str | None = None) -> SolveResponse:
-    """Stable error response shape (never leaks secrets).
-
-    NOTE: Caller decides HTTP status. For real backend failures we must
-    return 5xx so frontends don't treat the fallback text as a real answer.
-    """
-    meta: dict = {"engine": "knoweasy-orchestrator-phase1"}
-    if error:
-        meta["error"] = {"code": code, "message": str(error)[:400]}
-
+def _safe_failure(message: str, code: str) -> SolveResponse:
     return SolveResponse(
         final_answer=message,
         steps=[],
@@ -142,7 +133,7 @@ def _safe_failure(message: str, code: str, *, error: str | None = None) -> Solve
         confidence=0.2,
         flags=[code],
         safe_note="Try adding chapter/topic or any given options/conditions.",
-        meta=meta,
+        meta={"engine": "knoweasy-orchestrator-phase1"},
     )
 
 
@@ -370,23 +361,6 @@ def solve_route(
             planned_plan = None
 
     try:
-        # Safe AI diagnostics (no secrets)
-        try:
-            provider = (AI_PROVIDER or "gemini").strip().lower()
-            gem_len = len((os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip())
-            oai_len = len((os.getenv("OPENAI_API_KEY") or "").strip())
-            cla_len = len((os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY") or "").strip())
-            logger.info(
-                "AI config: provider=%s gemini_key=%s(o=%s) openai_key=%s claude_key=%s",
-                provider,
-                bool(gem_len),
-                gem_len,
-                bool(oai_len),
-                bool(cla_len),
-            )
-        except Exception:
-            pass
-
         t0 = time.perf_counter()
         acquired = _SOLVE_SEM.acquire(timeout=_SOLVE_QUEUE_WAIT_SECONDS)
         if not acquired:
@@ -572,16 +546,9 @@ def solve_route(
         except Exception:
             pass
 
-        # IMPORTANT: return 5xx so frontends can show offline/retry UX.
-        # We still include a stable JSON body (SolveResponse shape).
-        logger.exception("/solve failed")
-        return JSONResponse(
-            status_code=500,
-            content=_safe_failure(
-                "Luma had a small hiccup while solving. Please try again in a few seconds 😊",
-                "SERVER_ERROR",
-                error=str(e),
-            ).model_dump(),
+        return _safe_failure(
+            "Luma had a small hiccup while solving. Please try again in a few seconds 😊",
+            "SERVER_ERROR",
         )
 
 
