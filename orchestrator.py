@@ -85,17 +85,6 @@ class Config:
         "fallback": 80
     }
 
-    # Premium accuracy guardrail (Verifier)
-    # If enabled, Pro/Max answers get an additional verification pass
-    # (best-effort) to catch mistakes and improve clarity.
-    VERIFY_ENABLED = os.getenv("AI_VERIFY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
-
-    # Extra credits when verifier is used (added on top of strategy credits)
-    VERIFY_CREDITS = int(os.getenv("AI_VERIFY_CREDITS", "40") or "40")
-
-    # Timeout for verifier pass (kept small to avoid slowing UX)
-    VERIFY_TIMEOUT = int(os.getenv("AI_VERIFY_TIMEOUT_SECONDS", "18") or "18")
-
 
 # ============================================================================
 # ENUMS AND DATA CLASSES
@@ -131,6 +120,8 @@ class RequestContext:
     exam_mode: str = "BOARD"
     language: str = "en"
     study_mode: str = "chat"
+    # Answer depth control from frontend: quick | deep | exam
+    answer_mode: str = "quick"
     visible_text: str = ""
     anchor_example: str = ""
     user_tier: str = "free"
@@ -144,6 +135,7 @@ class RequestContext:
         self.exam_mode = (self.exam_mode or "BOARD").upper().strip()
         self.language = (self.language or "en").lower().strip()
         self.study_mode = (self.study_mode or "chat").lower().strip()
+        self.answer_mode = (self.answer_mode or "quick").lower().strip()
         self.user_tier = (self.user_tier or "free").lower().strip()
 
 
@@ -720,6 +712,15 @@ If it's a complex topic, offer to explain more.
 
 {language_instruction}"""
 
+    # Strict JSON output so the frontend/back-end can reliably show steps, confidence, and safe notes.
+    OUTPUT_JSON_RULES = """
+
+IMPORTANT OUTPUT RULES:
+- Return ONLY valid JSON (no markdown, no extra text).
+- Required keys: final_answer (string), steps (array of strings), assumptions (array of strings), confidence (number 0.0-1.0), safe_note (string or null).
+- Keep steps short and exam-safe. If the question is simple, steps may be an empty array.
+"""
+
     LANGUAGE_INSTRUCTIONS = {
         "en": "Respond in clear English.",
         "hi": "आप हिंदी में जवाब दे सकते हैं। Technical terms अंग्रेज़ी में रखें।",
@@ -733,7 +734,7 @@ If it's a complex topic, offer to explain more.
         lang_inst = cls.LANGUAGE_INSTRUCTIONS.get(ctx.language, cls.LANGUAGE_INSTRUCTIONS["en"])
         
         if ctx.study_mode == "luma":
-            return cls.LUMA_TEMPLATE.format(
+            base = cls.LUMA_TEMPLATE.format(
                 class_level=ctx.class_level,
                 board=ctx.board,
                 subject=ctx.subject.title() if ctx.subject else "General",
@@ -741,13 +742,15 @@ If it's a complex topic, offer to explain more.
                 exam_mode=ctx.exam_mode,
                 language_instruction=lang_inst
             )
+            return base + cls.OUTPUT_JSON_RULES
         else:
-            return cls.CHAT_TEMPLATE.format(
+            base = cls.CHAT_TEMPLATE.format(
                 class_level=ctx.class_level,
                 board=ctx.board,
                 subject=ctx.subject.title() if ctx.subject else "General",
                 language_instruction=lang_inst
             )
+            return base + cls.OUTPUT_JSON_RULES
     
     @classmethod
     def build_user_prompt(cls, ctx: RequestContext) -> str:
@@ -830,6 +833,65 @@ class ResponseFormatter:
         return round(total, 4)
 
 
+def _safe_json_parse(text: str) -> Optional[Dict[str, Any]]:
+    """Best-effort JSON parse. If model wraps JSON in text, extract first {...}."""
+    import json
+    import re
+
+    if not text:
+        return None
+    t = text.strip()
+    try:
+        obj = json.loads(t)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+
+    m = re.search(r"\{[\s\S]*\}", t)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _normalize_structured_answer(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize model JSON into our canonical keys."""
+    final_answer = str(obj.get("final_answer") or obj.get("answer") or "").strip()
+    steps = obj.get("steps") or []
+    assumptions = obj.get("assumptions") or []
+    safe_note = obj.get("safe_note")
+    confidence = obj.get("confidence")
+
+    if not isinstance(steps, list):
+        steps = []
+    steps = [str(s).strip() for s in steps if str(s).strip()][:12]
+
+    if not isinstance(assumptions, list):
+        assumptions = []
+    assumptions = [str(a).strip() for a in assumptions if str(a).strip()][:8]
+
+    try:
+        conf = float(confidence) if confidence is not None else 0.8
+    except Exception:
+        conf = 0.8
+    conf = max(0.0, min(1.0, conf))
+
+    if safe_note is not None:
+        safe_note = str(safe_note).strip() or None
+
+    return {
+        "final_answer": final_answer,
+        "answer": final_answer,
+        "steps": steps,
+        "assumptions": assumptions,
+        "confidence": conf,
+        "safe_note": safe_note,
+    }
+
+
 # ============================================================================
 # MAIN ORCHESTRATOR
 # ============================================================================
@@ -900,6 +962,7 @@ class WorldClassOrchestrator:
             exam_mode=context.get("exam_mode", "BOARD"),
             language=context.get("language", "en"),
             study_mode=context.get("study_mode", "chat"),
+            answer_mode=context.get("mode", context.get("answer_mode", "quick")),
             visible_text=context.get("visible_text", ""),
             anchor_example=context.get("anchor_example", ""),
             user_tier=user_tier
@@ -925,72 +988,82 @@ class WorldClassOrchestrator:
                 result = await self._multi_ai_call(providers, user_prompt, system_prompt, timeout)
 
             # ----------------------------------------------------------------
-            # Premium Accuracy Layer: verifier pass (Pro/Max only)
-            # Goal: answers should be "better than raw model" by catching
-            # factual mistakes, step errors, and poor explanations.
-            # This is best-effort and never blocks a response.
+            # Post-process: parse structured JSON, run verifier (paid/deep/exam)
             # ----------------------------------------------------------------
-            verifier_used = False
-            if (
-                Config.VERIFY_ENABLED
-                and result.get("success")
-                and ctx.user_tier in ("pro", "max")
-                and complexity != Complexity.SIMPLE
-            ):
-                try:
-                    draft = str(result.get("answer") or "").strip()
-                    if draft:
-                        # Pick a verifier provider that complements the routing.
-                        # - Math/Physics: OpenAI tends to be strong on structured steps.
-                        # - Organic/Essay-heavy: Claude is a strong checker.
-                        subj = (ctx.subject or "").lower()
-                        if any(k in subj for k in ("math", "physics")):
-                            verifier_provider = "openai" if getattr(self.openai, "configured", False) else "gemini"
-                        elif any(k in subj for k in ("organic", "chem", "biology")):
-                            verifier_provider = "claude" if getattr(self.claude, "configured", False) else "gemini"
-                        else:
-                            # Default: try Claude → OpenAI → Gemini
-                            verifier_provider = "claude" if getattr(self.claude, "configured", False) else ("openai" if getattr(self.openai, "configured", False) else "gemini")
+            structured = _safe_json_parse(result.get("answer", ""))
+            if structured:
+                norm = _normalize_structured_answer(structured)
+            else:
+                # Fallback if provider didn't follow JSON rules
+                norm = {
+                    "final_answer": str(result.get("answer", "") or "").strip(),
+                    "answer": str(result.get("answer", "") or "").strip(),
+                    "steps": [],
+                    "assumptions": [],
+                    "confidence": 0.75,
+                    "safe_note": None,
+                }
 
-                        verifier_client = self._get_client(verifier_provider)
-                        verify_system = (
-                            "You are a strict academic verifier for Indian school/competitive exam answers. "
-                            "Your job: check the draft answer for factual mistakes, wrong steps, missing key points, "
-                            "and unclear explanations. Then return a corrected final answer that is:\n"
-                            "- accurate and exam-safe\n"
-                            "- step-by-step where needed\n"
-                            "- uses simple language for the given class level\n"
-                            "- includes formulas/units where relevant\n"
-                            "IMPORTANT: Output ONLY the improved final answer text. No JSON, no markdown fences."
-                        )
-                        verify_prompt = (
-                            f"Question:\n{question}\n\n"
-                            f"Context: Class {ctx.class_level} {ctx.board}, Subject={ctx.subject}, Exam={ctx.exam_mode}, Language={ctx.language}\n\n"
-                            f"Draft Answer (to verify and improve):\n{draft}\n\n"
-                            "Now provide the corrected FINAL answer." 
-                        )
+            # Decide if this request needs verification (cost-aware)
+            exam_like = (ctx.answer_mode in ("exam",)) or (ctx.exam_mode in ("JEE", "NEET"))
+            deep_like = (ctx.answer_mode in ("deep", "exam"))
+            needs_verification = (
+                ctx.user_tier in ("pro", "max")
+                and (deep_like or exam_like or complexity != Complexity.SIMPLE)
+                and bool(norm.get("final_answer"))
+            )
 
-                        vres = await verifier_client.ask(verify_prompt, verify_system, Config.VERIFY_TIMEOUT)
-                        if vres and vres.get("success"):
-                            vtxt = str(vres.get("answer") or "").strip()
-                            if len(vtxt) >= max(80, int(len(draft) * 0.5)):
-                                result["answer"] = vtxt
-                                # Track provider usage/tokens
-                                used = list(result.get("providers_used") or [])
-                                if verifier_provider not in used:
-                                    used.append(verifier_provider)
-                                result["providers_used"] = used
-                                result["tokens"] = int(result.get("tokens", 0) or 0) + int(vres.get("tokens", 0) or 0)
-                                verifier_used = True
-                                logger.info(f"🛡️  [{request_id}] Verifier applied via {verifier_provider}")
-                except Exception as ve:
-                    logger.warning(f"🛡️  [{request_id}] Verifier skipped: {str(ve)[:160]}")
+            verified = False
+            verifier_provider = None
+            if needs_verification:
+                verifier_provider = self._choose_verifier_provider(ctx, primary=(result.get("provider") or providers[0]))
+                verified_out = await self._verify_answer(ctx, norm, verifier_provider, timeout=min(timeout + 5, Config.TIMEOUT_DEEP))
+                if verified_out and verified_out.get("final_answer"):
+                    norm.update(verified_out)
+                    verified = True
+                    # Track verifier as used provider
+                    pu = list(result.get("providers_used") or [])
+                    if verifier_provider and verifier_provider not in pu:
+                        pu.append(verifier_provider)
+                    result["providers_used"] = pu
+
+            # Apply lightweight heuristic verifier adjustments (free)
+            try:
+                from verifier import basic_verify
+                adj, v_flags, v_assumptions = basic_verify(ctx.question, norm.get("final_answer", ""), norm.get("steps") or [])
+                norm["confidence"] = max(0.0, min(1.0, float(norm.get("confidence", 0.8)) + float(adj)))
+                if v_assumptions:
+                    norm["assumptions"] = list(norm.get("assumptions") or []) + v_assumptions
+                result["verification_flags"] = v_flags
+            except Exception:
+                result["verification_flags"] = []
+
+            # Confidence label for UI
+            label = "CONCEPTUAL_LEARNING"
+            if verified and exam_like and float(norm.get("confidence", 0.0)) >= 0.78:
+                label = "VERIFIED_EXAM_SAFE"
+            elif exam_like:
+                label = "EXAM_STYLE_UNVERIFIED"
+            result["confidence_label"] = label
+
+            # Merge structured fields back into result for router formatting
+            result["answer"] = norm.get("final_answer")
+            result["final_answer"] = norm.get("final_answer")
+            result["steps"] = norm.get("steps")
+            result["assumptions"] = norm.get("assumptions")
+            result["confidence"] = norm.get("confidence")
+            result["safe_note"] = norm.get("safe_note")
+            result["verified"] = verified
+            if verifier_provider:
+                result["verifier_provider"] = verifier_provider
             
             # Calculate metrics
             elapsed_ms = int((time.time() - start_time) * 1000)
             credits = Config.CREDITS_BY_STRATEGY.get(strategy, 100)
-            if verifier_used:
-                credits = int(credits) + int(Config.VERIFY_CREDITS)
+            if verified:
+                # Verification surcharge (cost-aware)
+                credits += 40 if ctx.user_tier == "pro" else 60
+                strategy = f"{strategy}_verified"
             cost = ResponseFormatter.estimate_cost(result.get("tokens", 0), result.get("providers_used", providers[:1]))
             
             # Create premium sections for Luma mode
@@ -1097,6 +1170,56 @@ class WorldClassOrchestrator:
             "time_ms": max(r.get("time_ms", 0) for r in successful),
             "success": True
         }
+
+    def _choose_verifier_provider(self, ctx: RequestContext, primary: str) -> str:
+        """Choose verifier provider based on subject and primary provider."""
+        subj = (ctx.subject or "").lower()
+        primary = (primary or "gemini").lower()
+        # Prefer cross-provider verification when possible
+        if any(k in subj for k in ["chem", "bio", "organic", "inorganic"]):
+            return "claude" if primary != "claude" else "openai"
+        if any(k in subj for k in ["math", "maths", "mathemat", "physics"]):
+            return "openai" if primary != "openai" else "claude"
+        # Default: OpenAI verifies Gemini; Claude verifies OpenAI; OpenAI verifies Claude
+        if primary == "gemini":
+            return "openai"
+        if primary == "openai":
+            return "claude"
+        return "openai"
+
+    async def _verify_answer(self, ctx: RequestContext, draft: Dict[str, Any], provider: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
+        """Second-pass verification: returns corrected structured answer JSON."""
+        try:
+            client = self._get_client(provider)
+            system = (
+                "You are an expert Indian exam mentor and strict verifier. "
+                "Your job is to check the draft answer for correctness, missing steps, "
+                "wrong formulas, wrong final values, and unclear explanations. "
+                "If anything is wrong, fix it. "
+                "Return ONLY valid JSON with keys: final_answer, steps, assumptions, confidence, safe_note. "
+                "confidence must be between 0 and 1. No markdown."
+            )
+
+            user = (
+                f"STUDENT CONTEXT: Class {ctx.class_level}, Board {ctx.board}, Subject {ctx.subject}, Exam {ctx.exam_mode}.\n"
+                f"QUESTION: {ctx.question}\n\n"
+                "DRAFT ANSWER (to verify):\n"
+                f"final_answer: {draft.get('final_answer','')}\n"
+                f"steps: {draft.get('steps',[])}\n"
+                f"assumptions: {draft.get('assumptions',[])}\n\n"
+                "TASK: Verify and return corrected JSON. "
+                "If the draft is correct, you may keep it but improve clarity and steps."
+            )
+
+            out = await client.ask(user, system, timeout)
+            if not out.get("success"):
+                return None
+            parsed = _safe_json_parse(out.get("answer", ""))
+            if not parsed:
+                return None
+            return _normalize_structured_answer(parsed)
+        except Exception:
+            return None
     
     def get_stats(self) -> Dict:
         """Get orchestrator statistics"""

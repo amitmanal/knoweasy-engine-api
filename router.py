@@ -242,6 +242,8 @@ def _format_response(result: dict, request_id: str) -> dict:
     flags = []
     if result.get("ai_strategy"):
         flags.append(result["ai_strategy"].upper())
+    if result.get("confidence_label"):
+        flags.append(str(result["confidence_label"]).upper())
     if result.get("providers_used"):
         for p in result["providers_used"]:
             flags.append(f"AI_{p.upper()}")
@@ -267,6 +269,9 @@ def _format_response(result: dict, request_id: str) -> dict:
             "cost_inr": result.get("cost_inr", 0),
             "premium_formatting": result.get("premium_formatting", False),
             "sections": result.get("sections"),
+            "confidence_label": result.get("confidence_label"),
+            "verified": bool(result.get("verified")),
+            "verifier_provider": result.get("verifier_provider"),
         }
     }
 
