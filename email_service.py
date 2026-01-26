@@ -32,9 +32,8 @@ def _env(name: str, default: str = "") -> str:
 
 
 # Generic "from" settings (recommended)
-# NOTE: earlier project versions used FROM_EMAIL; keep compatibility.
-EMAIL_FROM = _env("EMAIL_FROM") or _env("FROM_EMAIL") or _env("SMTP_FROM")  # allow legacy vars
-SMTP_FROM_NAME = _env("SMTP_FROM_NAME") or _env("FROM_NAME", "KnowEasy")
+EMAIL_FROM = _env("EMAIL_FROM") or _env("SMTP_FROM")  # allow legacy SMTP_FROM
+SMTP_FROM_NAME = _env("SMTP_FROM_NAME", "KnowEasy")
 
 # SMTP settings
 SMTP_HOST = _env("SMTP_HOST")

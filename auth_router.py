@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
@@ -54,8 +53,18 @@ def request_otp(payload: RequestOtpIn, request: Request):
         return JSONResponse(status_code=503, content={"ok": False, "message": "Email sender not configured (missing Resend/SMTP env vars).", "cooldown_seconds": 0})
 
     otp_plain, otp_hash = new_otp_code()
-    store_otp(email, role, otp_hash)
 
+    # Store OTP first. If DB write fails, don't attempt email.
+    try:
+        store_otp(email, role, otp_hash)
+    except Exception as e:
+        logger.exception(f"[RID:{rid}] Failed to store OTP: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "message": "Login service temporarily unavailable. Please try again.", "cooldown_seconds": 0},
+        )
+
+    # Now send email
     try:
         logger.info(
             f"[RID:{rid}] Sending OTP email. to={_mask_email(email)} role={role} provider={email_provider_debug().get('provider')}"
@@ -63,26 +72,8 @@ def request_otp(payload: RequestOtpIn, request: Request):
         send_otp_email(to_email=email, otp=otp_plain)
         logger.info(f"[RID:{rid}] OTP email send triggered")
     except Exception as e:
-        # In production we keep the user-facing message simple, but we *do* want actionable debug
-        # for the operator (you) without exposing secrets publicly.
         logger.exception(f"[RID:{rid}] Failed to send OTP email: {e}")
-
-        admin_key = (os.getenv("ADMIN_API_KEY") or "").strip()
-        req_admin = request.headers.get("X-Admin-Key", "").strip() if request else ""
-        is_admin = bool(admin_key and req_admin and req_admin == admin_key)
-
-        payload = {
-            "ok": False,
-            "error": "OTP_EMAIL_FAILED",
-            "message": "Failed to send OTP. Please try again.",
-            "cooldown_seconds": 0,
-        }
-        if is_admin:
-            payload["debug"] = {
-                "provider": email_provider_debug(),
-                "hint": "If using Resend, ensure EMAIL_FROM (or FROM_EMAIL) uses a verified domain in Resend, and RESEND_API_KEY is correct.",
-            }
-        return JSONResponse(status_code=500, content=payload)
+        return JSONResponse(status_code=500, content={"ok": False, "message": "Failed to send OTP. Please try again.", "cooldown_seconds": 0})
 
     return {"ok": True, "message": "OTP sent to your email.", "cooldown_seconds": 30}
 
