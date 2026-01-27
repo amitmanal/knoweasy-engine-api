@@ -8,7 +8,7 @@ import time
 import os
 import asyncio
 import uuid
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple
 
 from fastapi import APIRouter, Request, Header
 from fastapi.responses import JSONResponse
@@ -170,19 +170,18 @@ def _cache_key(payload: dict) -> str:
     return f"cache:solve:{hashlib.sha256(blob.encode()).hexdigest()[:32]}"
 
 
-
-def _normalize_answer_mode(v: Any) -> str:
-    """Map frontend answer_mode to orchestrator modes: quick | deep | exam"""
-    s = (str(v or "")).strip().lower()
-    # Frontend-friendly values (SolveRequest)
-    if s in ("one_liner", "hint_only", "quick", "fast"):
-        return "quick"
-    if s in ("step_by_step", "deep", "detailed"):
-        return "deep"
-    if s in ("cbse_board", "exam", "board"):
-        return "exam"
-    # Default safe
-    return "quick"
+def _normalize_answer_mode(v: str) -> str:
+    m = str(v or "").strip().lower()
+    if not m:
+        return "step_by_step"
+    # accept friendly UI strings too
+    if m in {"quick"}:
+        return "one_liner"
+    if m in {"deep"}:
+        return "step_by_step"
+    if m in {"exam"}:
+        return "cbse_board"
+    return m
 
 def _extract_context(payload: dict) -> dict:
     """Extract structured context from payload"""
@@ -194,10 +193,10 @@ def _extract_context(payload: dict) -> dict:
         "subject": str(payload.get("subject") or "").strip(),
         "chapter": str(payload.get("chapter") or "").strip(),
         "exam_mode": str(payload.get("exam_mode") or "BOARD").strip().upper(),
-        "answer_mode": _normalize_answer_mode(payload.get("answer_mode")),
         "language": str(payload.get("language") or "en").strip().lower(),
         "study_mode": str(payload.get("study_mode") or "chat").strip().lower(),
         "mode": str(payload.get("mode") or "").strip().lower(),
+        "answer_mode": str(payload.get("answer_mode") or payload.get("answerMode") or payload.get("answerMode".lower()) or "") .strip().lower(),
         "visible_text": str(luma_context.get("visible_text") or "")[:600],
         "anchor_example": str(luma_context.get("anchor_example") or "")[:300],
         "section": str(luma_context.get("section") or ""),
@@ -441,12 +440,6 @@ async def solve_route(
             planned_plan = (((sub or {}).get("plan") or "free") if isinstance(sub, dict) else "free").lower().strip() or "free"
             q = (req.question or "").strip()
             planned_units = 120 + max(0, len(q) // 20)
-            # Mode-based cost planning
-            am = _normalize_answer_mode(getattr(req, 'answer_mode', None))
-            if am == 'quick':
-                planned_units = int(planned_units * 0.6)
-            elif am == 'exam':
-                planned_units = int(planned_units * 1.35)
             planned_units = max(60, min(600, int(planned_units)))
 
             try:
