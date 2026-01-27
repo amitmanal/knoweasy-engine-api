@@ -136,6 +136,13 @@ class RequestContext:
         self.language = (self.language or "en").lower().strip()
         self.study_mode = (self.study_mode or "chat").lower().strip()
         self.answer_mode = (self.answer_mode or "quick").lower().strip()
+        # Normalize frontend aliases to our canonical modes
+        if self.answer_mode in ("one_liner", "short", "fast"):
+            self.answer_mode = "quick"
+        elif self.answer_mode in ("step_by_step", "steps", "explain"):
+            self.answer_mode = "deep"
+        elif self.answer_mode in ("cbse_board", "board", "exam_safe"):
+            self.answer_mode = "exam"
         self.user_tier = (self.user_tier or "free").lower().strip()
 
 
@@ -677,6 +684,35 @@ class ComplexityAnalyzer:
 
 class PromptBuilder:
     """Builds intelligent, context-aware prompts"""
+
+
+    @staticmethod
+    def mode_block(ctx: RequestContext) -> str:
+        """Instruction block enforcing different behaviors for Quick / Deep / Exam."""
+        m = (ctx.answer_mode or "quick").lower().strip()
+
+        if m == "exam":
+            return """🎯 Mode: Exam-safe (CBSE)
+Rules:
+1) Give a precise, syllabus-aligned answer.
+2) Include step-by-step reasoning (5–10 steps where applicable).
+3) Add key definitions/formulas, and 1 short example if helpful.
+4) Avoid speculation; if uncertain, clearly state the assumption.
+"""
+
+        if m == "deep":
+            return """🎯 Mode: Deep learning
+Rules:
+1) Explain clearly with step-by-step teaching.
+2) Provide 4–8 steps + a short summary.
+3) Use bullets for key points and a simple example.
+"""
+
+        return """🎯 Mode: Quick help
+Rules:
+1) Answer in 1–3 short sentences.
+2) No long derivations; include only the core idea.
+"""
     
     LUMA_TEMPLATE = """You are Luma, a patient and encouraging AI tutor designed for Indian students.
 
@@ -685,6 +721,8 @@ class PromptBuilder:
 - Subject: {subject}
 - Chapter: {chapter}
 - Exam Focus: {exam_mode}
+
+{mode_block}
 
 🎓 YOUR TEACHING STYLE:
 1. Start with a simple hook or relatable example
@@ -705,10 +743,7 @@ class PromptBuilder:
     CHAT_TEMPLATE = """You are Luma, a friendly AI tutor for Indian students.
 
 📋 Context: Class {class_level} {board}, {subject}
-🎯 Mode: Quick help / doubt solving
-
-Be concise, clear, and encouraging. Answer directly but completely.
-If it's a complex topic, offer to explain more.
+{mode_block}
 
 {language_instruction}"""
 
@@ -740,6 +775,7 @@ IMPORTANT OUTPUT RULES:
                 subject=ctx.subject.title() if ctx.subject else "General",
                 chapter=ctx.chapter.replace("_", " ").title() if ctx.chapter else "Not specified",
                 exam_mode=ctx.exam_mode,
+                mode_block=cls.mode_block(ctx),
                 language_instruction=lang_inst
             )
             return base + cls.OUTPUT_JSON_RULES
@@ -748,6 +784,7 @@ IMPORTANT OUTPUT RULES:
                 class_level=ctx.class_level,
                 board=ctx.board,
                 subject=ctx.subject.title() if ctx.subject else "General",
+                mode_block=cls.mode_block(ctx),
                 language_instruction=lang_inst
             )
             return base + cls.OUTPUT_JSON_RULES
