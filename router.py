@@ -27,7 +27,7 @@ from config import (
     GEMINI_PRIMARY_MODEL,
     OPENAI_MODEL,
 )
-from schemas import SolveRequest, SolveResponse, AIHubRequest, AIHubResponse
+from schemas import SolveRequest, SolveResponse
 from orchestrator import solve, get_orchestrator_stats
 from db import db_log_solve, db_log_ai_usage
 
@@ -164,6 +164,10 @@ def _cache_key(payload: dict) -> str:
         "exam_mode": str(payload.get("exam_mode") or "").strip().upper(),
         "language": (payload.get("language") or "en").strip().lower(),
         "study_mode": (payload.get("study_mode") or "chat").strip().lower(),
+        # IMPORTANT: mode/answer_mode must be part of cache key, otherwise
+        # Lite/Tutor/Mastery could incorrectly share the same cached answer.
+        "mode": (payload.get("mode") or "").strip().lower(),
+        "answer_mode": (payload.get("answer_mode") or payload.get("answerMode") or "").strip().lower(),
         "question": (payload.get("question") or "").strip(),
     }
     blob = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
@@ -173,20 +177,40 @@ def _cache_key(payload: dict) -> str:
 def _normalize_answer_mode(v: str) -> str:
     m = str(v or "").strip().lower()
     if not m:
-        return "step_by_step"
-    # accept friendly UI strings too
+        return "luma_tutor"
+
+    # Backward compatible aliases (old UI)
     if m in {"quick"}:
-        return "one_liner"
+        return "luma_lite"
     if m in {"deep"}:
-        return "step_by_step"
+        return "luma_tutor"
     if m in {"exam"}:
-        return "cbse_board"
+        return "luma_mastery"
+
+    # New canonical mode names
+    if m in {"lite", "luma_lite"}:
+        return "luma_lite"
+    if m in {"tutor", "luma_tutor"}:
+        return "luma_tutor"
+    if m in {"mastery", "luma_mastery"}:
+        return "luma_mastery"
+
+    # Legacy internal keys still supported
+    if m in {"one_liner"}:
+        return "luma_lite"
+    if m in {"step_by_step"}:
+        return "luma_tutor"
+    if m in {"cbse_board"}:
+        return "luma_mastery"
+
     return m
 
 def _extract_context(payload: dict) -> dict:
     """Extract structured context from payload"""
     luma_context = payload.get("context") or {}
     
+    raw_mode = str(payload.get("answer_mode") or payload.get("answerMode") or payload.get("mode") or "").strip().lower()
+    normalized_mode = _normalize_answer_mode(raw_mode)
     return {
         "board": str(payload.get("board") or "cbse").strip().upper(),
         "class": str(payload.get("class_") or payload.get("class_level") or payload.get("class") or "11").strip(),
@@ -195,8 +219,10 @@ def _extract_context(payload: dict) -> dict:
         "exam_mode": str(payload.get("exam_mode") or "BOARD").strip().upper(),
         "language": str(payload.get("language") or "en").strip().lower(),
         "study_mode": str(payload.get("study_mode") or "chat").strip().lower(),
-        "mode": str(payload.get("mode") or "").strip().lower(),
-        "answer_mode": str(payload.get("answer_mode") or payload.get("answerMode") or payload.get("answerMode".lower()) or "") .strip().lower(),
+        # Canonical mode for the orchestrator (Luma Lite / Tutor / Mastery)
+        "answer_mode": normalized_mode,
+        # Keep raw "mode" field for backward compatibility / UI display
+        "mode": raw_mode,
         "visible_text": str(luma_context.get("visible_text") or "")[:600],
         "anchor_example": str(luma_context.get("anchor_example") or "")[:300],
         "section": str(luma_context.get("section") or ""),
@@ -651,80 +677,3 @@ async def ai_stats():
         return {"status": "ok", "stats": stats}
     except Exception as e:
         return {"status": "error", "error": str(e)}
-
-
-# ============================================================================
-# AI HUB SOLVE ENDPOINT (Chat AI) — Structured cards/blocks (v1)
-# ============================================================================
-
-@router.post("/aihub/solve", response_model=AIHubResponse)
-async def aihub_solve_route(
-    req: AIHubRequest,
-    request: Request,
-    x_ke_key: str | None = Header(default=None, alias="X-KE-KEY"),
-):
-    """AI Hub solve: no selectors; returns Learning Object blocks."""
-
-    # API key gate (same as /solve)
-    if KE_API_KEY and x_ke_key and x_ke_key != KE_API_KEY:
-        return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
-
-    # Identify user tier from auth token (best-effort; do not block if missing)
-    user = None
-    try:
-        # router.py already uses helper in auth_store via session_user in /solve path
-        # but we keep this endpoint stable without requiring auth.
-        pass
-    except Exception:
-        user = None
-
-    # Cache key must include mode+language to avoid mode-collapsing
-    try:
-        mode = str(req.mode)
-        lang = str(req.language)
-        q = req.question
-        cache_key = "aihub:" + hashlib.sha256((q + "|" + mode + "|" + lang).encode("utf-8")).hexdigest()
-        cached = redis_get_json(cache_key)
-        if cached:
-            return cached
-    except Exception:
-        cache_key = None
-
-    # Map modes to orchestrator answer_mode
-    mode_map = {"lite": "quick", "tutor": "deep", "mastery": "exam"}
-    answer_mode = mode_map.get(str(req.mode), "deep")
-
-    # Minimal context (no board/class selectors). Orchestrator will still be safe.
-    context = {
-        "study_mode": "aihub",
-        "mode": answer_mode,
-        "language": "en" if req.language == "auto" else req.language,
-        "board": "CBSE",
-        "class_level": "11",
-        "subject": "",
-        "exam_mode": "BOARD",
-    }
-
-    # If the user is logged in, /solve_route already has logic to fetch profile;
-    # For aihub we keep it best-effort and safe. Future: enrich from /auth/me.
-    result = await solve(req.question, context, user_tier="free")
-
-    # result is already normalized in orchestrator for aihub to {title,...}
-    out = {
-        "title": result.get("title", "Concept"),
-        "why_matters": result.get("why_matters", "Builds clarity and prevents mistakes."),
-        "explanation_sections": result.get("explanation_sections", []) or [],
-        "visual": result.get("visual", "") or "",
-        "misconception": result.get("misconception", "") or "",
-        "concept_terms": result.get("concept_terms", []) or [],
-        "confidence_label": result.get("confidence_label", None),
-    }
-
-    # Cache response
-    try:
-        if cache_key:
-            redis_setex_json(cache_key, SOLVE_CACHE_TTL_SECONDS, out)
-    except Exception:
-        pass
-
-    return out

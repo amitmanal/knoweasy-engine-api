@@ -120,8 +120,9 @@ class RequestContext:
     exam_mode: str = "BOARD"
     language: str = "en"
     study_mode: str = "chat"
-    # Answer depth control from frontend: quick | deep | exam
-    answer_mode: str = "quick"
+    # Answer depth control from frontend (canonical): luma_lite | luma_tutor | luma_mastery
+    # Backward compatible: quick | deep | exam
+    answer_mode: str = "luma_tutor"
     visible_text: str = ""
     anchor_example: str = ""
     user_tier: str = "free"
@@ -135,14 +136,23 @@ class RequestContext:
         self.exam_mode = (self.exam_mode or "BOARD").upper().strip()
         self.language = (self.language or "en").lower().strip()
         self.study_mode = (self.study_mode or "chat").lower().strip()
-        self.answer_mode = (self.answer_mode or "quick").lower().strip()
-        # Normalize frontend aliases to our canonical modes
-        if self.answer_mode in ("one_liner", "short", "fast"):
-            self.answer_mode = "quick"
-        elif self.answer_mode in ("step_by_step", "steps", "explain"):
-            self.answer_mode = "deep"
-        elif self.answer_mode in ("cbse_board", "board", "exam_safe"):
-            self.answer_mode = "exam"
+        self.answer_mode = (self.answer_mode or "luma_tutor").lower().strip()
+
+        # Backward compatible mappings (old UI)
+        if self.answer_mode in ("quick", "one_liner", "short", "fast"):
+            self.answer_mode = "luma_lite"
+        elif self.answer_mode in ("deep", "step_by_step", "steps", "explain"):
+            self.answer_mode = "luma_tutor"
+        elif self.answer_mode in ("exam", "cbse_board", "board", "exam_safe"):
+            self.answer_mode = "luma_mastery"
+
+        # Canonical names
+        if self.answer_mode in ("lite",):
+            self.answer_mode = "luma_lite"
+        elif self.answer_mode in ("tutor",):
+            self.answer_mode = "luma_tutor"
+        elif self.answer_mode in ("mastery",):
+            self.answer_mode = "luma_mastery"
         self.user_tier = (self.user_tier or "free").lower().strip()
 
 
@@ -688,30 +698,34 @@ class PromptBuilder:
 
     @staticmethod
     def mode_block(ctx: RequestContext) -> str:
-        """Instruction block enforcing different behaviors for Quick / Deep / Exam."""
-        m = (ctx.answer_mode or "quick").lower().strip()
+        """Instruction block enforcing different behaviors for Luma Lite / Tutor / Mastery."""
+        m = (ctx.answer_mode or "luma_tutor").lower().strip()
 
-        if m == "exam":
-            return """🎯 Mode: Exam-safe (CBSE)
+        if m == "luma_mastery":
+            return """🎯 Mode: Luma Mastery (deep + exam-safe)
 Rules:
-1) Give a precise, syllabus-aligned answer.
-2) Include step-by-step reasoning (5–10 steps where applicable).
-3) Add key definitions/formulas, and 1 short example if helpful.
-4) Avoid speculation; if uncertain, clearly state the assumption.
+1) Give an exam-safe, syllabus-aligned explanation.
+2) Teach step-by-step, with clear headings.
+3) Include: Why-this-matters, steps (where applicable), common mistakes, and 2–4 practice prompts.
+4) If useful, include ONE instructional visual plan (diagram/graph/map/timeline).
+5) Avoid speculation; if uncertain, state assumptions.
 """
 
-        if m == "deep":
-            return """🎯 Mode: Deep learning
+        if m == "luma_lite":
+            return """🎯 Mode: Luma Lite (fast clarity)
 Rules:
-1) Explain clearly with step-by-step teaching.
-2) Provide 4–8 steps + a short summary.
-3) Use bullets for key points and a simple example.
+1) Answer quickly in simple language for the student's class.
+2) Keep it short (1–3 short paragraphs).
+3) Include one tiny example if it helps.
+4) No heavy derivations; stay calm and clear.
 """
 
-        return """🎯 Mode: Quick help
+        return """🎯 Mode: Luma Tutor (step-by-step teaching)
 Rules:
-1) Answer in 1–3 short sentences.
-2) No long derivations; include only the core idea.
+1) Explain step-by-step with simple headings.
+2) Give 4–8 steps when it’s a process/problem.
+3) Include 1–2 examples and 1 common mistake.
+4) If helpful, include ONE instructional visual plan (diagram/graph/map/timeline).
 """
     
     LUMA_TEMPLATE = """You are Luma, a patient and encouraging AI tutor designed for Indian students.
@@ -747,41 +761,35 @@ Rules:
 
 {language_instruction}"""
 
-    # AI Hub: calm, card/block learning objects (no credit talk)
-    AIHUB_TEMPLATE = """You are KnowEasy AI — a calm, premium teacher for Indian students.
-
-You must produce a structured Learning Object as JSON blocks.
-- No class/board/subject selectors in the UI; infer gently if needed.
-- Never mention credits, tokens, costs, or internal billing.
-- Keep tone teacher-like, calm, and trustworthy.
-
-📋 Context (best-effort): Class {class_level} {board}, {subject}
-{mode_block}
-
-{language_instruction}"""
-
     # Strict JSON output so the frontend/back-end can reliably show steps, confidence, and safe notes.
     OUTPUT_JSON_RULES = """
 
 IMPORTANT OUTPUT RULES:
 - Return ONLY valid JSON (no markdown, no extra text).
-- Required keys: final_answer (string), steps (array of strings), assumptions (array of strings), confidence (number 0.0-1.0), safe_note (string or null).
-- Keep steps short and exam-safe. If the question is simple, steps may be an empty array.
-"""
+- You MUST follow the KnowEasy Answer Object format.
 
-    AIHUB_OUTPUT_JSON_RULES = """
+Required keys:
+  - title: string
+  - why_this_matters: string
+  - final_answer: string
+  - steps: array of strings (can be empty)
+  - assumptions: array of strings (can be empty)
+  - confidence: number 0.0-1.0
+  - safe_note: string or null
+  - sections: array of section objects (see below)
+  - follow_ups: array of short follow-up questions (strings)
+  - exam_relevance: string (1–2 calm lines) or ""
 
-IMPORTANT OUTPUT RULES:
-- Return ONLY valid JSON (no markdown, no extra text).
-- Required keys:
-  title (string),
-  why_matters (string, one line),
-  explanation_sections (array of short strings, 3–10 items depending on mode),
-  visual (string; include a text-based diagram/flow/map when helpful, else empty string),
-  misconception (string; common mistake if relevant, else empty string),
-  concept_terms (array of key terms, 3–8 items),
-  confidence_label (string, optional; if included keep it like 'high'|'medium'|'low').
-- Never mention credits/tokens/costs/subscriptions.
+Section object format (frontend renders this):
+  - type: one of [header, answer, explanation, steps, example, diagram, practice, warning, note]
+  - title: string (optional)
+  - content: string (optional)
+  - steps: array of {number, content} (only for type=steps)
+  - diagram_code: string (optional, mermaid) OR visual_plan: string (optional)
+
+Rules:
+- Make Lite/Tutor/Mastery visibly different.
+- Visuals are thinking tools: include ONE visual_plan when it helps; do not hallucinate labels.
 """
 
     LANGUAGE_INSTRUCTIONS = {
@@ -807,15 +815,6 @@ IMPORTANT OUTPUT RULES:
                 language_instruction=lang_inst
             )
             return base + cls.OUTPUT_JSON_RULES
-        elif ctx.study_mode == "aihub":
-            base = cls.AIHUB_TEMPLATE.format(
-                class_level=ctx.class_level,
-                board=ctx.board,
-                subject=ctx.subject.title() if ctx.subject else "General",
-                mode_block=cls.mode_block(ctx),
-                language_instruction=lang_inst
-            )
-            return base + cls.AIHUB_OUTPUT_JSON_RULES
         else:
             base = cls.CHAT_TEMPLATE.format(
                 class_level=ctx.class_level,
@@ -931,65 +930,17 @@ def _safe_json_parse(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-
-
-def _validate_aihub_blueprint(obj: Dict[str, Any]) -> bool:
-    """Blueprint validator for AI Hub Learning Object."""
-    if not isinstance(obj, dict):
-        return False
-    title = str(obj.get("title") or "").strip()
-    why = str(obj.get("why_matters") or "").strip()
-    exp = obj.get("explanation_sections")
-    if not title or not why:
-        return False
-    if not isinstance(exp, list) or len([x for x in exp if str(x).strip()]) < 2:
-        return False
-    # visual/misconception can be empty; concept_terms can be empty but preferred
-    return True
-
-
-def _normalize_aihub_answer(obj: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize model JSON into AI Hub fields."""
-    title = str(obj.get("title") or obj.get("concept") or "Concept").strip()
-    why = str(obj.get("why_matters") or obj.get("why") or "").strip()
-    exp = obj.get("explanation_sections")
-    if not isinstance(exp, list):
-        exp = []
-    exp = [str(s).strip() for s in exp if str(s).strip()][:12]
-
-    visual = str(obj.get("visual") or "").strip()
-    misconception = str(obj.get("misconception") or "").strip()
-
-    terms = obj.get("concept_terms")
-    if not isinstance(terms, list):
-        terms = []
-    terms = [str(t).strip() for t in terms if str(t).strip()][:10]
-
-    conf = obj.get("confidence_label")
-    if conf is not None:
-        conf = str(conf).strip() or None
-
-    # Clamp to non-empty defaults
-    if not why:
-        why = "Helps you build the correct base idea."
-    if not exp:
-        exp = ["Start from the main idea, then apply it to this question."]
-    return {
-        "title": title or "Concept",
-        "why_matters": why,
-        "explanation_sections": exp,
-        "visual": visual,
-        "misconception": misconception,
-        "concept_terms": terms,
-        "confidence_label": conf
-    }
-
 def _normalize_structured_answer(obj: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize model JSON into our canonical keys."""
+    title = str(obj.get("title") or "").strip()
+    why = str(obj.get("why_this_matters") or "").strip()
     final_answer = str(obj.get("final_answer") or obj.get("answer") or "").strip()
     steps = obj.get("steps") or []
     assumptions = obj.get("assumptions") or []
     safe_note = obj.get("safe_note")
+    sections = obj.get("sections")
+    follow_ups = obj.get("follow_ups")
+    exam_relevance = str(obj.get("exam_relevance") or "").strip()
     confidence = obj.get("confidence")
 
     if not isinstance(steps, list):
@@ -1009,13 +960,41 @@ def _normalize_structured_answer(obj: Dict[str, Any]) -> Dict[str, Any]:
     if safe_note is not None:
         safe_note = str(safe_note).strip() or None
 
+    # Normalize sections for renderer
+    if not isinstance(sections, list):
+        sections = []
+    # Ensure at least a header + answer section if model forgot
+    if not sections:
+        hdr = {"type": "header", "title": title or "Answer"}
+        ans = {"type": "answer", "title": "Final Answer", "content": final_answer}
+        sections = [hdr, ans]
+        if why:
+            sections.append({"type": "note", "title": "Why this matters", "content": why})
+        if steps:
+            sections.append({
+                "type": "steps",
+                "title": "Steps",
+                "steps": [{"number": i + 1, "content": s} for i, s in enumerate(steps)]
+            })
+        if exam_relevance:
+            sections.append({"type": "note", "title": "Exam relevance", "content": exam_relevance})
+
+    if not isinstance(follow_ups, list):
+        follow_ups = []
+    follow_ups = [str(x).strip() for x in follow_ups if str(x).strip()][:8]
+
     return {
+        "title": title,
+        "why_this_matters": why,
         "final_answer": final_answer,
         "answer": final_answer,
         "steps": steps,
         "assumptions": assumptions,
         "confidence": conf,
         "safe_note": safe_note,
+        "sections": sections,
+        "follow_ups": follow_ups,
+        "exam_relevance": exam_relevance,
     }
 
 
@@ -1118,30 +1097,7 @@ class WorldClassOrchestrator:
             # Post-process: parse structured JSON, run verifier (paid/deep/exam)
             # ----------------------------------------------------------------
             structured = _safe_json_parse(result.get("answer", ""))
-            # AI Hub (Chat AI) blueprint path
-            if ctx.study_mode == "aihub":
-                if structured and _validate_aihub_blueprint(structured):
-                    norm = _normalize_aihub_answer(structured)
-                else:
-                    # One quick regeneration attempt with stricter reminder
-                    regen_prompt = user_prompt + "\n\nReturn ONLY valid JSON matching the required keys exactly."
-                    regen = await self._single_ai_call(providers[0], regen_prompt, system_prompt, timeout) if len(providers)==1 else await self._multi_ai_call(providers, regen_prompt, system_prompt, timeout)
-                    structured2 = _safe_json_parse(regen.get("answer", ""))
-                    if structured2 and _validate_aihub_blueprint(structured2):
-                        norm = _normalize_aihub_answer(structured2)
-                    else:
-                        # Fallback: wrap plain answer into blocks
-                        plain = str((structured or {}).get("final_answer") or result.get("answer", "") or "").strip()
-                        norm = {
-                            "title": "Answer",
-                            "why_matters": "Builds clarity and prevents mistakes.",
-                            "explanation_sections": [plain[:600]] if plain else ["Try asking the question again with one key detail."],
-                            "visual": "",
-                            "misconception": "",
-                            "concept_terms": [],
-                            "confidence_label": None
-                        }
-            elif structured:
+            if structured:
                 norm = _normalize_structured_answer(structured)
             else:
                 # Fallback if provider didn't follow JSON rules
@@ -1155,8 +1111,8 @@ class WorldClassOrchestrator:
                 }
 
             # Decide if this request needs verification (cost-aware)
-            exam_like = (ctx.answer_mode in ("exam",)) or (ctx.exam_mode in ("JEE", "NEET"))
-            deep_like = (ctx.answer_mode in ("deep", "exam"))
+            exam_like = (ctx.answer_mode in ("luma_mastery",)) or (ctx.exam_mode in ("JEE", "NEET"))
+            deep_like = (ctx.answer_mode in ("luma_tutor", "luma_mastery"))
             needs_verification = (
                 ctx.user_tier in ("pro", "max")
                 and (deep_like or exam_like or complexity != Complexity.SIMPLE)
@@ -1203,6 +1159,9 @@ class WorldClassOrchestrator:
             result["assumptions"] = norm.get("assumptions")
             result["confidence"] = norm.get("confidence")
             result["safe_note"] = norm.get("safe_note")
+            result["sections"] = norm.get("sections")
+            result["follow_ups"] = norm.get("follow_ups")
+            result["exam_relevance"] = norm.get("exam_relevance")
             result["verified"] = verified
             if verifier_provider:
                 result["verifier_provider"] = verifier_provider
@@ -1216,9 +1175,10 @@ class WorldClassOrchestrator:
                 strategy = f"{strategy}_verified"
             cost = ResponseFormatter.estimate_cost(result.get("tokens", 0), result.get("providers_used", providers[:1]))
             
-            # Create premium sections for Luma mode
-            sections = None
-            if ctx.study_mode == "luma" and result.get("success"):
+            # Prefer model-provided structured sections (works for Chat + Luma)
+            sections = result.get("sections") if isinstance(result.get("sections"), list) else None
+            if not sections and ctx.study_mode == "luma" and result.get("success"):
+                # Backward-compatible fallback (older models / provider failures)
                 sections = ResponseFormatter.create_premium_sections(result.get("answer", ""), ctx)
             
             # Build response
