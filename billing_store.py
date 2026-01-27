@@ -190,9 +190,6 @@ def get_wallet(user_id: int, plan: str) -> Dict[str, Any]:
             "included_total": int(allowance),
             "included_remaining": int(included_balance),
             "booster_remaining": int(booster_balance),
-            # Convenience: total remaining credits (included + booster)
-            "remaining": int(included_balance) + int(booster_balance),
-            "credits_left": int(included_balance) + int(booster_balance),
             "resets_on": cycle_end,
         }
     if eng is None:
