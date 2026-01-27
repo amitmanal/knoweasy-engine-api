@@ -147,3 +147,47 @@ class SolveResponse(BaseModel):
     flags: List[str] = []
     safe_note: Optional[str] = None
     meta: dict = {}
+
+
+# ============================================================================
+# AI HUB (Chat AI) — Structured Learning Object response (v1)
+# ============================================================================
+
+AIHubMode = Literal["lite", "tutor", "mastery"]
+AIHubLanguage = Literal["auto", "en", "hi", "mr"]
+
+class AIHubFile(BaseModel):
+    name: str = Field(default="", max_length=200)
+    mime: str = Field(default="", max_length=120)
+    b64: str = Field(default="", max_length=5_000_000)
+
+class AIHubAttachments(BaseModel):
+    image: Optional[AIHubFile] = None
+    pdf: Optional[AIHubFile] = None
+
+class AIHubClientMeta(BaseModel):
+    tz: Optional[str] = None
+    ua: Optional[str] = None
+
+class AIHubRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=6000)
+    mode: AIHubMode = "tutor"
+    language: AIHubLanguage = "auto"
+    attachments: Optional[AIHubAttachments] = None
+    client: Optional[AIHubClientMeta] = None
+
+    @field_validator("question")
+    @classmethod
+    def _clean_question_aihub(cls, v: str):
+        v = _clean_text(v)
+        return v
+
+class AIHubResponse(BaseModel):
+    title: str
+    why_matters: str
+    explanation_sections: List[str] = Field(default_factory=list)
+    visual: str = ""
+    misconception: str = ""
+    concept_terms: List[str] = Field(default_factory=list)
+    # internal-only, may be logged but frontend doesn't need it
+    confidence_label: Optional[str] = None

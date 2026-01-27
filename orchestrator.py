@@ -747,6 +747,19 @@ Rules:
 
 {language_instruction}"""
 
+    # AI Hub: calm, card/block learning objects (no credit talk)
+    AIHUB_TEMPLATE = """You are KnowEasy AI — a calm, premium teacher for Indian students.
+
+You must produce a structured Learning Object as JSON blocks.
+- No class/board/subject selectors in the UI; infer gently if needed.
+- Never mention credits, tokens, costs, or internal billing.
+- Keep tone teacher-like, calm, and trustworthy.
+
+📋 Context (best-effort): Class {class_level} {board}, {subject}
+{mode_block}
+
+{language_instruction}"""
+
     # Strict JSON output so the frontend/back-end can reliably show steps, confidence, and safe notes.
     OUTPUT_JSON_RULES = """
 
@@ -754,6 +767,21 @@ IMPORTANT OUTPUT RULES:
 - Return ONLY valid JSON (no markdown, no extra text).
 - Required keys: final_answer (string), steps (array of strings), assumptions (array of strings), confidence (number 0.0-1.0), safe_note (string or null).
 - Keep steps short and exam-safe. If the question is simple, steps may be an empty array.
+"""
+
+    AIHUB_OUTPUT_JSON_RULES = """
+
+IMPORTANT OUTPUT RULES:
+- Return ONLY valid JSON (no markdown, no extra text).
+- Required keys:
+  title (string),
+  why_matters (string, one line),
+  explanation_sections (array of short strings, 3–10 items depending on mode),
+  visual (string; include a text-based diagram/flow/map when helpful, else empty string),
+  misconception (string; common mistake if relevant, else empty string),
+  concept_terms (array of key terms, 3–8 items),
+  confidence_label (string, optional; if included keep it like 'high'|'medium'|'low').
+- Never mention credits/tokens/costs/subscriptions.
 """
 
     LANGUAGE_INSTRUCTIONS = {
@@ -779,6 +807,15 @@ IMPORTANT OUTPUT RULES:
                 language_instruction=lang_inst
             )
             return base + cls.OUTPUT_JSON_RULES
+        elif ctx.study_mode == "aihub":
+            base = cls.AIHUB_TEMPLATE.format(
+                class_level=ctx.class_level,
+                board=ctx.board,
+                subject=ctx.subject.title() if ctx.subject else "General",
+                mode_block=cls.mode_block(ctx),
+                language_instruction=lang_inst
+            )
+            return base + cls.AIHUB_OUTPUT_JSON_RULES
         else:
             base = cls.CHAT_TEMPLATE.format(
                 class_level=ctx.class_level,
@@ -893,6 +930,59 @@ def _safe_json_parse(text: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+
+
+
+def _validate_aihub_blueprint(obj: Dict[str, Any]) -> bool:
+    """Blueprint validator for AI Hub Learning Object."""
+    if not isinstance(obj, dict):
+        return False
+    title = str(obj.get("title") or "").strip()
+    why = str(obj.get("why_matters") or "").strip()
+    exp = obj.get("explanation_sections")
+    if not title or not why:
+        return False
+    if not isinstance(exp, list) or len([x for x in exp if str(x).strip()]) < 2:
+        return False
+    # visual/misconception can be empty; concept_terms can be empty but preferred
+    return True
+
+
+def _normalize_aihub_answer(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize model JSON into AI Hub fields."""
+    title = str(obj.get("title") or obj.get("concept") or "Concept").strip()
+    why = str(obj.get("why_matters") or obj.get("why") or "").strip()
+    exp = obj.get("explanation_sections")
+    if not isinstance(exp, list):
+        exp = []
+    exp = [str(s).strip() for s in exp if str(s).strip()][:12]
+
+    visual = str(obj.get("visual") or "").strip()
+    misconception = str(obj.get("misconception") or "").strip()
+
+    terms = obj.get("concept_terms")
+    if not isinstance(terms, list):
+        terms = []
+    terms = [str(t).strip() for t in terms if str(t).strip()][:10]
+
+    conf = obj.get("confidence_label")
+    if conf is not None:
+        conf = str(conf).strip() or None
+
+    # Clamp to non-empty defaults
+    if not why:
+        why = "Helps you build the correct base idea."
+    if not exp:
+        exp = ["Start from the main idea, then apply it to this question."]
+    return {
+        "title": title or "Concept",
+        "why_matters": why,
+        "explanation_sections": exp,
+        "visual": visual,
+        "misconception": misconception,
+        "concept_terms": terms,
+        "confidence_label": conf
+    }
 
 def _normalize_structured_answer(obj: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize model JSON into our canonical keys."""
@@ -1028,7 +1118,30 @@ class WorldClassOrchestrator:
             # Post-process: parse structured JSON, run verifier (paid/deep/exam)
             # ----------------------------------------------------------------
             structured = _safe_json_parse(result.get("answer", ""))
-            if structured:
+            # AI Hub (Chat AI) blueprint path
+            if ctx.study_mode == "aihub":
+                if structured and _validate_aihub_blueprint(structured):
+                    norm = _normalize_aihub_answer(structured)
+                else:
+                    # One quick regeneration attempt with stricter reminder
+                    regen_prompt = user_prompt + "\n\nReturn ONLY valid JSON matching the required keys exactly."
+                    regen = await self._single_ai_call(providers[0], regen_prompt, system_prompt, timeout) if len(providers)==1 else await self._multi_ai_call(providers, regen_prompt, system_prompt, timeout)
+                    structured2 = _safe_json_parse(regen.get("answer", ""))
+                    if structured2 and _validate_aihub_blueprint(structured2):
+                        norm = _normalize_aihub_answer(structured2)
+                    else:
+                        # Fallback: wrap plain answer into blocks
+                        plain = str((structured or {}).get("final_answer") or result.get("answer", "") or "").strip()
+                        norm = {
+                            "title": "Answer",
+                            "why_matters": "Builds clarity and prevents mistakes.",
+                            "explanation_sections": [plain[:600]] if plain else ["Try asking the question again with one key detail."],
+                            "visual": "",
+                            "misconception": "",
+                            "concept_terms": [],
+                            "confidence_label": None
+                        }
+            elif structured:
                 norm = _normalize_structured_answer(structured)
             else:
                 # Fallback if provider didn't follow JSON rules

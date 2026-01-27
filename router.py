@@ -27,7 +27,7 @@ from config import (
     GEMINI_PRIMARY_MODEL,
     OPENAI_MODEL,
 )
-from schemas import SolveRequest, SolveResponse
+from schemas import SolveRequest, SolveResponse, AIHubRequest, AIHubResponse
 from orchestrator import solve, get_orchestrator_stats
 from db import db_log_solve, db_log_ai_usage
 
@@ -651,3 +651,80 @@ async def ai_stats():
         return {"status": "ok", "stats": stats}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+# ============================================================================
+# AI HUB SOLVE ENDPOINT (Chat AI) — Structured cards/blocks (v1)
+# ============================================================================
+
+@router.post("/aihub/solve", response_model=AIHubResponse)
+async def aihub_solve_route(
+    req: AIHubRequest,
+    request: Request,
+    x_ke_key: str | None = Header(default=None, alias="X-KE-KEY"),
+):
+    """AI Hub solve: no selectors; returns Learning Object blocks."""
+
+    # API key gate (same as /solve)
+    if KE_API_KEY and x_ke_key and x_ke_key != KE_API_KEY:
+        return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
+
+    # Identify user tier from auth token (best-effort; do not block if missing)
+    user = None
+    try:
+        # router.py already uses helper in auth_store via session_user in /solve path
+        # but we keep this endpoint stable without requiring auth.
+        pass
+    except Exception:
+        user = None
+
+    # Cache key must include mode+language to avoid mode-collapsing
+    try:
+        mode = str(req.mode)
+        lang = str(req.language)
+        q = req.question
+        cache_key = "aihub:" + hashlib.sha256((q + "|" + mode + "|" + lang).encode("utf-8")).hexdigest()
+        cached = redis_get_json(cache_key)
+        if cached:
+            return cached
+    except Exception:
+        cache_key = None
+
+    # Map modes to orchestrator answer_mode
+    mode_map = {"lite": "quick", "tutor": "deep", "mastery": "exam"}
+    answer_mode = mode_map.get(str(req.mode), "deep")
+
+    # Minimal context (no board/class selectors). Orchestrator will still be safe.
+    context = {
+        "study_mode": "aihub",
+        "mode": answer_mode,
+        "language": "en" if req.language == "auto" else req.language,
+        "board": "CBSE",
+        "class_level": "11",
+        "subject": "",
+        "exam_mode": "BOARD",
+    }
+
+    # If the user is logged in, /solve_route already has logic to fetch profile;
+    # For aihub we keep it best-effort and safe. Future: enrich from /auth/me.
+    result = await solve(req.question, context, user_tier="free")
+
+    # result is already normalized in orchestrator for aihub to {title,...}
+    out = {
+        "title": result.get("title", "Concept"),
+        "why_matters": result.get("why_matters", "Builds clarity and prevents mistakes."),
+        "explanation_sections": result.get("explanation_sections", []) or [],
+        "visual": result.get("visual", "") or "",
+        "misconception": result.get("misconception", "") or "",
+        "concept_terms": result.get("concept_terms", []) or [],
+        "confidence_label": result.get("confidence_label", None),
+    }
+
+    # Cache response
+    try:
+        if cache_key:
+            redis_setex_json(cache_key, SOLVE_CACHE_TTL_SECONDS, out)
+    except Exception:
+        pass
+
+    return out
