@@ -29,6 +29,10 @@ from anthropic import AsyncAnthropic
 import logging
 from datetime import datetime, timedelta
 
+# Import helper to build structured answers
+from learning_object import build_answer_object
+from ai_router import generate_json
+
 # ============================================================================
 # LOGGING SETUP
 # ============================================================================
@@ -1312,3 +1316,84 @@ async def solve_question(question: str, context: Dict, user_tier: str = "free") 
 def get_orchestrator_stats() -> Dict:
     """Get orchestrator statistics for monitoring"""
     return orchestrator.get_stats()
+
+
+# ============================================================================
+# LEARNING ANSWER GENERATION
+# ============================================================================
+
+def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:
+    """Generate a structured AnswerObject for a user question.
+
+    This helper wraps the standard AI generation pipeline and produces an
+    AnswerObject via the learning_object module.  It first attempts to
+    produce a raw answer using the AI providers configured in ai_router.
+    If all providers fail or network is unavailable, it falls back to
+    a generic explanatory response to ensure the user always receives
+    a useful learning card.
+
+    Args:
+        ctx: A fully-populated RequestContext describing the user's
+            question, board, class, subject, language, and desired mode.
+
+    Returns:
+        Dict representation of an AnswerObject.
+    """
+    question = ctx.question or ""
+    raw_answer: str = ""
+    # Build a prompt instructing providers to return a plain answer only.
+    prompt = f"Answer the following question clearly and concisely.\nQuestion: {question}\nAnswer:"
+    try:
+        # Attempt to call configured providers via ai_router.
+        result = generate_json(prompt)
+        # Some providers return {"answer": "..."} while others may just return text.
+        if isinstance(result, dict):
+            raw_answer = result.get("answer") or result.get("final_answer") or ""
+            # Fallback to string conversion of dict if needed
+            if not raw_answer:
+                raw_answer = str(result)
+        else:
+            raw_answer = str(result)
+    except Exception as e:
+        logger.warning("generate_learning_answer: AI generation failed: %s", e)
+        # Provide a simple placeholder answer when providers fail.
+        raw_answer = "I’m sorry, I can’t fetch the answer right now. Here is a brief explanation based on the question itself."
+        if question:
+            raw_answer += f"\nThe question asks: {question}. Unfortunately no AI provider responded, so please consider reviewing your textbooks or notes on this topic."
+
+    # If raw_answer is empty, supply a fallback based on the question
+    if not raw_answer:
+        if question:
+            raw_answer = f"This answer is currently unavailable. Please revisit the chapter related to: {question}."
+        else:
+            raw_answer = "No answer available at this time."
+
+    # Adjust raw_answer based on mode (lite, tutor, mastery) and study_mode
+    # Split answer into paragraphs
+    paragraphs = [p.strip() for p in raw_answer.split("\n") if p.strip()]
+    # Determine how many paragraphs to keep
+    mode = (ctx.answer_mode or "lite").lower()
+    study_mode = (ctx.study_mode or "chat").lower()
+    max_paragraphs = len(paragraphs)  # default: full answer
+    if mode == "lite":
+        max_paragraphs = 1  # Keep only the first paragraph for fastest clarity
+    elif mode == "tutor":
+        max_paragraphs = min(2, len(paragraphs))  # Up to two paragraphs for step-by-step
+    elif mode == "mastery":
+        max_paragraphs = len(paragraphs)  # Full answer
+    # Additional adjustment: Luma study mode should be more concise even for tutor
+    if study_mode == "luma" and max_paragraphs > 2:
+        max_paragraphs = 2
+    # Reconstruct trimmed answer
+    trimmed_answer = "\n".join(paragraphs[:max_paragraphs]) if paragraphs else raw_answer
+    # Build the answer object using heuristics
+    # Pass board and class_level to build_answer_object for improved exam relevance
+    answer_obj = build_answer_object(
+        question,
+        trimmed_answer,
+        language=ctx.language or "en",
+        mode=ctx.answer_mode or "lite",
+        board=ctx.board,
+        class_level=ctx.class_level,
+    )
+    return answer_obj.to_dict()
