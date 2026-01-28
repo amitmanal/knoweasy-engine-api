@@ -162,7 +162,6 @@ def _cache_key(payload: dict) -> str:
         "subject": (payload.get("subject") or "").strip().lower(),
         "chapter": (payload.get("chapter") or "").strip().lower(),
         "exam_mode": str(payload.get("exam_mode") or "").strip().upper(),
-        "answer_mode": _normalize_answer_mode(payload.get("answer_mode") or payload.get("mode") or ""),
         "language": (payload.get("language") or "en").strip().lower(),
         "study_mode": (payload.get("study_mode") or "chat").strip().lower(),
         "question": (payload.get("question") or "").strip(),

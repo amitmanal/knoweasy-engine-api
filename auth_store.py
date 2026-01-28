@@ -86,12 +86,6 @@ def ensure_tables() -> None:
         );
         """,
         """
-        ALTER TABLE otp_codes ADD COLUMN IF NOT EXISTS sent_ok BOOLEAN NOT NULL DEFAULT TRUE;
-        """,
-        """
-        ALTER TABLE otp_codes ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
-        """,
-        """
         CREATE TABLE IF NOT EXISTS sessions (
             id SERIAL PRIMARY KEY,
             user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -119,7 +113,7 @@ def ensure_tables() -> None:
 OTP_EXPIRES_MIN = 10
 OTP_RESEND_COOLDOWN_SEC = 30
 OTP_SEND_LIMIT_WINDOW_MIN = 15
-OTP_SEND_LIMIT_COUNT = 6
+OTP_SEND_LIMIT_COUNT = 3
 OTP_MAX_ATTEMPTS = 5
 OTP_LOCK_MIN = 10
 
@@ -137,7 +131,7 @@ def otp_can_send(email: str, role: str) -> Tuple[bool, int]:
             text("""
                 SELECT created_at
                 FROM otp_codes
-                WHERE email=:email AND role=:role AND sent_ok=TRUE
+                WHERE email=:email AND role=:role
                 ORDER BY created_at DESC
                 LIMIT 1
             """),
@@ -159,7 +153,7 @@ def otp_can_send(email: str, role: str) -> Tuple[bool, int]:
             text("""
                 SELECT COUNT(*) AS c
                 FROM otp_codes
-                WHERE email=:email AND role=:role AND sent_ok=TRUE AND created_at >= :window_start
+                WHERE email=:email AND role=:role AND created_at >= :window_start
             """),
             {"email": email, "role": role, "window_start": window_start},
         ).mappings().first()["c"]
@@ -179,10 +173,10 @@ def store_otp(email: str, role: str, otp_hash: str) -> None:
     with eng.begin() as conn:
         conn.execute(
             text("""
-                INSERT INTO otp_codes(email, role, otp_hash, expires_at, created_at, sent_ok, sent_at)
-                VALUES (:email, :role, :otp_hash, :expires_at, :created_at, TRUE, :sent_at)
+                INSERT INTO otp_codes(email, role, otp_hash, expires_at)
+                VALUES (:email, :role, :otp_hash, :expires_at)
             """),
-            {"email": email, "role": role, "otp_hash": otp_hash, "expires_at": expires_at, "created_at": now, "sent_at": now},
+            {"email": email, "role": role, "otp_hash": otp_hash, "expires_at": expires_at},
         )
 
 def _latest_otp_row(conn, email: str, role: str) -> Optional[Dict[str, Any]]:
@@ -190,7 +184,7 @@ def _latest_otp_row(conn, email: str, role: str) -> Optional[Dict[str, Any]]:
         text("""
             SELECT id, otp_hash, expires_at, attempts, created_at
             FROM otp_codes
-            WHERE email=:email AND role=:role AND sent_ok=TRUE
+            WHERE email=:email AND role=:role
             ORDER BY created_at DESC
             LIMIT 1
         """),
@@ -258,7 +252,7 @@ def get_or_create_user(email: str, role: str) -> Tuple[int, bool]:
 
     with eng.begin() as conn:
         row = conn.execute(
-            text("""SELECT id FROM users WHERE email=:email AND role=:role AND sent_ok=TRUE"""),
+            text("""SELECT id FROM users WHERE email=:email AND role=:role"""),
             {"email": email, "role": role},
         ).mappings().first()
         if row:

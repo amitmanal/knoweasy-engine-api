@@ -53,15 +53,13 @@ def request_otp(payload: RequestOtpIn, request: Request):
         return JSONResponse(status_code=503, content={"ok": False, "message": "Email sender not configured (missing Resend/SMTP env vars).", "cooldown_seconds": 0})
 
     otp_plain, otp_hash = new_otp_code()
+    store_otp(email, role, otp_hash)
 
     try:
         logger.info(f"[RID:{rid}] Sending OTP email. to={_mask_email(email)} role={role} provider={email_provider_debug().get('provider')}")
         send_otp_email(to_email=email, otp=otp_plain)
-        # Store OTP only after email send succeeds, so users are not locked out if email fails.
-        store_otp(email, role, otp_hash)
         logger.info(f"[RID:{rid}] OTP email send triggered")
     except Exception as e:
-
         logger.exception(f"[RID:{rid}] Failed to send OTP email: {e}")
         return JSONResponse(status_code=500, content={"ok": False, "message": "Failed to send OTP. Please try again.", "cooldown_seconds": 0})
 
