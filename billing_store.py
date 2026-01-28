@@ -27,9 +27,6 @@ import payments_store
 
 logger = logging.getLogger("knoweasy-engine-api.billing")
 
-# Cache: avoid running DDL on every request per process.
-_TABLES_ENSURED: bool = False
-
 
 # -----------------------------
 # Plan credit allowances (v1)
@@ -74,9 +71,6 @@ def _cycle_length_days() -> int:
 
 def ensure_tables() -> None:
     """Ensure billing tables exist (best-effort)."""
-    global _TABLES_ENSURED
-    if _TABLES_ENSURED:
-        return
     eng = payments_store.get_engine_safe()
     if eng is None:
         return
@@ -136,8 +130,7 @@ def ensure_tables() -> None:
                 conn.execute(text(stmt))
             for stmt in repairs:
                 try:
-                    with conn.begin_nested():
-                        conn.execute(text(stmt))
+                    conn.execute(text(stmt))
                 except Exception:
                     logger.debug("billing_store schema repair skipped: %s", stmt, exc_info=True)
 
@@ -161,7 +154,6 @@ def ensure_tables() -> None:
                     ),
                     {"sku": sku, "units": int(units), "price": int(price)},
                 )
-        _TABLES_ENSURED = True
     except Exception:
         logger.exception("billing_store.ensure_tables failed (non-fatal)")
 
@@ -170,34 +162,15 @@ def get_wallet(user_id: int, plan: str) -> Dict[str, Any]:
     """Return wallet; auto-create and auto-reset cycle if needed."""
     ensure_tables()
     eng = payments_store.get_engine_safe()
-
-    def _wallet_payload(included_balance: int, booster_balance: int, cycle_start, cycle_end, allowance: int) -> Dict[str, Any]:
-        """Return a backward+forward compatible wallet payload.
-
-        Frontend compatibility:
-        - Newer UI reads *_credits_balance + cycle_* fields.
-        - Older UI expects included_total / included_remaining / booster_remaining / resets_on.
-        We return both so we can evolve the UI without breaking production.
-        """
-        return {
-            # Canonical v1 fields
-            "included_credits_balance": int(included_balance),
-            "booster_credits_balance": int(booster_balance),
-            "cycle_start_at": cycle_start,
-            "cycle_end_at": cycle_end,
-
-            # Back-compat convenience fields
-            "included_total": int(allowance),
-            "included_remaining": int(included_balance),
-            "booster_remaining": int(booster_balance),
-            "resets_on": cycle_end,
-        }
     if eng is None:
         # safe defaults when DB missing
         allowance = _included_allowance(plan)
-        cs = _now_utc()
-        ce = cs + timedelta(days=_cycle_length_days())
-        return _wallet_payload(allowance, 0, cs, ce, allowance)
+        return {
+            "included_credits_balance": allowance,
+            "booster_credits_balance": 0,
+            "cycle_start_at": _now_utc(),
+            "cycle_end_at": _now_utc() + timedelta(days=_cycle_length_days()),
+        }
 
     now = _now_utc()
     cycle_days = _cycle_length_days()
@@ -231,7 +204,12 @@ def get_wallet(user_id: int, plan: str) -> Dict[str, Any]:
                     {"user_id": int(user_id), "included": int(allowance), "cs": cycle_start, "ce": cycle_end},
                 )
                 _append_ledger(conn, user_id, "reset", "plan", int(allowance), int(allowance), 0, {"reason": "wallet_created"})
-                return _wallet_payload(int(allowance), 0, cycle_start, cycle_end, allowance)
+                return {
+                    "included_credits_balance": int(allowance),
+                    "booster_credits_balance": 0,
+                    "cycle_start_at": cycle_start,
+                    "cycle_end_at": cycle_end,
+                }
 
             included = int(row.get("included_credits_balance") or 0)
             booster = int(row.get("booster_credits_balance") or 0)
@@ -263,15 +241,28 @@ def get_wallet(user_id: int, plan: str) -> Dict[str, Any]:
                     {"user_id": int(user_id), "included": int(included), "cs": cycle_start, "ce": cycle_end},
                 )
                 _append_ledger(conn, user_id, "reset", "plan", int(included), int(included), int(booster), {"reason": "cycle_reset"})
-                return _wallet_payload(int(included), int(booster), cycle_start, cycle_end, allowance)
+                return {
+                    "included_credits_balance": int(included),
+                    "booster_credits_balance": int(booster),
+                    "cycle_start_at": cycle_start,
+                    "cycle_end_at": cycle_end,
+                }
 
-            return _wallet_payload(int(included), int(booster), cs, ce, allowance)
+            return {
+                "included_credits_balance": int(included),
+                "booster_credits_balance": int(booster),
+                "cycle_start_at": cs,
+                "cycle_end_at": ce,
+            }
 
     except Exception:
         logger.exception("get_wallet failed")
-        cs = now
-        ce = now + timedelta(days=cycle_days)
-        return _wallet_payload(allowance, 0, cs, ce, allowance)
+        return {
+            "included_credits_balance": allowance,
+            "booster_credits_balance": 0,
+            "cycle_start_at": now,
+            "cycle_end_at": now + timedelta(days=cycle_days),
+        }
 
 
 def consume_credits(user_id: int, plan: str, units: int, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

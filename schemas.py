@@ -46,35 +46,8 @@ def _normalize_class(v) -> int:
     return n
 
 
-
-class LumaContext(BaseModel):
-    section: Optional[str] = Field(None, max_length=160, description="Current Luma section title")
-    card_type: Optional[str] = Field(None, max_length=40, description="Current Luma card type")
-    visible_text: Optional[str] = Field(
-        None,
-        max_length=1400,
-        description="Best-effort visible text from the current card (sanitized, truncated).",
-    )
-
-    @field_validator("section", "card_type", "visible_text", mode="before")
-    @classmethod
-    def _clean_optional(cls, v):
-        if v is None:
-            return None
-        s = _clean_text(str(v))
-        return s or None
-
-
 class SolveRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=4000)
-
-    # Optional idempotency key (trust-safe retries). If provided, backend will
-    # ensure the same request_id returns the same response without double-charging.
-    request_id: Optional[str] = Field(
-        None,
-        max_length=80,
-        description="Client-generated idempotency key for retries (UUID recommended).",
-    )
 
     # ✅ Accept BOTH keys:
     # - "class"      (official API)
@@ -95,27 +68,8 @@ class SolveRequest(BaseModel):
         description="one_liner / cbse_board / step_by_step / hint_only",
     )
 
-    # Luma Focused Assist (optional). If provided, orchestrator can keep answers short
-    # and strictly contextual to the current lesson card.
-    study_mode: Optional[str] = Field(None, max_length=40, description="e.g. 'luma'")
-    mode: Optional[str] = Field(None, max_length=40, description="e.g. 'focused_assist'")
-    context: Optional[LumaContext] = Field(None, description="Context for focused assist")
-
     # Ignore extra fields for forward-compat (stability)
     model_config = {"extra": "ignore"}
-
-    @field_validator("request_id", mode="before")
-    @classmethod
-    def validate_request_id(cls, v):
-        if v is None:
-            return None
-        v = _clean_text(str(v))
-        if not v:
-            return None
-        # Keep this strict but not fragile (no regex hard requirement).
-        if len(v) > 80:
-            return v[:80]
-        return v
 
     @field_validator("class_")
     @classmethod

@@ -106,18 +106,6 @@ def student_profile(payload: Dict[str, Any], u: Dict[str, Any] = Depends(require
     return {"ok": True, "profile": prof}
 
 
-
-@router.get("/student/profile")
-def student_profile_get(u: Dict[str, Any] = Depends(require_role("student"))):
-    """Return the current student's saved profile (if any).
-
-    This enables Google-premium UX:
-    - Me page can hydrate the latest name from server
-    - Parent dashboard always reflects latest saved identity
-    """
-    prof = phase1_store.get_student_profile(user_id=_uid(u))
-    return {"ok": True, "profile": prof}
-
 # -----------------------------------------------------------------------------
 # Student → generate link code for parent (Phase‑1 persistent parent dashboard)
 # -----------------------------------------------------------------------------

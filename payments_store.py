@@ -74,7 +74,7 @@ def ensure_tables() -> None:
 
     eng = _get_engine()
     if eng is None:
-        # DB not ready yet (or env missing). Do NOT lock this forever; allow retry on next call.
+        _TABLES_READY = True
         return
 
     ddl = [
@@ -165,7 +165,7 @@ def get_subscription(user_id: int) -> Dict[str, Any]:
             row = conn.execute(
                 text(
                     """
-                    SELECT plan, billing_cycle, status, starts_at, expires_at, created_at
+                    SELECT plan, billing_cycle, status, expires_at
                     FROM subscriptions
                     WHERE user_id=:user_id
                     LIMIT 1
@@ -187,8 +187,6 @@ def get_subscription(user_id: int) -> Dict[str, Any]:
                 "plan": row.get("plan") or "free",
                 "billing_cycle": row.get("billing_cycle"),
                 "status": row.get("status") or "active",
-                "starts_at": row.get("starts_at"),
-                "created_at": row.get("created_at"),
                 "expires_at": expires_at,
             }
     except Exception:
@@ -197,49 +195,11 @@ def get_subscription(user_id: int) -> Dict[str, Any]:
 
 
 def upsert_subscription(user_id: int, plan: str, duration_days: int, billing_cycle: str | None = None) -> Dict[str, Any]:
-    """Activate or extend a subscription.
-
-    Trust-first rule:
-    - If the user already has an active subscription that hasn't expired,
-      a new purchase EXTENDS from the current expiry (does not reset/shorten).
-    - If the existing subscription is expired/missing, start from "now".
-
-    This prevents accidental loss of remaining time when switching cycles
-    (Monthly ↔ Yearly) or upgrading.
-    """
+    """Activate subscription for duration_days from now."""
     ensure_tables()
     eng = _get_engine()
-
-    now = datetime.now(timezone.utc)
-    base_start = now
-
-    # If DB is available, extend from the later of (now, current expires_at).
-    if eng is not None:
-        try:
-            with eng.begin() as conn:
-                row = conn.execute(
-                    text(
-                        """
-                        SELECT expires_at
-                        FROM subscriptions
-                        WHERE user_id=:user_id
-                        LIMIT 1
-                        """
-                    ),
-                    {"user_id": int(user_id)},
-                ).mappings().first()
-                cur_exp = row.get("expires_at") if row else None
-                if cur_exp is not None:
-                    if cur_exp.tzinfo is None:
-                        cur_exp = cur_exp.replace(tzinfo=timezone.utc)
-                    if cur_exp > now:
-                        base_start = cur_exp
-        except Exception:
-            # Non-fatal: fall back to "now".
-            logger.exception("upsert_subscription: failed to read current expiry")
-
-    starts_at = now
-    expires_at = base_start + timedelta(days=int(duration_days))
+    starts_at = datetime.now(timezone.utc)
+    expires_at = starts_at + timedelta(days=int(duration_days))
 
     if eng is None:
         return {"plan": plan, "billing_cycle": billing_cycle, "status": "active", "expires_at": expires_at}
@@ -394,39 +354,3 @@ def get_order_record(user_id: int, order_id: str) -> Optional[Dict[str, Any]]:
     except Exception:
         logger.exception("get_order_record failed")
         return None
-
-
-def list_payments(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
-    """List recent payment records for a user (newest first)."""
-    ensure_tables()
-    eng = _get_engine()
-    if eng is None:
-        return []
-    try:
-        with eng.begin() as conn:
-            rows = conn.execute(
-                text(
-                    """
-                    SELECT
-                        created_at,
-                        plan,
-                        payment_type,
-                        billing_cycle,
-                        booster_sku,
-                        amount_paise,
-                        currency,
-                        status,
-                        razorpay_order_id,
-                        razorpay_payment_id
-                    FROM payments
-                    WHERE user_id = :user_id
-                    ORDER BY created_at DESC
-                    LIMIT :limit
-                    """
-                ),
-                {"user_id": int(user_id), "limit": int(limit)},
-            ).mappings().all()
-            return [dict(r) for r in rows]
-    except Exception:
-        logger.exception("list_payments failed")
-        return []

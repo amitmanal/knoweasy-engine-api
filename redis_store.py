@@ -65,27 +65,10 @@ def setex_json(key: str, ttl_seconds: int, value: Dict[str, Any]) -> bool:
     if not r:
         return False
     try:
-        r.setex(key, int(ttl_seconds), json.dumps(value, ensure_ascii=False))
+        r.setex(key, ttl_seconds, json.dumps(value, ensure_ascii=False))
         return True
     except Exception as e:
         logger.warning("Redis setex_json failed: %s", e)
-        return False
-
-
-def setnx_ex(key: str, ttl_seconds: int, value: str = "1") -> bool:
-    """SET key value NX EX ttl_seconds.
-
-    Returns True if the key was set (lock acquired), False otherwise.
-    Best-effort: returns False if Redis is disabled/fails.
-    """
-    r = get_redis()
-    if not r:
-        return False
-    try:
-        ok = r.set(key, value, nx=True, ex=int(ttl_seconds))
-        return bool(ok)
-    except Exception as e:
-        logger.warning("Redis setnx_ex failed: %s", e)
         return False
 
 

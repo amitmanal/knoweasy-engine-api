@@ -473,6 +473,7 @@ def upsert_student_profile(
         return prof
 
     ensure_tables()
+    import json
 
     def _parse_meta(v):
         """Parse event metadata stored as JSON string in `meta_json`."""
