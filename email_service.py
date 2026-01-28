@@ -161,12 +161,20 @@ def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
         "html": html,
     }
     data = json.dumps(payload).encode("utf-8")
+    # Build a request to Resend API. Add additional headers to look more like a browser
+    # to avoid Cloudflare blocks (HTTP 403 code 1010). The User-Agent header helps
+    # ensure the request is treated like a typical browser rather than a bot.
     req = request.Request(
         RESEND_ENDPOINT,
         data=data,
         headers={
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json",
+            # A typical browser User-Agent string can help bypass Cloudflare 1010 errors.
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+            # Accept all content types; Resend returns JSON.
+            "Accept": "*/*",
         },
         method="POST",
     )
