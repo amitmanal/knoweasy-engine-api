@@ -195,24 +195,71 @@ def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
 
 
 def send_otp_email(to_email: str, otp: str, minutes_valid: int = 10) -> None:
-    """Send an OTP email. Raises RuntimeError on failure."""
-    provider = _choose_provider()
-    if provider == "none":
+    """Send an OTP email. Tries the configured provider first and falls back to the other provider if possible.
+
+    This function chooses the provider (Resend or SMTP) based on configuration. If sending via the primary provider
+    fails (for example due to a network or configuration issue), it will automatically attempt to send via the
+    secondary provider if it is configured. This improves reliability in environments where one provider may be
+    temporarily unavailable or misconfigured.
+
+    Raises:
+        RuntimeError: If no email providers are configured or all attempts to send fail.
+    """
+    # Determine which provider to try first based on the configured preference. If no provider is configured,
+    # _choose_provider() will return "none".
+    preferred_provider = _choose_provider()
+    if preferred_provider == "none":
         raise RuntimeError(
             "Email is not configured. Set EMAIL_PROVIDER and either RESEND_API_KEY+EMAIL_FROM (Resend) "
-            "or SMTP_HOST/SMTP_USER/SMTP_PASS/EMAIL_FROM (SMTP)."  # noqa: E501
+            "or SMTP_HOST/SMTP_USER/SMTP_PASS/EMAIL_FROM (SMTP)."
         )
 
+    # Build the email content outside the provider loop because this is deterministic.
     subject, text, html = _build_otp_content(otp=otp, minutes_valid=minutes_valid)
 
-    if provider == "resend":
-        _send_via_resend(to_email, subject, text, html)
-        return
-    if provider == "smtp":
-        _send_via_smtp(to_email, subject, text, html)
-        return
+    # Build a list of providers to try. The preferred provider goes first, then the fallback.
+    # Only include providers that are actually configured.
+    providers_to_try = []
+    if preferred_provider == "resend":
+        if resend_is_configured():
+            providers_to_try.append("resend")
+        if smtp_is_configured():
+            providers_to_try.append("smtp")
+    elif preferred_provider == "smtp":
+        if smtp_is_configured():
+            providers_to_try.append("smtp")
+        if resend_is_configured():
+            providers_to_try.append("resend")
+    else:
+        # Safety: if _choose_provider() ever returns something unexpected, handle it gracefully.
+        if resend_is_configured():
+            providers_to_try.append("resend")
+        if smtp_is_configured():
+            providers_to_try.append("smtp")
 
-    raise RuntimeError(f"Unsupported EMAIL_PROVIDER: {provider}")
+    last_exception: Optional[Exception] = None
+    for provider in providers_to_try:
+        try:
+            if provider == "resend":
+                _send_via_resend(to_email, subject, text, html)
+                return
+            if provider == "smtp":
+                _send_via_smtp(to_email, subject, text, html)
+                return
+        except Exception as e:
+            # Log the exception for diagnostics and proceed to the next provider.
+            try:
+                logger.exception(f"Email send via {provider} failed: {e}")
+            except Exception:
+                pass
+            last_exception = e
+            continue
+
+    # If we reach here, all attempts failed.
+    if last_exception:
+        raise RuntimeError(f"Failed to send OTP using available providers: {last_exception}") from last_exception
+    else:
+        raise RuntimeError("Email is not configured. No providers available to send OTP.")
 
 
 # ---------------------------------------------------------------------------

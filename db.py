@@ -126,6 +126,35 @@ def db_init() -> Dict[str, Any]:
     );
     """
 
+
+    # Phase-4B: user-visible chat history (Chat AI + Luma)
+    create_chat_history_sql = """
+    CREATE TABLE IF NOT EXISTS chat_history (
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        user_id INTEGER NOT NULL,
+        surface TEXT NOT NULL DEFAULT 'chat_ai',
+        question TEXT NOT NULL,
+        learning_object_json TEXT,
+        mode TEXT,
+        language TEXT
+    );
+    """
+
+    # Phase-4B: compressed learning memory cards (opt-in)
+    create_learning_memory_sql = """
+    CREATE TABLE IF NOT EXISTS learning_memory_cards (
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        user_id INTEGER NOT NULL,
+        card_key TEXT NOT NULL,
+        card_json TEXT NOT NULL,
+        expires_at TIMESTAMPTZ,
+        UNIQUE(user_id, card_key)
+    );
+    """
+
     # Phase-4A: internal AI usage telemetry (private; never user-visible)
     create_ai_usage_sql = """
     CREATE TABLE IF NOT EXISTS ai_usage_logs (
@@ -163,6 +192,8 @@ def db_init() -> Dict[str, Any]:
         with engine.begin() as conn:
             conn.execute(text(create_ask_logs_sql))
             conn.execute(text(create_ai_usage_sql))
+            conn.execute(text(create_chat_history_sql))
+            conn.execute(text(create_learning_memory_sql))
         return {"ok": True, "enabled": True}
     except Exception as e:
         logger.exception("db_init failed")
@@ -343,3 +374,186 @@ def db_log_ai_usage(event: dict) -> None:
 
 
 __all__ = ["db_init", "db_health", "db_log_solve", "db_log_ai_usage"]
+
+
+
+# -----------------------------
+# Chat History (chat_history)
+# -----------------------------
+
+def db_add_chat_history(
+    user_id: int,
+    surface: str,
+    question: str,
+    learning_object: dict | None,
+    mode: str | None,
+    language: str | None,
+) -> None:
+    """Best-effort insert into chat_history. Never raises."""
+    engine = _get_engine()
+    if engine is None:
+        return
+    try:
+        lo_json = None
+        if learning_object is not None:
+            import json as _json
+            lo_json = _json.dumps(learning_object, ensure_ascii=False)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO chat_history (user_id, surface, question, learning_object_json, mode, language)
+                    VALUES (:user_id, :surface, :question, :lo, :mode, :language)
+                    """
+                ),
+                {
+                    "user_id": int(user_id),
+                    "surface": (surface or "chat_ai")[:20],
+                    "question": str(question or "")[:4000],
+                    "lo": lo_json,
+                    "mode": (mode or "")[:40] or None,
+                    "language": (language or "")[:10] or None,
+                },
+            )
+    except Exception:
+        logger.exception("db_add_chat_history failed")
+
+
+def db_list_chat_history(user_id: int, limit: int = 30) -> list[dict]:
+    """Return most recent chat history rows for user. Best-effort."""
+    engine = _get_engine()
+    if engine is None:
+        return []
+    try:
+        limit = max(1, min(int(limit), 100))
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, created_at, surface, question, learning_object_json, mode, language
+                    FROM chat_history
+                    WHERE user_id = :user_id
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"user_id": int(user_id), "limit": limit},
+            ).mappings().all()
+        out = []
+        import json as _json
+        for r in rows:
+            lo = None
+            raw = r.get("learning_object_json")
+            if raw:
+                try:
+                    lo = _json.loads(raw)
+                except Exception:
+                    lo = None
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "created_at": str(r["created_at"]),
+                    "surface": r.get("surface"),
+                    "question": r.get("question"),
+                    "learning_object": lo,
+                    "mode": r.get("mode"),
+                    "language": r.get("language"),
+                }
+            )
+        return out
+    except Exception:
+        logger.exception("db_list_chat_history failed")
+        return []
+
+
+def db_clear_chat_history(user_id: int) -> None:
+    engine = _get_engine()
+    if engine is None:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM chat_history WHERE user_id = :user_id"), {"user_id": int(user_id)})
+    except Exception:
+        logger.exception("db_clear_chat_history failed")
+
+
+# -----------------------------
+# Learning Memory (learning_memory_cards)
+# -----------------------------
+
+def db_upsert_memory_card(user_id: int, card_key: str, card_json: dict, expires_at_iso: str | None = None) -> None:
+    engine = _get_engine()
+    if engine is None:
+        return
+    try:
+        import json as _json
+        payload = _json.dumps(card_json or {}, ensure_ascii=False)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO learning_memory_cards (user_id, card_key, card_json, expires_at)
+                    VALUES (:user_id, :card_key, :card_json, :expires_at)
+                    ON CONFLICT (user_id, card_key)
+                    DO UPDATE SET card_json = EXCLUDED.card_json, updated_at = NOW(), expires_at = EXCLUDED.expires_at
+                    """
+                ),
+                {
+                    "user_id": int(user_id),
+                    "card_key": str(card_key)[:80],
+                    "card_json": payload,
+                    "expires_at": expires_at_iso,
+                },
+            )
+    except Exception:
+        logger.exception("db_upsert_memory_card failed")
+
+
+def db_get_memory_cards(user_id: int) -> list[dict]:
+    engine = _get_engine()
+    if engine is None:
+        return []
+    try:
+        import json as _json
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT card_key, card_json, updated_at, expires_at
+                    FROM learning_memory_cards
+                    WHERE user_id = :user_id
+                    ORDER BY updated_at DESC
+                    """
+                ),
+                {"user_id": int(user_id)},
+            ).mappings().all()
+        out = []
+        for r in rows:
+            cj = {}
+            try:
+                cj = _json.loads(r.get("card_json") or "{}")
+            except Exception:
+                cj = {}
+            out.append(
+                {
+                    "card_key": r.get("card_key"),
+                    "card": cj,
+                    "updated_at": str(r.get("updated_at")),
+                    "expires_at": str(r.get("expires_at")) if r.get("expires_at") else None,
+                }
+            )
+        return out
+    except Exception:
+        logger.exception("db_get_memory_cards failed")
+        return []
+
+
+def db_reset_memory_cards(user_id: int) -> None:
+    engine = _get_engine()
+    if engine is None:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM learning_memory_cards WHERE user_id = :user_id"), {"user_id": int(user_id)})
+    except Exception:
+        logger.exception("db_reset_memory_cards failed")
