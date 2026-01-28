@@ -148,10 +148,15 @@ def _send_via_smtp(to_email: str, subject: str, text: str, html: str) -> None:
 
 
 def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
-    # Resend recommends a "Name <email@domain>" format for From.
+    # Resend "from" must be a sender the account is allowed to use.
+    # IMPORTANT: Some accounts reject custom display-names for resend.dev senders.
+    # So we only add a display-name if you explicitly set RESEND_FROM_NAME.
     from_value = EMAIL_FROM
-    if from_value and "<" not in from_value and ">" not in from_value and SMTP_FROM_NAME:
-        from_value = f"{SMTP_FROM_NAME} <{from_value}>"
+    resend_from_name = os.getenv("RESEND_FROM_NAME", "").strip()
+    if resend_from_name and from_value and "<" not in from_value and ">" not in from_value:
+        # Basic sanitize: collapse whitespace and strip angle brackets from name
+        safe_name = " ".join(resend_from_name.replace("<"," ").replace(">"," ").split())
+        from_value = f"{safe_name} <{from_value}>"
 
     payload = {
         "from": from_value,
