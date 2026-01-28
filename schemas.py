@@ -25,21 +25,18 @@ def _normalize_class(v) -> int:
     - "11+12"
     - "Integrated (11+12)"
     Return safe int 5..12. For 11+12 we map to 11.
-
-    Phase-4 stabilization:
-    - If missing/None, default to 11 (auto-detect can override later).
     """
     if v is None:
-        n = 11
-    elif isinstance(v, int):
+        raise ValueError("class is required")
+
+    if isinstance(v, int):
         n = v
     else:
         s = str(v).strip()
         m = re.search(r"(\d{1,2})", s)
         if not m:
-            n = 11
-        else:
-            n = int(m.group(1))
+            raise ValueError("invalid class")
+        n = int(m.group(1))
 
     # Clamp
     if n < 5:
@@ -82,15 +79,14 @@ class SolveRequest(BaseModel):
     # ✅ Accept BOTH keys:
     # - "class"      (official API)
     # - "class_level" (current frontend payload)
-    class_: Optional[Union[int, str]] = Field(
-        11,
+    class_: Union[int, str] = Field(
+        ...,
         alias="class",
         validation_alias=AliasChoices("class", "class_level"),
-        description="Student class. Optional (auto-detect). Defaults to 11 if missing.",
     )
 
-    board: str = Field("CBSE", max_length=40)
-    subject: str = Field("", max_length=40)
+    board: str = Field(..., min_length=2, max_length=40)
+    subject: str = Field(..., min_length=2, max_length=40)
     chapter: Optional[str] = Field(None, max_length=120)
     exam_mode: ExamMode = "BOARD"
     language: str = Field("en", description="en / hi / mr etc.")
@@ -104,22 +100,6 @@ class SolveRequest(BaseModel):
     study_mode: Optional[str] = Field(None, max_length=40, description="e.g. 'luma'")
     mode: Optional[str] = Field(None, max_length=40, description="e.g. 'focused_assist'")
     context: Optional[LumaContext] = Field(None, description="Context for focused assist")
-
-
-    # Chat history + learning memory controls (trust-first)
-    private_session: bool = Field(
-        False,
-        description="If true, the server must not store chat history or learning memory for this request.",
-    )
-    memory_opt_in: bool = Field(
-        False,
-        description="If true, the server may update compressed learning memory cards for this user.",
-    )
-    surface: Optional[str] = Field(
-        None,
-        max_length=20,
-        description="chat_ai | luma (optional; used for history storage).",
-    )
 
     # Ignore extra fields for forward-compat (stability)
     model_config = {"extra": "ignore"}
@@ -167,6 +147,3 @@ class SolveResponse(BaseModel):
     flags: List[str] = []
     safe_note: Optional[str] = None
     meta: dict = {}
-
-    # Phase-4: Answer-as-Learning-Object (optional for back-compat)
-    learning_object: Optional[dict] = None
