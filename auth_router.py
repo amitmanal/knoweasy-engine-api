@@ -14,7 +14,7 @@ from auth_store import (
     session_user,
     delete_session,
 )
-from email_service import email_is_configured, email_provider_debug, send_otp_email
+from email_service import email_is_configured, email_provider_debug, send_otp_email, EmailSendError
 from auth_schemas import RequestOtpIn, RequestOtpOut, VerifyOtpIn, VerifyOtpOut, LogoutIn, BasicOut
 
 logger = logging.getLogger("knoweasy-engine-api.auth")
@@ -60,8 +60,22 @@ def request_otp(payload: RequestOtpIn, request: Request):
         # Store OTP only after email send succeeds, so users are not locked out if email fails.
         store_otp(email, role, otp_hash)
         logger.info(f"[RID:{rid}] OTP email send triggered")
+    except EmailSendError as e:
+        # Map provider error to client-friendly HTTP status.
+        # If the underlying provider returned a 4xx, propagate that; otherwise use 503.
+        status = int(e.status_code) if 400 <= int(e.status_code) < 500 else 503
+        # Avoid leaking provider message to clients; log details instead.
+        logger.error(f"[RID:{rid}] Email provider error {e.status_code}: {e.message}")
+        return JSONResponse(
+            status_code=status,
+            content={
+                "ok": False,
+                "message": "Unable to send code. Please try again later.",
+                "cooldown_seconds": 0,
+            },
+        )
     except Exception as e:
-
+        # Unexpected error; return 500 to client and log exception.
         logger.exception(f"[RID:{rid}] Failed to send OTP email: {e}")
         return JSONResponse(status_code=500, content={"ok": False, "message": "Failed to send OTP. Please try again.", "cooldown_seconds": 0})
 

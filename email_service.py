@@ -23,6 +23,25 @@ from email.message import EmailMessage
 from typing import Optional, Tuple
 from urllib import request, error
 
+class EmailSendError(Exception):
+    """Exception raised when an email provider returns an error.
+
+    Includes the HTTP status code (if applicable) and a message suitable for logs.
+    The message should never include sensitive information like API keys.
+    """
+
+    def __init__(self, status_code: int, message: str):
+        try:
+            self.status_code = int(status_code)
+        except Exception:
+            self.status_code = 500
+        # ensure message is a short string to avoid accidental secrets
+        msg = str(message or '').strip()
+        if len(msg) > 500:
+            msg = msg[:500]
+        self.message = msg
+        super().__init__(f"Email send failed ({self.status_code}): {self.message}")
+
 logger = logging.getLogger("knoweasy-engine-api.email")
 
 
@@ -182,42 +201,54 @@ def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
                 logger.info(f"Resend ok status={getattr(resp, 'status', 'unknown')} to={to_email}")
             except Exception:
                 pass
-            # keep body unused; it's sometimes JSON with id
+            # Response body may include message id; we ignore it here.
             _ = body
     except error.HTTPError as e:
+        # HTTP errors indicate the request reached Resend but was rejected
         body = e.read().decode("utf-8", errors="ignore")
         try:
             logger.error(f"Resend HTTP {e.code} to={to_email} body={body[:300]}")
         except Exception:
             pass
-        raise RuntimeError(f"Resend HTTP {e.code}: {body}") from e
+        # Propagate a structured error for the caller to handle
+        raise EmailSendError(status_code=getattr(e, 'code', 500) or 500, message=body) from e
     except Exception as e:
+        # Network or serialization error (no HTTP response)
         try:
             logger.exception(f"Resend send failed to={to_email}: {e}")
         except Exception:
             pass
-        raise RuntimeError(f"Resend send failed: {e}") from e
+        raise EmailSendError(status_code=500, message=str(e)) from e
 
 
 def send_otp_email(to_email: str, otp: str, minutes_valid: int = 10) -> None:
-    """Send an OTP email. Raises RuntimeError on failure."""
+    """Send an OTP email. Raises EmailSendError on failure.
+
+    This helper delegates to the configured provider and normalizes errors into
+    EmailSendError so the caller can map them to HTTP responses.
+    """
     provider = _choose_provider()
     if provider == "none":
-        raise RuntimeError(
-            "Email is not configured. Set EMAIL_PROVIDER and either RESEND_API_KEY+EMAIL_FROM (Resend) "
-            "or SMTP_HOST/SMTP_USER/SMTP_PASS/EMAIL_FROM (SMTP)."  # noqa: E501
-        )
+        # no provider configured; treat as a provider error
+        raise EmailSendError(status_code=503, message="Email provider not configured")
 
     subject, text, html = _build_otp_content(otp=otp, minutes_valid=minutes_valid)
 
-    if provider == "resend":
-        _send_via_resend(to_email, subject, text, html)
-        return
-    if provider == "smtp":
-        _send_via_smtp(to_email, subject, text, html)
-        return
-
-    raise RuntimeError(f"Unsupported EMAIL_PROVIDER: {provider}")
+    try:
+        if provider == "resend":
+            _send_via_resend(to_email, subject, text, html)
+            return
+        if provider == "smtp":
+            _send_via_smtp(to_email, subject, text, html)
+            return
+        # unknown provider (should not happen)
+        raise EmailSendError(status_code=500, message=f"Unsupported email provider: {provider}")
+    except EmailSendError:
+        # rethrow structured email errors
+        raise
+    except Exception as e:
+        # wrap any unexpected error
+        raise EmailSendError(status_code=500, message=str(e)) from e
 
 
 # ---------------------------------------------------------------------------
