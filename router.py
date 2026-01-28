@@ -162,12 +162,9 @@ def _cache_key(payload: dict) -> str:
         "subject": (payload.get("subject") or "").strip().lower(),
         "chapter": (payload.get("chapter") or "").strip().lower(),
         "exam_mode": str(payload.get("exam_mode") or "").strip().upper(),
+        "answer_mode": _normalize_answer_mode(payload.get("answer_mode") or payload.get("mode") or ""),
         "language": (payload.get("language") or "en").strip().lower(),
         "study_mode": (payload.get("study_mode") or "chat").strip().lower(),
-        # IMPORTANT: mode/answer_mode must be part of cache key, otherwise
-        # Lite/Tutor/Mastery could incorrectly share the same cached answer.
-        "mode": (payload.get("mode") or "").strip().lower(),
-        "answer_mode": (payload.get("answer_mode") or payload.get("answerMode") or "").strip().lower(),
         "question": (payload.get("question") or "").strip(),
     }
     blob = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
@@ -177,40 +174,20 @@ def _cache_key(payload: dict) -> str:
 def _normalize_answer_mode(v: str) -> str:
     m = str(v or "").strip().lower()
     if not m:
-        return "luma_tutor"
-
-    # Backward compatible aliases (old UI)
+        return "step_by_step"
+    # accept friendly UI strings too
     if m in {"quick"}:
-        return "luma_lite"
+        return "one_liner"
     if m in {"deep"}:
-        return "luma_tutor"
+        return "step_by_step"
     if m in {"exam"}:
-        return "luma_mastery"
-
-    # New canonical mode names
-    if m in {"lite", "luma_lite"}:
-        return "luma_lite"
-    if m in {"tutor", "luma_tutor"}:
-        return "luma_tutor"
-    if m in {"mastery", "luma_mastery"}:
-        return "luma_mastery"
-
-    # Legacy internal keys still supported
-    if m in {"one_liner"}:
-        return "luma_lite"
-    if m in {"step_by_step"}:
-        return "luma_tutor"
-    if m in {"cbse_board"}:
-        return "luma_mastery"
-
+        return "cbse_board"
     return m
 
 def _extract_context(payload: dict) -> dict:
     """Extract structured context from payload"""
     luma_context = payload.get("context") or {}
     
-    raw_mode = str(payload.get("answer_mode") or payload.get("answerMode") or payload.get("mode") or "").strip().lower()
-    normalized_mode = _normalize_answer_mode(raw_mode)
     return {
         "board": str(payload.get("board") or "cbse").strip().upper(),
         "class": str(payload.get("class_") or payload.get("class_level") or payload.get("class") or "11").strip(),
@@ -219,10 +196,8 @@ def _extract_context(payload: dict) -> dict:
         "exam_mode": str(payload.get("exam_mode") or "BOARD").strip().upper(),
         "language": str(payload.get("language") or "en").strip().lower(),
         "study_mode": str(payload.get("study_mode") or "chat").strip().lower(),
-        # Canonical mode for the orchestrator (Luma Lite / Tutor / Mastery)
-        "answer_mode": normalized_mode,
-        # Keep raw "mode" field for backward compatibility / UI display
-        "mode": raw_mode,
+        "mode": str(payload.get("mode") or "").strip().lower(),
+        "answer_mode": str(payload.get("answer_mode") or payload.get("answerMode") or payload.get("answerMode".lower()) or "") .strip().lower(),
         "visible_text": str(luma_context.get("visible_text") or "")[:600],
         "anchor_example": str(luma_context.get("anchor_example") or "")[:300],
         "section": str(luma_context.get("section") or ""),
