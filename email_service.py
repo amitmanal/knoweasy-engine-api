@@ -148,10 +148,15 @@ def _send_via_smtp(to_email: str, subject: str, text: str, html: str) -> None:
 
 
 def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
-    # Resend recommends a "Name <email@domain>" format for From.
+    # Resend "from" must be a sender the account is allowed to use.
+    # IMPORTANT: Some accounts reject custom display-names for resend.dev senders.
+    # So we only add a display-name if you explicitly set RESEND_FROM_NAME.
     from_value = EMAIL_FROM
-    if from_value and "<" not in from_value and ">" not in from_value and SMTP_FROM_NAME:
-        from_value = f"{SMTP_FROM_NAME} <{from_value}>"
+    resend_from_name = os.getenv("RESEND_FROM_NAME", "").strip()
+    if resend_from_name and from_value and "<" not in from_value and ">" not in from_value:
+        # Basic sanitize: collapse whitespace and strip angle brackets from name
+        safe_name = " ".join(resend_from_name.replace("<"," ").replace(">"," ").split())
+        from_value = f"{safe_name} <{from_value}>"
 
     payload = {
         "from": from_value,
@@ -204,6 +209,121 @@ def send_otp_email(to_email: str, otp: str, minutes_valid: int = 10) -> None:
         )
 
     subject, text, html = _build_otp_content(otp=otp, minutes_valid=minutes_valid)
+
+    if provider == "resend":
+        _send_via_resend(to_email, subject, text, html)
+        return
+    if provider == "smtp":
+        _send_via_smtp(to_email, subject, text, html)
+        return
+
+    raise RuntimeError(f"Unsupported EMAIL_PROVIDER: {provider}")
+
+
+# ---------------------------------------------------------------------------
+# Payment receipt email (Phase-2)
+# ---------------------------------------------------------------------------
+
+def _build_payment_receipt_content(
+    *,
+    plan_label: str,
+    billing_cycle: str,
+    amount_paise: int,
+    currency: str,
+    razorpay_order_id: str,
+    razorpay_payment_id: str,
+    paid_at_iso: str,
+) -> Tuple[str, str, str]:
+    """Build receipt subject + text + html."""
+
+    amount = 0.0
+    try:
+        amount = float(int(amount_paise) / 100.0)
+    except Exception:
+        amount = 0.0
+
+    plan_label_clean = (plan_label or "").strip() or "KnowEasy"
+    cycle = (billing_cycle or "monthly").strip().lower() or "monthly"
+    cycle_label = "Yearly" if cycle == "yearly" else "Monthly"
+    cur = (currency or "INR").strip().upper() or "INR"
+
+    subject = f"Payment received • {plan_label_clean} ({cycle_label})"
+
+    text = (
+        f"Payment received for {plan_label_clean} ({cycle_label}).\n\n"
+        f"Amount: {cur} {amount:.2f}\n"
+        f"Order ID: {razorpay_order_id}\n"
+        f"Payment ID: {razorpay_payment_id}\n"
+        f"Paid at: {paid_at_iso}\n\n"
+        "Thank you for choosing KnowEasy.\n"
+    )
+
+    support = _env("SUPPORT_EMAIL") or _env("EMAIL_FROM")
+    brand = _env("BRAND_NAME", "KnowEasy")
+
+    html = f"""<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f7f7f7;font-family:Arial,Helvetica,sans-serif;">
+    <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #eaeaea;">
+      <div style="padding:18px 22px;background:#111827;color:#ffffff;">
+        <div style="font-size:16px;font-weight:800;letter-spacing:0.2px;">{brand}</div>
+        <div style="opacity:0.92;margin-top:4px;">Payment receipt</div>
+      </div>
+      <div style="padding:22px;color:#111827;">
+        <div style="font-size:15px;line-height:1.6;">We received your payment successfully.</div>
+
+        <div style="margin-top:14px;border:1px solid #eef2f7;border-radius:12px;overflow:hidden;">
+          <div style="padding:12px 14px;background:#f9fafb;font-weight:800;">Summary</div>
+          <div style="padding:14px 14px;font-size:13px;line-height:1.7;">
+            <div><b>Plan:</b> {plan_label_clean}</div>
+            <div><b>Billing cycle:</b> {cycle_label}</div>
+            <div><b>Amount:</b> {cur} {amount:.2f}</div>
+            <div style="margin-top:10px;"><b>Order ID:</b> {razorpay_order_id}</div>
+            <div><b>Payment ID:</b> {razorpay_payment_id}</div>
+            <div><b>Paid at:</b> {paid_at_iso}</div>
+          </div>
+        </div>
+
+        <div style="margin-top:14px;font-size:12px;color:#6b7280;line-height:1.6;">
+          If you have any questions, reply to this email or contact <b>{support}</b>.
+        </div>
+      </div>
+      <div style="padding:14px 22px;background:#f9fafb;color:#6b7280;font-size:12px;line-height:1.4;">
+        This is an automated receipt for your records.
+      </div>
+    </div>
+  </body>
+</html>
+"""
+
+    return subject, text, html
+
+
+def send_payment_receipt_email(
+    *,
+    to_email: str,
+    plan_label: str,
+    billing_cycle: str,
+    amount_paise: int,
+    currency: str,
+    razorpay_order_id: str,
+    razorpay_payment_id: str,
+    paid_at_iso: str,
+) -> None:
+    """Send a payment receipt email. Raises RuntimeError on failure."""
+    provider = _choose_provider()
+    if provider == "none":
+        raise RuntimeError("Email is not configured")
+
+    subject, text, html = _build_payment_receipt_content(
+        plan_label=plan_label,
+        billing_cycle=billing_cycle,
+        amount_paise=amount_paise,
+        currency=currency,
+        razorpay_order_id=razorpay_order_id,
+        razorpay_payment_id=razorpay_payment_id,
+        paid_at_iso=paid_at_iso,
+    )
 
     if provider == "resend":
         _send_via_resend(to_email, subject, text, html)
