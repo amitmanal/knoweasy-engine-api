@@ -1341,8 +1341,16 @@ def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:
     """
     question = ctx.question or ""
     raw_answer: str = ""
-    # Build a prompt instructing providers to return a plain answer only.
-    prompt = f"Answer the following question clearly and concisely.\nQuestion: {question}\nAnswer:"
+    # IMPORTANT: ai_router expects strict JSON. If we ask for plain text,
+    # providers may return non-JSON and the pipeline will fail.
+    # We keep the schema intentionally minimal here; the deterministic
+    # AnswerObject builder will structure the response.
+    prompt = (
+        "Return ONLY valid JSON (no markdown).\n"
+        "Schema: {\"answer\": string}.\n\n"
+        f"Question: {question}\n"
+        "Respond now in JSON:"
+    )
     try:
         # Attempt to call configured providers via ai_router.
         result = generate_json(prompt)
@@ -1386,14 +1394,17 @@ def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:
         max_paragraphs = 2
     # Reconstruct trimmed answer
     trimmed_answer = "\n".join(paragraphs[:max_paragraphs]) if paragraphs else raw_answer
-    # Build the answer object using heuristics
-    # Pass board and class_level to build_answer_object for improved exam relevance
+    # Build the answer object using deterministic heuristics.
+    # NOTE: build_answer_object is keyword-only.
     answer_obj = build_answer_object(
-        question,
-        trimmed_answer,
+        question=question,
+        raw_answer=trimmed_answer,
         language=ctx.language or "en",
-        mode=ctx.answer_mode or "lite",
+        mode=ctx.answer_mode or "tutor",
         board=ctx.board,
         class_level=ctx.class_level,
+        subject=ctx.subject,
+        exam_mode=ctx.exam_mode,
+        study_mode=ctx.study_mode,
     )
     return answer_obj.to_dict()
