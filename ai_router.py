@@ -143,9 +143,8 @@ def _claude_request(prompt: str, timeout_s: int) -> Dict[str, Any]:
     return _extract_json(text)
 
 
-def generate_json(prompt: str, timeout_s: int | None = None) -> Dict[str, Any]:
+def generate_json(prompt: str) -> Dict[str, Any]:
     """Generate a JSON response using the configured provider (or auto fallback)."""
-    eff_timeout = int(timeout_s) if timeout_s is not None else int(getattr(Config, 'AI_TIMEOUT_SECONDS', 30))
     timeout_s = int(AI_TIMEOUT_SECONDS or 30)
 
     last_err: Optional[Exception] = None
