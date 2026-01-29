@@ -1,470 +1,288 @@
-"""orchestrator.py — KnowEasy Academic Engine v3 (One Brain)
 
-This replaces legacy quick/deep/exam routing with the locked system:
+"""orchestrator.py — KnowEasy One-Brain Orchestrator (Phase-4)
+
+Fixes:
+- Supports ONLY 3 modes: lite / tutor / mastery (front-end compatible)
 - Two-tier Academic Engine:
-  - Foundation Builder (Classes 5–10): syllabus/age-safe ceiling
-  - Competitive Mentor (11–12 + JEE/NEET/CET/Olympiad): deep exam mentor (no short answers)
-- 3 Modes: lite / tutor / mastery (frontend sends answer_mode)
-- Multi-model: Gemini as backbone + optional Claude writer + OpenAI verifier for hard/extreme
+  - Foundation Builder (Classes 5–10): ceiling enforced (1–2 grades ahead)
+  - Competitive Mentor (11–12 or JEE/NEET/CET/Olympiad): deep answers, NO short answers
+- Keeps backward compatible async `solve()` for router.py
+- Optional OpenAI verification pass for hard/mastery competitive (one repair max)
 
-Output contract:
-- Returns a premium object containing `sections` (for PremiumRenderer) and
-  minimal top-level fields (`title`, `why_this_matters`, `providers_used`, `meta`).
-
-No external side effects here (no DB writes).
+This file is designed to boot on Render reliably (no import loops).
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 import os
-import re
 import time
-import uuid
-from dataclasses import dataclass
-from enum import Enum
+import logging
+import urllib.request
+import urllib.error
 from typing import Any, Dict, List, Optional, Tuple
 
-import google.generativeai as genai
-from openai import AsyncOpenAI
-from anthropic import AsyncAnthropic
-
+from ai_router import generate_json, ProviderError
 from config import (
-    GEMINI_API_KEY,
     GEMINI_PRIMARY_MODEL,
     GEMINI_FALLBACK_MODELS,
-    OPENAI_API_KEY,
-    OPENAI_VERIFIER_MODEL,
-    OPENAI_MODEL,
-    CLAUDE_API_KEY,
-    CLAUDE_MODEL,
-    CLAUDE_WRITER_MODEL,
     AI_TIMEOUT_SECONDS,
+    OPENAI_API_KEY,
 )
 
 logger = logging.getLogger("knoweasy.orchestrator")
 
 
 # -----------------------------
-# Enums / Context
+# Helpers: profile + ceilings
 # -----------------------------
 
-class Mode(str, Enum):
-    LITE = "lite"
-    TUTOR = "tutor"
-    MASTERY = "mastery"
+def _norm(s: Any) -> str:
+    return ("" if s is None else str(s)).strip()
 
-
-class AcademicProfile(str, Enum):
-    FOUNDATION_BUILDER = "foundation_builder"
-    COMPETITIVE_MENTOR = "competitive_mentor"
-
-
-class Difficulty(str, Enum):
-    EASY = "easy"
-    MEDIUM = "medium"
-    HARD = "hard"
-    EXTREME = "extreme"
-
-
-@dataclass
-class RequestContext:
-    request_id: str
-    question: str
-    board: str = ""
-    class_level: str = ""
-    subject: str = ""
-    chapter: str = ""
-    exam_mode: str = ""          # JEE/NEET/CET/OLYMPIAD/BOARD etc
-    language: str = "en"
-    study_mode: str = "chat"
-    answer_mode: str = "tutor"   # lite|tutor|mastery (frontend)
-    user_tier: str = "free"
-
-    def mode(self) -> Mode:
-        v = (self.answer_mode or "tutor").strip().lower()
-        if v in {"luma_lite", "lite"}:
-            return Mode.LITE
-        if v in {"luma_mastery", "mastery", "exam"}:
-            return Mode.MASTERY
-        return Mode.TUTOR
-
-    def grade_int(self) -> Optional[int]:
-        try:
-            g = int(str(self.class_level).strip())
-            if 1 <= g <= 20:
-                return g
-        except Exception:
-            return None
-        return None
-
-
-# -----------------------------
-# Helpers
-# -----------------------------
-
-_HARD_CUES = [
-    "derive", "prove", "mechanism", "multi-step", "calculate", "integral", "differential",
-    "rank", "assertion", "reason", "matrix", "electrochem", "thermo", "rotation", "rbd", "kinematics",
-    "eigen", "laplace", "stereochemistry", "sn1", "sn2", "e1", "e2"
-]
-_EXTREME_CUES = ["olympiad", "irodov", "inequality", "functional equation", "non-trivial", "contest", "tricky"]
-
-def select_profile(ctx: RequestContext) -> AcademicProfile:
-    exam = (ctx.exam_mode or ctx.board or "").strip().lower()
-    if exam in {"jee", "neet", "cet", "olympiad"}:
-        return AcademicProfile.COMPETITIVE_MENTOR
-    g = ctx.grade_int()
-    if g is not None and g >= 11:
-        return AcademicProfile.COMPETITIVE_MENTOR
-    return AcademicProfile.FOUNDATION_BUILDER
-
-def estimate_difficulty(question: str, profile: AcademicProfile) -> Difficulty:
-    q = (question or "").lower()
-    if profile == AcademicProfile.COMPETITIVE_MENTOR:
-        if any(c in q for c in _EXTREME_CUES):
-            return Difficulty.EXTREME
-        if any(c in q for c in _HARD_CUES) or len(q) > 180:
-            return Difficulty.HARD
-        return Difficulty.MEDIUM
-    # foundation
-    if len(q) > 220:
-        return Difficulty.MEDIUM
-    return Difficulty.EASY
-
-def _json_extract(text: str) -> Dict[str, Any]:
-    text = (text or "").strip()
+def _detect_profile(ctx: Dict[str, Any]) -> str:
+    exam = _norm(ctx.get("exam_mode") or ctx.get("board_or_exam")).upper()
+    klass = _norm(ctx.get("class") or ctx.get("class_level"))
     try:
-        return json.loads(text)
+        k = int("".join([c for c in klass if c.isdigit()]) or "0")
     except Exception:
-        m = re.search(r"\{[\s\S]*\}", text)
-        if not m:
-            raise ValueError("Model did not return JSON.")
-        return json.loads(m.group(0))
+        k = 0
+
+    if exam in {"JEE", "NEET", "CET", "OLYMPIAD"}:
+        return "competitive_mentor"
+    if k >= 11:
+        return "competitive_mentor"
+    return "foundation_builder"
+
+def _normalize_mode(answer_mode: str) -> str:
+    m = _norm(answer_mode).lower()
+    # Accept legacy values too
+    if m in {"quick", "one_liner", "hint_only"}:
+        return "lite"
+    if m in {"deep", "step_by_step", "tutor"}:
+        return "tutor"
+    if m in {"exam", "mastery"}:
+        return "mastery"
+    if m in {"lite", "tutor", "mastery"}:
+        return m
+    return "tutor"
 
 
-# -----------------------------
-# Prompting (sections schema)
-# -----------------------------
+def _build_writer_prompt(question: str, ctx: Dict[str, Any], mode: str, profile: str) -> str:
+    """Prompt the writer model to return JSON with an 'answer' string."""
+    subject = _norm(ctx.get("subject"))
+    board = _norm(ctx.get("board"))
+    exam = _norm(ctx.get("exam_mode") or ctx.get("board_or_exam"))
+    klass = _norm(ctx.get("class") or ctx.get("class_level"))
+    lang = (_norm(ctx.get("language")) or "en").lower()
 
-def _schema_hint() -> str:
-    return (
-        "Return ONLY valid JSON (no markdown).\n"
-        "Schema:\n"
-        "{\n"
-        "  \"title\": string,\n"
-        "  \"why_this_matters\": string,\n"
-        "  \"sections\": [\n"
-        "    {\n"
-        "      \"type\": \"header\"|\"definition\"|\"explanation\"|\"steps\"|\"diagram\"|\"practice\"|\"table\"|\"tips\"|\"warning\"|\"answer\",\n"
-        "      \"title\": string,\n"
-        "      \"content\": string,\n"
-        "      \"steps\": [string],\n"
-        "      \"diagram\": {\"format\": \"mermaid\"|\"text\", \"code\": string},\n"
-        "      \"items\": [string],\n"
-        "      \"questions\": [ { \"q\": string, \"options\": [string], \"answer\": string, \"why\": string } ]\n"
-        "    }\n"
-        "  ],\n"
-        "  \"follow_up_chips\": [string],\n"
-        "  \"common_mistakes\": [string],\n"
-        "  \"exam_relevance_footer\": string\n"
-        "}\n"
-        "Rules: Keep it exam-safe, structured, calm, and very clear."
-    )
-
-def _system_prompt(profile: AcademicProfile, mode: Mode, ctx: RequestContext) -> str:
-    # Competitive: NO short answers (even in lite)
-    competitive_no_short = (profile == AcademicProfile.COMPETITIVE_MENTOR)
-
-    if mode == Mode.LITE:
-        if competitive_no_short:
-            mode_rule = (
-                "Mode=Luma Lite (Competitive): FAST but not short. Include: final result/formula, 3–6 bullet steps, "
-                "and one mini diagram only if it improves clarity."
-            )
-        else:
-            mode_rule = "Mode=Luma Lite: short and clear: definition/formula + 3 key points."
-    elif mode == Mode.TUTOR:
-        mode_rule = "Mode=Luma Tutor: teach step-by-step with exactly 1 strong visual thinking tool by default."
+    ceiling_note = ""
+    if profile == "foundation_builder":
+        ceiling_note = (
+            "You MUST stay syllabus-safe for Classes 5–10. "
+            "Do NOT introduce Olympiad/JEE depth. Max 1–2 grades ahead even in mastery."
+        )
     else:
-        mode_rule = (
-            "Mode=Luma Mastery: deep exam mentor. Multiple methods if possible, trap alerts, "
-            "and 5 practice questions (mix MCQ + PYQ-style)."
+        ceiling_note = (
+            "You are teaching for JEE/NEET/CET/Olympiad. Depth is allowed. "
+            "Do NOT be short. Provide full reasoning and exam-safe steps."
         )
 
-    ceiling = (
-        "Ceiling: Foundation Builder — stay within syllabus; avoid going beyond 1–2 grades ahead."
-        if profile == AcademicProfile.FOUNDATION_BUILDER
-        else "Ceiling: Competitive Mentor — full exam depth (JEE/NEET/CET/Olympiad relevant), but stay focused."
-    )
+    mode_rules = {
+        "lite": (
+            "Fast clarity. For foundation: 2–5 short lines. "
+            "For competitive: NOT short — give final result/formula + 3–6 bullet steps + key idea."
+        ),
+        "tutor": (
+            "Teach step-by-step like a great teacher. Use headings and bullets. "
+            "Include key definitions, steps, and 1–2 exam tips."
+        ),
+        "mastery": (
+            "Deep exam mentor. Provide: concept foundation, full derivation/logic, alternative method if applicable, "
+            "common traps, and 3–5 practice questions at end."
+        ),
+    }[mode]
 
-    lang = (ctx.language or "en").lower()
-    lang_rule = "Language: English." if lang == "en" else (
-        "Language: Use the user's language, but keep key scientific terms in English in brackets once."
-    )
-
-    return f"""You are KnowEasy — a calm, premium AI Teacher for India.
-Profile: {profile.value}
-{ceiling}
-{mode_rule}
-{lang_rule}
-
-Visual rule:
-- Prefer Mermaid diagrams for biology/chemistry processes, flowcharts, cycles, and labeled boxes.
-- Keep diagrams simple and readable.
-
-Output rule:
-{_schema_hint()}
-""".strip()
-
-def _user_prompt(ctx: RequestContext) -> str:
-    payload = {
-        "question": ctx.question,
-        "board": ctx.board,
-        "class_level": ctx.class_level,
-        "subject": ctx.subject,
-        "chapter": ctx.chapter,
-        "exam_mode": ctx.exam_mode,
-        "language": ctx.language,
-    }
-    return json.dumps(payload, ensure_ascii=False)
-
-
-# -----------------------------
-# Providers
-# -----------------------------
-
-async def _gemini_generate(model_name: str, system: str, user: str, timeout_s: int) -> str:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY missing.")
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(model_name=model_name, system_instruction=system)
-
-    def _call():
-        resp = model.generate_content(
-            user,
-            generation_config={
-                "temperature": 0.2,
-                "max_output_tokens": 4096,
-            },
-        )
-        return (resp.text or "").strip()
-
-    return await asyncio.wait_for(asyncio.to_thread(_call), timeout=timeout_s)
-
-async def _openai_json(model: str, system: str, user: str, timeout_s: int) -> str:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY missing.")
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    # response_format json_object to reduce junk
-    coro = client.chat.completions.create(
-        model=model,
-        temperature=0.0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
-    resp = await asyncio.wait_for(coro, timeout=timeout_s)
-    return (resp.choices[0].message.content or "").strip()
-
-async def _claude_json(model: str, system: str, user: str, timeout_s: int) -> str:
-    if not CLAUDE_API_KEY:
-        raise RuntimeError("CLAUDE_API_KEY missing.")
-    client = AsyncAnthropic(api_key=CLAUDE_API_KEY)
-    coro = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        temperature=0.2,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    resp = await asyncio.wait_for(coro, timeout=timeout_s)
-    # anthropic SDK returns list content blocks
-    txt = ""
-    for b in (resp.content or []):
-        if getattr(b, "type", None) == "text":
-            txt += b.text
-    return (txt or "").strip()
-
-
-# -----------------------------
-# Verification loop (OpenAI)
-# -----------------------------
-
-def _checker_system() -> str:
-    return (
-        "You are a strict exam-safety verifier.\n"
-        "Check: wrong facts, missing conditions, wrong equations, unit mistakes, confusing wording, unsafe claims.\n"
-        "Return ONLY JSON: { \"ok\": boolean, \"issues\": [string], \"fix_instructions\": [string] }"
-    )
-
-def _checker_user(draft_json: Dict[str, Any], ctx: RequestContext) -> str:
-    return json.dumps(
-        {
-            "draft": draft_json,
-            "context": {
-                "subject": ctx.subject,
-                "class_level": ctx.class_level,
-                "exam_mode": ctx.exam_mode,
-                "board": ctx.board,
-                "mode": ctx.answer_mode,
-            },
-            "instruction": "Verify correctness and exam-safety. Be strict.",
+    # Force JSON output so downstream is stable
+    return json.dumps({
+        "instruction": (
+            "Return ONLY valid JSON. No markdown. "
+            "Schema: {answer: string, confidence: number(0..1), key_points: [string], flags:[string]}."
+        ),
+        "context": {
+            "profile": profile,
+            "mode": mode,
+            "board": board,
+            "class": klass,
+            "exam": exam,
+            "subject": subject,
+            "language": lang,
         },
-        ensure_ascii=False,
+        "rules": {
+            "ceiling": ceiling_note,
+            "mode_rules": mode_rules,
+            "tone": "calm, premium, exam-safe",
+            "format": "structured headings + bullets; no fluff; no fake citations",
+        },
+        "question": question
+    }, ensure_ascii=False)
+
+
+# -----------------------------
+# Optional verification (OpenAI)
+# -----------------------------
+
+def _openai_verify(draft_answer: str, question: str, ctx: Dict[str, Any]) -> Tuple[bool, List[str], List[str]]:
+    """Return (ok, issues, fix_instructions). Strict JSON response."""
+    if not OPENAI_API_KEY:
+        return True, [], []
+
+    model = os.getenv("OPENAI_VERIFIER_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+    timeout_s = int(os.getenv("OPENAI_VERIFY_TIMEOUT", "18"))
+
+    system = "You are a strict verifier for exam answers. Check correctness, missing steps, equation/unit errors, and misleading claims. Return ONLY JSON: {ok:boolean, issues:[string], fix_instructions:[string]}"
+    payload = {
+        "model": model,
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps({
+                "question": question,
+                "draft_answer": draft_answer,
+                "context": {
+                    "exam_mode": ctx.get("exam_mode"),
+                    "class_level": ctx.get("class") or ctx.get("class_level"),
+                    "subject": ctx.get("subject"),
+                }
+            }, ensure_ascii=False)}
+        ]
+    }
+
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+        },
+        method="POST",
     )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+        data = json.loads(raw)
+        content = data["choices"][0]["message"]["content"]
+        chk = json.loads(content)
+        ok = bool(chk.get("ok", False))
+        issues = list(chk.get("issues") or [])
+        fixes = list(chk.get("fix_instructions") or [])
+        return ok, issues[:12], fixes[:12]
+    except Exception as e:
+        # If verifier fails, do not block user; just skip
+        logger.warning(f"Verifier skipped due to error: {e}")
+        return True, [], []
 
 
 # -----------------------------
-# Plan / Routing
+# Public API: solve()
 # -----------------------------
 
-def _timeout_for(difficulty: Difficulty) -> int:
-    base = int(AI_TIMEOUT_SECONDS or 25)
-    if difficulty == Difficulty.EASY:
-        return min(base, 20)
-    if difficulty == Difficulty.MEDIUM:
-        return max(base, 25)
-    if difficulty == Difficulty.HARD:
-        return max(base, 35)
-    return max(base, 45)
+_STATS = {
+    "requests": 0,
+    "failures": 0,
+    "last_error": None,
+    "last_provider": None,
+}
 
-def _gemini_model_for(mode: Mode, difficulty: Difficulty) -> str:
-    # Prefer 2.5 Flash-Lite for ultra fast, 2.5 Flash for most, 2.5 Pro for hard/mastery
-    if mode == Mode.LITE and difficulty in {Difficulty.EASY, Difficulty.MEDIUM}:
-        return os.getenv("GEMINI_LITE_MODEL", "gemini-2.5-flash-lite")
-    if mode == Mode.MASTERY or difficulty in {Difficulty.HARD, Difficulty.EXTREME}:
-        return os.getenv("GEMINI_MASTERY_MODEL", "gemini-2.5-pro")
-    return GEMINI_PRIMARY_MODEL or "gemini-2.5-flash"
+async def solve(question: str, context: Dict[str, Any], user_tier: str = "free") -> Dict[str, Any]:
+    """Backwards compatible entry used by router.py (async)."""
+    t0 = time.time()
+    _STATS["requests"] += 1
 
-def _should_verify(profile: AcademicProfile, mode: Mode, difficulty: Difficulty) -> bool:
-    if profile != AcademicProfile.COMPETITIVE_MENTOR:
-        return False
-    if difficulty in {Difficulty.HARD, Difficulty.EXTREME}:
-        return True
-    if mode == Mode.MASTERY:
-        return True
-    return False
+    ctx = context or {}
+    profile = _detect_profile(ctx)
+    mode = _normalize_mode(ctx.get("answer_mode") or ctx.get("mode") or "tutor")
 
-async def _generate(ctx: RequestContext) -> Dict[str, Any]:
-    rid = ctx.request_id or str(uuid.uuid4())
-    profile = select_profile(ctx)
-    mode = ctx.mode()
-    difficulty = estimate_difficulty(ctx.question, profile)
-    timeout_s = _timeout_for(difficulty)
+    # Writer prompt
+    prompt = _build_writer_prompt(question, ctx, mode, profile)
 
-    system = _system_prompt(profile, mode, ctx)
-    user = _user_prompt(ctx)
+    # Decide if we run verifier:
+    difficulty = _norm(ctx.get("difficulty")).lower()
+    is_competitive = (profile == "competitive_mentor")
+    use_verifier = (is_competitive and mode == "mastery") or (difficulty in {"hard", "extreme"})
 
     providers_used: List[str] = []
-    draft_text: str = ""
+    ai_strategy = "gemini_only"
 
-    # Writer routing
     try:
-        if difficulty == Difficulty.EXTREME and profile == AcademicProfile.COMPETITIVE_MENTOR and CLAUDE_API_KEY:
-            # Claude writer for extreme (deep reasoning), then Gemini can be used later if needed
-            draft_text = await _claude_json(CLAUDE_WRITER_MODEL or CLAUDE_MODEL or "claude-sonnet-4-5", system, user, timeout_s)
-            providers_used.append("claude")
-        else:
-            model = _gemini_model_for(mode, difficulty)
-            draft_text = await _gemini_generate(model, system, user, timeout_s)
-            providers_used.append("gemini")
-    except Exception as e:
-        logger.exception("Writer failed: %s", e)
-        # Fallback attempt: Gemini fallbacks
-        for m in (GEMINI_FALLBACK_MODELS or []):
-            try:
-                draft_text = await _gemini_generate(m, system, user, timeout_s)
-                providers_used.append("gemini")
-                break
-            except Exception:
-                continue
+        # 1) Primary write (uses ai_router provider order; default Gemini)
+        out = generate_json(prompt, timeout_s=int(AI_TIMEOUT_SECONDS))
+        providers_used.append(out.get("provider") or os.getenv("AI_PROVIDER", "gemini"))
+        ai_strategy = out.get("strategy") or ai_strategy
 
-    if not draft_text:
-        # deterministic fallback
+        answer = _norm(out.get("answer"))
+        confidence = float(out.get("confidence") or 0.7)
+
+        # 2) Verify + repair once (optional)
+        verification_notes: List[str] = []
+        if use_verifier and answer:
+            ok, issues, fixes = _openai_verify(answer, question, ctx)
+            if not ok and fixes:
+                verification_notes.extend(issues)
+                repair_prompt = json.dumps({
+                    "instruction": "Regenerate a corrected answer. Return ONLY JSON {answer:string, confidence:number, key_points:[string], flags:[string]}",
+                    "question": question,
+                    "draft_answer": answer,
+                    "fix_instructions": fixes,
+                    "context": {"profile": profile, "mode": mode, "exam_mode": ctx.get("exam_mode"), "subject": ctx.get("subject")}
+                }, ensure_ascii=False)
+                out2 = generate_json(repair_prompt, timeout_s=int(AI_TIMEOUT_SECONDS))
+                providers_used.append(out2.get("provider") or "unknown")
+                answer = _norm(out2.get("answer")) or answer
+                confidence = float(out2.get("confidence") or confidence)
+
+        dt = time.time() - t0
+        _STATS["last_provider"] = providers_used[-1] if providers_used else None
+
+        flags = list(out.get("flags") or [])
+        if profile == "competitive_mentor":
+            flags.append("COMPETITIVE")
+        else:
+            flags.append("FOUNDATION")
+
         return {
-            "title": "Unable to generate right now",
-            "why_this_matters": "Network/provider issue — here’s a safe fallback explanation.",
-            "sections": [
-                {"type": "definition", "title": "What you can do", "content": "Please try again in a moment. If the issue persists, contact support."}
-            ],
-            "providers_used": providers_used,
-            "meta": {
-                "request_id": rid,
-                "mode": mode.value,
-                "profile": profile.value,
-                "difficulty": difficulty.value,
-                "verified": False,
-            }
+            "success": True,
+            "answer": answer,
+            "confidence": max(0.05, min(0.99, confidence)),
+            "confidence_label": "high" if confidence >= 0.8 else "medium" if confidence >= 0.55 else "low",
+            "ai_strategy": ai_strategy,
+            "providers_used": providers_used[:4],
+            "latency_ms": int(dt * 1000),
+            "profile": profile,
+            "mode": mode,
+            "verification_notes": verification_notes[:8],
         }
 
-    draft = _json_extract(draft_text)
-
-    # Verify if needed
-    verified = False
-    verification_notes: List[str] = []
-    if _should_verify(profile, mode, difficulty) and OPENAI_API_KEY:
-        try:
-            chk_text = await _openai_json(
-                OPENAI_VERIFIER_MODEL or OPENAI_MODEL or "o3-mini",
-                _checker_system(),
-                _checker_user(draft, ctx),
-                min(timeout_s, 35),
-            )
-            chk = _json_extract(chk_text)
-            if chk.get("ok") is True:
-                verified = True
-                providers_used.append("openai")
-            else:
-                verification_notes = (chk.get("issues") or [])[:8]
-                fix = (chk.get("fix_instructions") or [])[:8]
-                # One repair pass with same writer (Gemini preferred for formatting)
-                repair_user = json.dumps(
-                    {"draft": draft, "fix_instructions": fix, "instruction": "Regenerate corrected JSON only."},
-                    ensure_ascii=False,
-                )
-                # Use Gemini Pro-ish for repair
-                repair_model = os.getenv("GEMINI_REPAIR_MODEL", "gemini-2.5-flash")
-                repaired_text = await _gemini_generate(repair_model, system, repair_user, timeout_s)
-                providers_used.append("openai")
-                providers_used.append("gemini")
-                draft = _json_extract(repaired_text)
-                verified = True  # verified-after-fix (best effort)
-        except Exception as e:
-            logger.warning("Verifier failed: %s", str(e)[:200])
-
-    # Stamp meta & normalize for frontend
-    out: Dict[str, Any] = dict(draft)
-    out.setdefault("sections", [])
-    out["providers_used"] = list(dict.fromkeys(providers_used))
-    out["meta"] = {
-        "request_id": rid,
-        "mode": mode.value,
-        "profile": profile.value,
-        "difficulty": difficulty.value,
-        "verified": bool(verified),
-        "verification_notes": verification_notes,
-        "models": {
-            "gemini_primary": GEMINI_PRIMARY_MODEL,
-            "openai_verifier": OPENAI_VERIFIER_MODEL or OPENAI_MODEL,
-            "claude_writer": CLAUDE_WRITER_MODEL or CLAUDE_MODEL,
-        },
-    }
-    return out
+    except ProviderError as e:
+        _STATS["failures"] += 1
+        _STATS["last_error"] = str(e)
+        logger.exception("ProviderError in solve()", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e),
+            "answer": "Sorry, I couldn't reach the AI provider. Please try again.",
+        }
+    except Exception as e:
+        _STATS["failures"] += 1
+        _STATS["last_error"] = str(e)
+        logger.exception("Unexpected error in solve()", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e),
+            "answer": "Sorry, something went wrong while solving. Please try again.",
+        }
 
 
-def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:
-    """Sync wrapper used by FastAPI routers."""
-    try:
-        return asyncio.run(_generate(ctx))
-    except RuntimeError:
-        # If we're already in an event loop (unlikely for sync FastAPI route), use a new loop in thread
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(_generate(ctx))
-        finally:
-            loop.close()
+def get_orchestrator_stats() -> Dict[str, Any]:
+    return dict(_STATS)
