@@ -95,8 +95,8 @@ class SolveRequest(BaseModel):
     exam_mode: ExamMode = "BOARD"
     language: str = Field("en", description="en / hi / mr etc.")
     answer_mode: str = Field(
-        "step_by_step",
-        description="one_liner / cbse_board / step_by_step / hint_only",
+        "tutor",
+        description="lite / tutor / mastery (Phase-4 canonical modes)",
     )
 
     # Luma Focused Assist (optional). If provided, orchestrator can keep answers short

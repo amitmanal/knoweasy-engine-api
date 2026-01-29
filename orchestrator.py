@@ -367,7 +367,7 @@ async def _generate(ctx: RequestContext) -> Dict[str, Any]:
     try:
         if difficulty == Difficulty.EXTREME and profile == AcademicProfile.COMPETITIVE_MENTOR and CLAUDE_API_KEY:
             # Claude writer for extreme (deep reasoning), then Gemini can be used later if needed
-            draft_text = await _claude_json(CLAUDE_WRITER_MODEL or CLAUDE_MODEL or "claude-sonnet-4-5", system, user, timeout_s)
+            draft_text = await _claude_json(CLAUDE_WRITER_MODEL or CLAUDE_MODEL or "claude-3-5-sonnet-20241022", system, user, timeout_s)
             providers_used.append("claude")
         else:
             model = _gemini_model_for(mode, difficulty)
@@ -468,3 +468,75 @@ def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:
             return loop.run_until_complete(_generate(ctx))
         finally:
             loop.close()
+
+
+
+# -----------------------------
+# Legacy compatibility (router.py expects these)
+# -----------------------------
+
+async def solve(question: str, context: Dict[str, Any], user_tier: str = "free") -> Dict[str, Any]:
+    """Legacy entrypoint used by /solve.
+
+    Returns a dict compatible with router.py _format_response, while still including
+    `sections` for PremiumRenderer.
+    """
+    ctx = RequestContext(
+        request_id=str(context.get("request_id") or ""),
+        question=question,
+        board=str(context.get("board") or ""),
+        class_level=str(context.get("class") or context.get("class_level") or ""),
+        subject=str(context.get("subject") or ""),
+        chapter=str(context.get("chapter") or ""),
+        exam_mode=str(context.get("exam_mode") or ""),
+        language=str(context.get("language") or "en"),
+        study_mode=str(context.get("study_mode") or context.get("surface") or "chat"),
+        answer_mode=str(context.get("answer_mode") or context.get("mode") or "tutor"),
+        user_tier=str(user_tier or "free"),
+    )
+    out = await _generate(ctx)
+
+    # Build a plain-text "answer" for legacy consumers
+    sections = out.get("sections") or []
+    parts: List[str] = []
+    for s in sections:
+        if not isinstance(s, dict):
+            continue
+        t = (s.get("type") or "").lower()
+        if t == "diagram" and isinstance(s.get("diagram"), dict):
+            # Keep diagram out of plain answer; it will render in UI
+            continue
+        if s.get("title"):
+            parts.append(str(s.get("title")).strip())
+        if s.get("content"):
+            parts.append(str(s.get("content")).strip())
+        if isinstance(s.get("steps"), list):
+            for st in s["steps"][:10]:
+                parts.append(f"- {st}")
+
+    plain = "\n".join([p for p in parts if p])[:12000]
+
+    return {
+        "success": True,
+        "answer": plain or out.get("why_this_matters") or "",
+        "providers_used": out.get("providers_used") or [],
+        "ai_strategy": f"{out.get('meta',{}).get('profile','')}/{out.get('meta',{}).get('mode','')}",
+        "confidence": 0.88 if out.get("meta",{}).get("verified") else 0.78,
+        "sections": sections,
+        "learning_object": {
+            "title": out.get("title") or "",
+            "why_this_matters": out.get("why_this_matters") or "",
+            "blocks": [],  # router.py will build blocks if needed
+        },
+        "meta": out.get("meta") or {},
+    }
+
+
+def get_orchestrator_stats() -> Dict[str, Any]:
+    return {
+        "engine": "knoweasy-academic-engine-v3",
+        "gemini_primary": GEMINI_PRIMARY_MODEL,
+        "gemini_fallbacks": GEMINI_FALLBACK_MODELS,
+        "openai_verifier": OPENAI_VERIFIER_MODEL,
+        "claude_writer": CLAUDE_WRITER_MODEL or CLAUDE_MODEL,
+    }
