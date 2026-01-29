@@ -57,7 +57,8 @@ class Config:
     CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "")
     
     # Model Selection
-    GEMINI_MODEL = os.getenv("GEMINI_PRIMARY_MODEL", "gemini-2.0-flash-exp")
+    GEMINI_MODEL = os.getenv("GEMINI_PRIMARY_MODEL", "gemini-1.5-flash")
+    GEMINI_MODEL_FALLBACKS = json.loads(os.getenv("GEMINI_FALLBACK_MODELS", '["gemini-1.5-flash","gemini-1.5-pro"]'))
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
     
@@ -297,9 +298,8 @@ class GeminiClient(BaseAIClient):
         if Config.GEMINI_API_KEY:
             try:
                 genai.configure(api_key=Config.GEMINI_API_KEY)
-                self.model = genai.GenerativeModel(Config.GEMINI_MODEL)
                 self.configured = True
-                logger.info(f"✅ Gemini initialized: {Config.GEMINI_MODEL}")
+                logger.info("✅ Gemini configured")
             except Exception as e:
                 logger.error(f"❌ Gemini init failed: {e}")
     
@@ -316,17 +316,41 @@ class GeminiClient(BaseAIClient):
             
             full_prompt = f"{system}\n\n{prompt}" if system else prompt
             
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.model.generate_content,
-                    full_prompt,
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=0.7,
-                        max_output_tokens=2048,
+                        # Try primary + fallbacks (handles Gemini model name mismatches gracefully)
+            model_candidates = [Config.GEMINI_MODEL] + list(getattr(Config, "GEMINI_MODEL_FALLBACKS", []))
+            seen = set()
+            last_err = None
+            response = None
+            for m in model_candidates:
+                if not m or m in seen:
+                    continue
+                seen.add(m)
+                try:
+                    model = genai.GenerativeModel(m)
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            model.generate_content,
+                            full_prompt,
+                            generation_config=genai.types.GenerationConfig(
+                                temperature=0.7,
+                                max_output_tokens=2048,
+                            )
+                        ),
+                        timeout=timeout
                     )
-                ),
-                timeout=timeout
-            )
+                    logger.info(f"✅ Gemini model used: {m}")
+                    break
+                except Exception as e:
+                    last_err = e
+                    msg = str(e)
+                    # If model name is invalid/unsupported, try next candidate
+                    if ("not found" in msg.lower()) or ("404" in msg) or ("is not supported" in msg.lower()):
+                        logger.warning(f"⚠️ Gemini model failed ({m}): {e}")
+                        continue
+                    raise
+            if response is None:
+                raise last_err if last_err else RuntimeError("Gemini failed with unknown error")
+
             
             answer = response.text if response.text else ""
             elapsed_ms = int((time.time() - start) * 1000)
