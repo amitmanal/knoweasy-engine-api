@@ -217,7 +217,7 @@ async def solve(question: str, context: Dict[str, Any], user_tier: str = "free")
 
     try:
         # 1) Primary write (uses ai_router provider order; default Gemini)
-        out = generate_json(prompt)
+        out = generate_json(prompt, timeout_s=int(AI_TIMEOUT_SECONDS))
         providers_used.append(out.get("provider") or os.getenv("AI_PROVIDER", "gemini"))
         ai_strategy = out.get("strategy") or ai_strategy
 
@@ -237,7 +237,7 @@ async def solve(question: str, context: Dict[str, Any], user_tier: str = "free")
                     "fix_instructions": fixes,
                     "context": {"profile": profile, "mode": mode, "exam_mode": ctx.get("exam_mode"), "subject": ctx.get("subject")}
                 }, ensure_ascii=False)
-                out2 = generate_json(repair_prompt)
+                out2 = generate_json(repair_prompt, timeout_s=int(AI_TIMEOUT_SECONDS))
                 providers_used.append(out2.get("provider") or "unknown")
                 answer = _norm(out2.get("answer")) or answer
                 confidence = float(out2.get("confidence") or confidence)
