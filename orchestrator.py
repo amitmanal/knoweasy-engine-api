@@ -1341,10 +1341,56 @@ def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:
     """
     question = ctx.question or ""
     raw_answer: str = ""
-    # Build a prompt instructing providers to return a plain answer only.
-    prompt = f"Answer the following question clearly and concisely.\nQuestion: {question}\nAnswer:"
+
+    # --- Premium prompt templates (mode-aware + language-aware) ---
+    mode = (ctx.answer_mode or "lite").lower()
+    lang = (ctx.language or "en").lower()
+    board = (ctx.board or "").strip()
+    cls = (ctx.class_ or "").strip() if hasattr(ctx, "class_") else (getattr(ctx, "class", "") or "")
+    subject = (ctx.subject or "").strip()
+
+    # Keep output "exam-safe" by default: no wild claims, clear steps, clean formatting.
+    # IMPORTANT: We want a long, premium answer (not one-liners).
+    if mode in ("tutor", "deep"):
+        depth_spec = "Teach step-by-step with worked examples and checkpoints."
+    elif mode in ("mastery", "exam", "examsafe"):
+        depth_spec = "Go deep: include common mistakes, exam tips, 3 practice questions with answers, and a memory trick."
+    else:
+        depth_spec = "Give fast clarity: crisp definition + 3 key points + 1 quick example."
+
+    # Visual requirement: always include at least one helpful visual plan.
+    visual_spec = (
+        "Include ONE simple visual in text form (choose one): "
+        "(A) ASCII diagram, (B) Mermaid flowchart, (C) table, or (D) mini-graph description. "
+        "Label it clearly as 'Visual'."
+    )
+
+    # Language requirement.
+    lang_spec = (
+        "Write in Hindi" if lang in ("hi", "hindi") else
+        "Write in Marathi" if lang in ("mr", "marathi") else
+        "Write in English"
+    )
+
+    prompt = (
+        f"You are KnowEasy — a premium learning mentor for Indian students. {lang_spec}.\n"
+        f"Student context: board={board}, class={cls}, subject={subject}.\n"
+        f"Task: Answer the user's question with premium structure and perfect formatting.\n"
+        f"Depth: {depth_spec}\n"
+        f"Must-haves:\n"
+        f"1) Start with a 1-line 'Final answer / Key idea'.\n"
+        f"2) Then 'Explanation' as structured bullets/steps.\n"
+        f"3) Add 'Real-life application'.\n"
+        f"4) Add 'Visual' (ASCII/Mermaid/table/mini-graph).\n"
+        f"5) If math: show steps neatly and box final result. If organic chemistry: show mechanisms/conditions clearly.\n"
+        f"6) End with 2-3 short 'Follow-up questions' suggestions.\n"
+        f"{visual_spec}\n\n"
+        f"Question: {question}\n"
+        f"Answer:\n"
+    )
     try:
         # Attempt to call configured providers via ai_router.
+        # NOTE: generate_json may return dict OR string depending on provider.
         result = generate_json(prompt)
         # Some providers return {"answer": "..."} while others may just return text.
         if isinstance(result, dict):

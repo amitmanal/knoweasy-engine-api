@@ -86,7 +86,9 @@ AI_TIMEOUT_SECONDS = _env_int("AI_TIMEOUT_SECONDS", _env_int("REQUEST_TIMEOUT_SE
 
 # Gemini
 GEMINI_API_KEY = _env("GEMINI_API_KEY", _env("GOOGLE_API_KEY", ""))
-GEMINI_PRIMARY_MODEL = _env("GEMINI_PRIMARY_MODEL", _env("GEMINI_MODEL", "gemini-2.0-flash"))
+# Default to a widely-available Gemini model name.
+# This prevents 404s from deprecated/incorrect aliases (e.g., "gemini-1.5-flash-latest").
+GEMINI_PRIMARY_MODEL = _env("GEMINI_PRIMARY_MODEL", _env("GEMINI_MODEL", "gemini-1.5-flash"))
 
 # Optional fallback models (comma-separated). Used if primary model is unavailable.
 GEMINI_FALLBACK_MODELS = [m.strip() for m in _env("GEMINI_FALLBACK_MODELS", "gemini-1.5-flash,gemini-1.5-pro").split(",") if m.strip()]
