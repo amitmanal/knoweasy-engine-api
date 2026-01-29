@@ -1,206 +1,318 @@
+"""learning_object.py
+
+Defines the **AnswerObject** schema used across KnowEasy Learning.
+
+NON‑NEGOTIABLE PRODUCT RULES (locked):
+- No raw chat text as a final product response.
+- Every response must be a structured AnswerObject (Learning Object).
+- 3 modes only: lite / tutor / mastery (age & syllabus safe).
+- Visuals are thinking tools (diagram/graph/map/timeline) when helpful.
+
+This module is deterministic and stable. It does not call external providers.
+External AI calls happen only in orchestrator.py / ai_router.py.
+
 """
-learning_object.py
-------------------
 
-This module defines dataclasses and helper functions for building
-a structured AnswerObject used by the KnowEasy AI backend.  The
-AnswerObject is inspired by the product requirements from the CEO,
-containing clearly defined sections that improve learning outcomes.
-
-This file does not make any outbound network calls.  It simply
-converts raw AI responses into a richer structure.  In the absence
-of a real AI response (for example, when the AI backend cannot
-access external models due to network restrictions during local
-development), we populate the fields using basic heuristics based
-on the user's question.  These placeholders can later be removed
-when integrating with real AI providers.
-
-Author: KnowEasy AI Architecture Team
-"""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import Any, Dict, List, Optional
+from datetime import datetime
 import re
 
 
+# -----------------------------
+# Schema
+# -----------------------------
+
 @dataclass
 class ExplanationBlock:
-    """A single explanatory block of content.
+    title: str
+    content: str
 
-    For now this simply wraps text, but could be extended to
-    include headings, subpoints, and inline LaTeX or HTML.
+
+@dataclass
+class VisualSpec:
+    """A lightweight visual spec that frontend can render.
+
+    Supported fields:
+      - type: diagram | graph | map | timeline | table | formula
+      - title: short title
+      - format: mermaid | text
+      - code: mermaid code or text fallback
     """
-    text: str
+    type: str
+    title: str
+    format: str = "text"
+    code: str = ""
 
 
 @dataclass
 class AnswerObject:
-    """Structured answer returned by the AI.
-
-    The keys mirror the product specification: a title summarising
-    the answer, a one-line explanation of why the topic matters,
-    an ordered list of explanation blocks, optional visuals and
-    examples, common mistakes, an exam relevance footer, clickable
-    follow-up chips, the language code, and the answer mode.
-    """
     title: str
     why_this_matters: str
     explanation_blocks: List[ExplanationBlock]
-    visuals: List[str] = field(default_factory=list)
+    visuals: List[VisualSpec] = field(default_factory=list)
     examples: List[str] = field(default_factory=list)
     common_mistakes: List[str] = field(default_factory=list)
     exam_relevance_footer: str = ""
     follow_up_chips: List[str] = field(default_factory=list)
     language: str = "en"
-    mode: str = "lite"
+    mode: str = "tutor"
 
-    def to_dict(self) -> Dict:
-        """Serialize the AnswerObject to a plain dict for JSON response."""
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "title": self.title,
             "why_this_matters": self.why_this_matters,
-            "explanation_blocks": [block.text for block in self.explanation_blocks],
-            "visuals": self.visuals,
-            "examples": self.examples,
-            "common_mistakes": self.common_mistakes,
-            "exam_relevance_footer": self.exam_relevance_footer,
-            "follow_up_chips": self.follow_up_chips,
-            "language": self.language,
-            "mode": self.mode,
+            "explanation_blocks": [
+                {"title": b.title, "content": b.content} for b in (self.explanation_blocks or [])
+            ],
+            "visuals": [
+                {"type": v.type, "title": v.title, "format": v.format, "code": v.code} for v in (self.visuals or [])
+            ],
+            "examples": list(self.examples or []),
+            "common_mistakes": list(self.common_mistakes or []),
+            "exam_relevance_footer": self.exam_relevance_footer or "",
+            "follow_up_chips": list(self.follow_up_chips or []),
+            "language": self.language or "en",
+            "mode": self.mode or "tutor",
         }
 
 
+# -----------------------------
+# Helpers (deterministic)
+# -----------------------------
+
+def _clean(s: Any) -> str:
+    t = "" if s is None else str(s)
+    t = t.replace("\r", " ").strip()
+    # Keep newlines in content blocks; normalize spacing in titles
+    return t
+
+
+def _short_title_from_question(q: str) -> str:
+    q = _clean(q)
+    q = re.sub(r"\s+", " ", q).strip()
+    if not q:
+        return "Answer"
+    if len(q) <= 96:
+        return q
+    return q[:96].rsplit(" ", 1)[0] + "…"
+
+
+def _exam_footer(board: str, class_level: str, subject: str, exam_mode: str) -> str:
+    bits: List[str] = []
+    if board:
+        bits.append(board.upper())
+    if class_level:
+        bits.append(f"Class {class_level}")
+    if subject:
+        bits.append(subject)
+    ctx = " • ".join([b for b in bits if b])
+    # Never fabricate past-year claims.
+    if exam_mode:
+        return f"Exam relevance (for you): {('Important for ' + exam_mode) if exam_mode else ''}{(' — ' + ctx) if ctx else ''}".strip()
+    return f"Exam relevance (for you): Important concept — {ctx}".strip() if ctx else "Exam relevance (for you): Important concept"
+
+
+def _default_followups(question: str) -> List[str]:
+    q = _clean(question)
+    # Keep calm + actionable
+    return [
+        "Give me a 2-line recap",
+        "Show 2 practice questions",
+        "Explain with a simple diagram",
+        "What are common mistakes here?",
+    ]
+
+
+def _common_mistakes(subject: str) -> List[str]:
+    s = (subject or "").lower()
+    if "math" in s:
+        return [
+            "Skipping units/conditions while simplifying.",
+            "Not checking the final answer with the original equation.",
+        ]
+    if "chem" in s:
+        return [
+            "Mixing up reagents/conditions (acidic vs basic).",
+            "Writing products without checking mechanism/major product rule.",
+        ]
+    if "phys" in s:
+        return [
+            "Forgetting sign conventions or units.",
+            "Using a formula without checking assumptions (constant a, no friction, etc.).",
+        ]
+    if "bio" in s:
+        return [
+            "Confusing similar terms (e.g., diffusion vs osmosis).",
+            "Skipping key labels in diagrams.",
+        ]
+    return [
+        "Learning words without understanding the core idea.",
+        "Not connecting the concept to an example problem.",
+    ]
+
+
+def _visual_for_question(question: str, subject: str) -> List[VisualSpec]:
+    q = (question or "").lower()
+    s = (subject or "").lower()
+
+    # Biology: photosynthesis / respiration etc.
+    if any(k in q for k in ["photosynthesis", "respiration", "cell", "chloroplast"]) or "bio" in s:
+        code = """flowchart LR
+A[Sunlight] --> B[Chloroplast]
+B --> C[Light reactions]
+C --> D[ATP + NADPH]
+D --> E[Calvin cycle]
+E --> F[Glucose]
+"""
+        return [VisualSpec(type="diagram", title="Concept flow (simplified)", format="mermaid", code=code)]
+
+    # Chemistry: reaction mechanism (very simplified)
+    if "chem" in s or any(k in q for k in ["tollens", "aldol", "sn1", "sn2", "oxidation", "reduction"]):
+        code = """flowchart LR
+A[Reactant] -->|Reagent / Condition| B[Intermediate]
+B --> C[Major product]
+"""
+        return [VisualSpec(type="diagram", title="Reaction roadmap (template)", format="mermaid", code=code)]
+
+    # Physics: graph template
+    if "phys" in s or any(k in q for k in ["velocity", "acceleration", "graph", "force", "motion"]):
+        code = """flowchart LR
+A[Given] --> B[Choose formula]
+B --> C[Substitute values]
+C --> D[Compute + check units]
+"""
+        return [VisualSpec(type="diagram", title="Problem-solving roadmap", format="mermaid", code=code)]
+
+    # History/Geo timeline/map placeholders
+    if any(k in s for k in ["history", "geography", "civics"]) or any(k in q for k in ["timeline", "map", "river", "empire"]):
+        return [VisualSpec(type="timeline", title="Timeline (template)", format="text", code="• Event 1 → Event 2 → Event 3")]
+
+    return []
+
+
+def _split_to_steps(raw_answer: str) -> List[str]:
+    """Convert a raw answer into bullet-ish steps (deterministic)."""
+    a = _clean(raw_answer)
+    if not a:
+        return []
+    # Split by blank lines or sentences (light)
+    parts = [p.strip() for p in re.split(r"\n\s*\n", a) if p.strip()]
+    if len(parts) >= 2:
+        return parts[:6]
+    # Sentence split
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", a) if s.strip()]
+    return sents[:6]
+
+
+# -----------------------------
+# Public builder
+# -----------------------------
+
 def build_answer_object(
+    *,
     question: str,
     raw_answer: str,
-    *,
     language: str = "en",
-    mode: str = "lite",
-    board: Optional[str] = None,
-    class_level: Optional[str] = None,
+    mode: str = "tutor",
+    board: str = "",
+    class_level: str = "",
+    subject: str = "",
+    exam_mode: str = "",
+    study_mode: str = "chat",
 ) -> AnswerObject:
-    """Construct an AnswerObject from a raw answer string using heuristics.
+    """Build a syllabus-safe AnswerObject.
 
-    This helper attempts to populate all fields of the AnswerObject
-    specification, including examples, common mistakes, visuals, and
-    exam relevance.  The implementation relies on simple heuristics
-    based on the question content because the environment may not
-    have access to real AI providers.  When integrated with actual
-    AI models, these heuristics can be replaced with AI-generated
-    values.
-
-    Args:
-        question: The user question to contextualise the answer.
-        raw_answer: The plain text answer from an AI model or fallback.
-        language: Two-letter language code (default "en").
-        mode: The answer mode (lite, tutor, mastery).
-        board: Optional educational board for exam relevance (e.g., "CBSE").
-        class_level: Optional class level (e.g., "10").
-
-    Returns:
-        AnswerObject populated with heuristic fields.
+    This is used as the final, stable contract returned to frontend.
+    It can wrap a provider answer OR a fallback answer.
     """
-    # --- Title and introductory statement ---
-    # Use the first sentence of the answer as the title, or fallback to the question
-    title = raw_answer.strip().split(".")[0].strip()
-    if not title:
-        title = question.strip().capitalize() if question else "Answer"
+    q = _clean(question)
+    ans = _clean(raw_answer)
 
-    # A generic one-line explanation of why the topic matters
-    why = (
-        "Understanding this concept builds a strong foundation for your studies."
-    )
+    m = (mode or "tutor").lower().strip()
+    if m not in {"lite", "tutor", "mastery"}:
+        m = "tutor"
 
-    # --- Explanation blocks ---
-    # Split the raw answer into paragraphs for separate explanation blocks
-    paragraphs = [p.strip() for p in raw_answer.split("\n") if p.strip()]
-    if not paragraphs:
-        paragraphs = [raw_answer.strip()] if raw_answer.strip() else ["No answer available."]
-    blocks: List[ExplanationBlock] = [ExplanationBlock(text=p) for p in paragraphs]
-
-    # --- Examples ---
-    # Provide at least one example based on the question keywords.
-    examples: List[str] = []
-    tokens = [t.lower() for t in re.findall(r"\b\w+\b", question)] if question else []
-    if tokens:
-        concept = tokens[0]
-        examples.append(
-            f"For example, consider the concept of {concept}. Applying {concept} in a real-world situation helps illustrate the idea."
-        )
-        if len(paragraphs) > 1:
-            examples.append(
-                f"Another example: when studying {concept}, try to relate it to everyday activities."
-            )
-
-    # --- Common mistakes ---
-    common_mistakes: List[str] = []
-    if tokens:
-        concept = tokens[0]
-        common_mistakes.append(
-            f"A common mistake is to confuse the key ideas of {concept} with unrelated topics."
-        )
-        common_mistakes.append(
-            f"Students often forget to review the basic definitions when working with {concept}."
-        )
-
-    # --- Exam relevance ---
-    if board and class_level:
-        exam_footer = (
-            f"Important for {board.upper()} Class {class_level} syllabus and exam preparation."
-        )
-    else:
-        exam_footer = "Important for your syllabus and exam preparation."
-
-    # --- Visuals ---
-    visuals: List[Dict] = []
-    try:
-        if mode and mode.lower() in {"tutor", "mastery"}:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-            from io import BytesIO
-            import base64
-
-            categories = ["Basics", "Intermediate", "Advanced"]
-            q_len = len(question or "")
-            values = [max(1, q_len % 5 + 3), max(1, (q_len // 2) % 5 + 2), max(1, (q_len // 3) % 5 + 1)]
-            plt.figure(figsize=(4, 2.5))
-            bars = plt.bar(categories, values, color=["#4f8dff", "#a855f7", "#34d399"])
-            plt.title("Concept Depth Overview")
-            plt.ylabel("Relative importance")
-            plt.ylim(0, max(values) + 2)
-            for idx, bar in enumerate(bars):
-                plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3, str(values[idx]), ha='center', va='bottom')
-            plt.tight_layout()
-            buffer = BytesIO()
-            plt.savefig(buffer, format='png', bbox_inches='tight')
-            plt.close()
-            encoded = base64.b64encode(buffer.getvalue()).decode('utf-8')
-            visuals.append({
-                "src": f"data:image/png;base64,{encoded}",
-                "title": "Concept Depth Overview"
-            })
-    except Exception:
+    # Luma is tutor-first and concise by feel:
+    if (study_mode or "").lower().strip() == "luma" and m == "mastery":
+        # Allow mastery if user selects it, but keep blocks tighter by content
         pass
 
-    # --- Follow-up chips ---
-    chips: List[str] = []
-    if tokens:
-        unique_tokens: List[str] = []
-        for t in tokens:
-            if t not in unique_tokens and len(unique_tokens) < 3:
-                unique_tokens.append(t)
-        chips = [f"Learn about {t}" for t in unique_tokens]
+    title = _short_title_from_question(q)
+    why = "This helps you understand the concept clearly and apply it in exam-style questions."
 
-    return AnswerObject(
+    steps = _split_to_steps(ans)
+
+    blocks: List[ExplanationBlock] = []
+
+    if m == "lite":
+        # 2 blocks, fast clarity
+        one_line = steps[0] if steps else (ans[:220].rsplit(" ", 1)[0] + "…") if len(ans) > 240 else ans
+        blocks = [
+            ExplanationBlock("In one line", one_line or "Here’s the core idea in one line."),
+            ExplanationBlock("Key idea", steps[1] if len(steps) > 1 else "Focus on the definition + one example."),
+        ]
+    elif m == "tutor":
+        blocks = [
+            ExplanationBlock("Simple definition", steps[0] if steps else ans or "Let’s define it simply."),
+            ExplanationBlock("Step-by-step", "\n".join(f"• {s}" for s in steps[1:4]) if len(steps) > 1 else "• Step 1: Identify what is asked\n• Step 2: Recall the definition/formula\n• Step 3: Apply carefully"),
+            ExplanationBlock("Why it works", steps[4] if len(steps) > 4 else "Because it follows from the basic rule/definition for this topic."),
+        ]
+    else:  # mastery
+        blocks = [
+            ExplanationBlock("Concept (exam-safe)", steps[0] if steps else ans or "Concept summary."),
+            ExplanationBlock("Reasoning / working", "\n".join(f"• {s}" for s in steps[1:5]) if len(steps) > 1 else "• Break the problem into parts\n• Apply the correct rule\n• Check assumptions + units"),
+            ExplanationBlock("Common mistakes", "\n".join(f"• {m}" for m in _common_mistakes(subject)[:3])),
+            ExplanationBlock("How exam questions are asked", "• Definition / MCQ\n• Assertion-Reason\n• Numerical / short notes (depending on subject)"),
+            ExplanationBlock("Practice now", "1) Write the definition in 2 lines\n2) Solve 2 similar questions\n3) Explain the concept to a friend in 30 seconds"),
+        ]
+
+    visuals = _visual_for_question(q, subject)
+
+    examples: List[str] = []
+    if m != "lite":
+        examples = [
+            "Example: apply the definition to a simple real-life situation.",
+            "Example: solve a short exam-style question using the steps above.",
+        ]
+    if m == "mastery":
+        examples.append("Quick check: can you explain the same idea in 2 lines without looking?")
+
+    footer = _exam_footer(board or "", class_level or "", subject or "", (exam_mode or "").upper().strip() or "")
+
+    ao = AnswerObject(
         title=title,
         why_this_matters=why,
         explanation_blocks=blocks,
         visuals=visuals,
         examples=examples,
-        common_mistakes=common_mistakes,
-        exam_relevance_footer=exam_footer,
-        follow_up_chips=chips,
-        language=language,
-        mode=mode,
+        common_mistakes=_common_mistakes(subject),
+        exam_relevance_footer=footer,
+        follow_up_chips=_default_followups(q),
+        language=(language or "en").lower().strip() or "en",
+        mode=m,
     )
+    return ao
+
+
+def ensure_answer_object_dict(obj: Any) -> Dict[str, Any]:
+    """Validate minimal schema and return a safe dict.
+
+    This is a strict guardrail so frontend never receives raw text-only answers.
+    """
+    if isinstance(obj, AnswerObject):
+        return obj.to_dict()
+    if isinstance(obj, dict):
+        # Required keys
+        required = {"title", "why_this_matters", "explanation_blocks", "visuals", "examples", "common_mistakes", "exam_relevance_footer", "follow_up_chips", "language", "mode"}
+        if required.issubset(set(obj.keys())) and isinstance(obj.get("explanation_blocks"), list):
+            return obj
+    # Fallback minimal
+    ao = build_answer_object(
+        question=str(getattr(obj, "question", "") or "Answer"),
+        raw_answer=str(obj) if obj is not None else "",
+        mode="tutor",
+    )
+    return ao.to_dict()

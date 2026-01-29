@@ -456,63 +456,61 @@ def _format_explanation_by_mode(answer: str, answer_mode: str) -> tuple[str, lis
 
 
 def _build_learning_object(*, question: str, answer: str, context: dict, answer_mode: str) -> dict:
-    """Create a stable Answer-as-Learning-Object payload.
+    """Create the canonical AnswerObject (Learning Object) payload.
 
-    This is intentionally deterministic (no extra AI calls).
-    """
-    board = str(context.get("board") or "").strip().upper() or "CBSE"
-    klass = str(context.get("class") or context.get("class_level") or "").strip() or "11"
-    subject = str(context.get("subject") or "").strip()
-    exam_mode = str(context.get("exam_mode") or "BOARD").strip().upper()
-    lang = str(context.get("language") or "en").strip().lower()
-    mode_label = _mode_label_from_answer_mode(answer_mode)
-    today = datetime.utcnow().date().isoformat()
-
-    # Calm, honest exam footer (non-fabricated)
-    footer_bits = []
-    if exam_mode and exam_mode != "OTHER":
-        footer_bits.append(f"Exam relevance: Useful for {exam_mode}")
-    if board:
-        footer_bits.append(f"Context: {board} • Class {klass}{(' • ' + subject) if subject else ''}")
-    exam_footer = " | ".join(footer_bits) if footer_bits else ""
-
-    lo = {
-        "title": (question[:120] + ("…" if len(question) > 120 else "")).strip() or "Answer",
-        "why_this_matters": "This helps you understand the core concept and apply it in similar questions.",
-
-        # Mode-based explanation: Lite (short), Tutor (teach step-by-step), Mastery (deeper + exam-ready)
-        "explanation": None,
-        "key_points": [],
-        "examples": [],
-        "common_mistakes": [],
-        "visual_plan": _default_visual_plan(subject, question),
-
-        "exam_relevance_footer": exam_footer,
-        "follow_up_chips": [
-            "Give me a quick recap",
-            "Show 2 practice questions",
-            "Explain like I’m younger",
-        ],
-        "mode": mode_label,
-        "language": lang,
-        "date": today,
+    IMPORTANT: This must match the product schema:
+    AnswerObject {
+      title, why_this_matters, explanation_blocks, visuals, examples,
+      common_mistakes, exam_relevance_footer, follow_up_chips, language, mode
     }
 
-    explanation_text, key_points = _format_explanation_by_mode(answer, answer_mode)
-    lo["explanation"] = explanation_text
-    lo["key_points"] = key_points
+    This wrapper is deterministic and stable.
+    External model calls happen in orchestrator.py.
+    """
+    try:
+        from learning_object import build_answer_object, ensure_answer_object_dict
+    except Exception:
+        build_answer_object = None  # type: ignore
+        ensure_answer_object_dict = None  # type: ignore
 
-    # Deterministic examples (lightweight placeholders; will be upgraded with syllabus mapping later)
-    if mode_label != "Luma Lite":
-        lo["examples"] = [
-            "Try solving a similar question by changing the numbers/values.",
-            "Explain the concept in your own words in 2–3 lines.",
-        ]
+    board = str(context.get("board") or "").strip()
+    klass = str(context.get("class") or context.get("class_level") or "").strip()
+    subject = str(context.get("subject") or "").strip()
+    exam_mode = str(context.get("exam_mode") or "").strip()
+    lang = str(context.get("language") or "en").strip().lower()
+    study_mode = str(context.get("study_mode") or "chat").strip().lower()
 
-    lo["common_mistakes"] = _common_mistakes_hint(subject)
+    mode = (answer_mode or "").lower().strip()
+    if mode not in {"lite", "tutor", "mastery"}:
+        mode = "tutor"
 
-    return lo
+    if build_answer_object:
+        ao = build_answer_object(
+            question=question,
+            raw_answer=answer,
+            language=lang,
+            mode=mode,
+            board=board,
+            class_level=klass,
+            subject=subject,
+            exam_mode=exam_mode,
+            study_mode=study_mode,
+        )
+        return ensure_answer_object_dict(ao)
 
+    # ultra-safe fallback
+    return {
+        "title": (question or "Answer")[:120],
+        "why_this_matters": "This helps you learn the concept clearly and apply it.",
+        "explanation_blocks": [{"title": "Explanation", "content": (answer or "").strip()}],
+        "visuals": [],
+        "examples": [],
+        "common_mistakes": [],
+        "exam_relevance_footer": "",
+        "follow_up_chips": ["Give me a 2-line recap", "Show 2 practice questions"],
+        "language": lang or "en",
+        "mode": mode,
+    }
 
 @router.post("/export/pdf")
 async def export_pdf(request: Request):

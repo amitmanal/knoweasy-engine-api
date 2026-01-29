@@ -90,7 +90,8 @@ class GeminiClient:
             GEMINI_PRIMARY_MODEL,
             GEMINI_FALLBACK_MODEL,
             "gemini-2.0-flash",
-            ]
+            "gemini-1.5-flash-latest",
+        ]
 
         candidates: list[str] = []
         seen: set[str] = set()

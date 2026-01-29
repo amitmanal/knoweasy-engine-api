@@ -119,14 +119,77 @@ def render_learning_object_pdf(lo: Dict[str, Any], *, brand: str = "KnowEasy", m
             y -= 4
 
     section("Why this matters", lo.get("why_this_matters"))
-    section("Explanation", lo.get("explanation"))
+
+    # New schema: explanation_blocks (preferred)
+    blocks = lo.get("explanation_blocks")
+    if isinstance(blocks, list) and blocks:
+        ensure_space()
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(left, y, "Explanation")
+        y -= 14
+        c.setFont("Helvetica", 10)
+        for b in blocks:
+            if isinstance(b, dict):
+                bt = _safe_text(b.get("title") or "")
+                bc = str(b.get("content") or "")
+            else:
+                bt = ""
+                bc = str(b or "")
+            if bt:
+                c.setFont("Helvetica-Bold", 10)
+                for line in _wrap_lines(bt, 105):
+                    c.drawString(left, y, line)
+                    y -= 12
+                c.setFont("Helvetica", 10)
+            for line in _wrap_lines(bc, 105):
+                c.drawString(left, y, line)
+                y -= 12
+            y -= 4
+        y -= 2
+    else:
+        # Back-compat: explanation (single text)
+        section("Explanation", lo.get("explanation"))
+
+    # Visuals (if present)
+    visuals = lo.get("visuals")
+    if isinstance(visuals, list) and visuals:
+        ensure_space()
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(left, y, "Visuals")
+        y -= 14
+        c.setFont("Helvetica", 9)
+        for v in visuals:
+            if isinstance(v, dict):
+                vt = _safe_text(v.get("title") or "")
+                vcode = _safe_text(v.get("code") or "")
+                vtype = _safe_text(v.get("type") or "")
+                vfmt = _safe_text(v.get("format") or "")
+            else:
+                vt = ""
+                vcode = _safe_text(v)
+                vtype = ""
+                vfmt = ""
+            label = " — ".join([x for x in [vtype, vt, vfmt] if x])
+            if label:
+                c.setFont("Helvetica-Bold", 9)
+                for line in _wrap_lines(label, 110):
+                    c.drawString(left, y, line)
+                    y -= 11
+                c.setFont("Helvetica", 9)
+            if vcode:
+                for line in _wrap_lines(vcode, 110):
+                    c.drawString(left, y, line)
+                    y -= 11
+            y -= 4
+        y -= 2
+    else:
+        # Back-compat: visual_plan
+        vp = lo.get("visual_plan")
+        if vp:
+            section("Visual plan", vp)
+
     section("Examples", lo.get("examples"))
     section("Common mistakes", lo.get("common_mistakes"))
-
-    # Visual plan (textual, exam-safe)
-    vp = lo.get("visual_plan")
-    if vp:
-        section("Visual plan", vp)
 
     # Exam relevance footer (calm, honest)
     footer = _safe_text(lo.get("exam_relevance_footer") or "")

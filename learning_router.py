@@ -84,8 +84,9 @@ async def answer(req: AnswerRequest):
     response: Dict[str, Any] = {
         "ok": True,
         "learning_object": answer_dict,
-        "final_answer": "\n".join(answer_dict.get("explanation_blocks", [])),
-        "answer": "\n".join(answer_dict.get("explanation_blocks", [])),
+        # Back-compat text fields (frontend must prefer learning_object)
+        "final_answer": "\n".join([b.get("content","") for b in (answer_dict.get("explanation_blocks") or []) if isinstance(b, dict)]) if isinstance(answer_dict, dict) else "",
+        "answer": "\n".join([b.get("content","") for b in (answer_dict.get("explanation_blocks") or []) if isinstance(b, dict)]) if isinstance(answer_dict, dict) else "",
         "meta": {
             "credits_used": 0,
             "providers_used": [],
