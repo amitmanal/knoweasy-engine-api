@@ -1,288 +1,208 @@
-
-"""orchestrator.py — KnowEasy One-Brain Orchestrator (Phase-4)
-
-Fixes:
-- Supports ONLY 3 modes: lite / tutor / mastery (front-end compatible)
-- Two-tier Academic Engine:
-  - Foundation Builder (Classes 5–10): ceiling enforced (1–2 grades ahead)
-  - Competitive Mentor (11–12 or JEE/NEET/CET/Olympiad): deep answers, NO short answers
-- Keeps backward compatible async `solve()` for router.py
-- Optional OpenAI verification pass for hard/mastery competitive (one repair max)
-
-This file is designed to boot on Render reliably (no import loops).
-"""
-
 from __future__ import annotations
 
-import json
 import os
 import time
-import logging
-import urllib.request
-import urllib.error
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
-from ai_router import generate_json, ProviderError
-from config import (
-    GEMINI_PRIMARY_MODEL,
-    GEMINI_FALLBACK_MODELS,
-    AI_TIMEOUT_SECONDS,
-    OPENAI_API_KEY,
-)
+# IMPORTANT:
+# learning_router imports RequestContext + generate_learning_answer from here.
+# Keep these names stable.
 
-logger = logging.getLogger("knoweasy.orchestrator")
+from ai_router import generate_json  # type: ignore
 
 
-# -----------------------------
-# Helpers: profile + ceilings
-# -----------------------------
+@dataclass
+class RequestContext:
+    # Minimal context needed by learning_router + our routing.
+    question: str
+    answer_mode: str = "tutor"          # lite|tutor|mastery (frontend may send these)
+    language: str = "en"
 
-def _norm(s: Any) -> str:
-    return ("" if s is None else str(s)).strip()
+    # Optional academic context (may be empty / unknown)
+    class_level: str = ""
+    board: str = ""
+    subject: str = ""
+    chapter: str = ""
+    exam_mode: str = ""
+    study_mode: str = ""
 
-def _detect_profile(ctx: Dict[str, Any]) -> str:
-    exam = _norm(ctx.get("exam_mode") or ctx.get("board_or_exam")).upper()
-    klass = _norm(ctx.get("class") or ctx.get("class_level"))
-    try:
-        k = int("".join([c for c in klass if c.isdigit()]) or "0")
-    except Exception:
-        k = 0
 
-    if exam in {"JEE", "NEET", "CET", "OLYMPIAD"}:
-        return "competitive_mentor"
-    if k >= 11:
-        return "competitive_mentor"
-    return "foundation_builder"
-
-def _normalize_mode(answer_mode: str) -> str:
-    m = _norm(answer_mode).lower()
-    # Accept legacy values too
-    if m in {"quick", "one_liner", "hint_only"}:
+def _normalize_mode(mode: str) -> str:
+    m = (mode or "").strip().lower()
+    if m in ("lite", "luma_lite", "luma lite"):
         return "lite"
-    if m in {"deep", "step_by_step", "tutor"}:
+    if m in ("tutor", "luma_tutor", "luma tutor"):
         return "tutor"
-    if m in {"exam", "mastery"}:
+    if m in ("mastery", "luma_mastery", "luma mastery"):
         return "mastery"
-    if m in {"lite", "tutor", "mastery"}:
-        return m
     return "tutor"
 
 
-def _build_writer_prompt(question: str, ctx: Dict[str, Any], mode: str, profile: str) -> str:
-    """Prompt the writer model to return JSON with an 'answer' string."""
-    subject = _norm(ctx.get("subject"))
-    board = _norm(ctx.get("board"))
-    exam = _norm(ctx.get("exam_mode") or ctx.get("board_or_exam"))
-    klass = _norm(ctx.get("class") or ctx.get("class_level"))
-    lang = (_norm(ctx.get("language")) or "en").lower()
+def _generate_json_safe(prompt: str, timeout_s: int) -> Dict[str, Any]:
+    """Call ai_router.generate_json in a backward-compatible way.
 
-    ceiling_note = ""
-    if profile == "foundation_builder":
-        ceiling_note = (
-            "You MUST stay syllabus-safe for Classes 5–10. "
-            "Do NOT introduce Olympiad/JEE depth. Max 1–2 grades ahead even in mastery."
-        )
-    else:
-        ceiling_note = (
-            "You are teaching for JEE/NEET/CET/Olympiad. Depth is allowed. "
-            "Do NOT be short. Provide full reasoning and exam-safe steps."
-        )
-
-    mode_rules = {
-        "lite": (
-            "Fast clarity. For foundation: 2–5 short lines. "
-            "For competitive: NOT short — give final result/formula + 3–6 bullet steps + key idea."
-        ),
-        "tutor": (
-            "Teach step-by-step like a great teacher. Use headings and bullets. "
-            "Include key definitions, steps, and 1–2 exam tips."
-        ),
-        "mastery": (
-            "Deep exam mentor. Provide: concept foundation, full derivation/logic, alternative method if applicable, "
-            "common traps, and 3–5 practice questions at end."
-        ),
-    }[mode]
-
-    # Force JSON output so downstream is stable
-    return json.dumps({
-        "instruction": (
-            "Return ONLY valid JSON. No markdown. "
-            "Schema: {answer: string, confidence: number(0..1), key_points: [string], flags:[string]}."
-        ),
-        "context": {
-            "profile": profile,
-            "mode": mode,
-            "board": board,
-            "class": klass,
-            "exam": exam,
-            "subject": subject,
-            "language": lang,
-        },
-        "rules": {
-            "ceiling": ceiling_note,
-            "mode_rules": mode_rules,
-            "tone": "calm, premium, exam-safe",
-            "format": "structured headings + bullets; no fluff; no fake citations",
-        },
-        "question": question
-    }, ensure_ascii=False)
-
-
-# -----------------------------
-# Optional verification (OpenAI)
-# -----------------------------
-
-def _openai_verify(draft_answer: str, question: str, ctx: Dict[str, Any]) -> Tuple[bool, List[str], List[str]]:
-    """Return (ok, issues, fix_instructions). Strict JSON response."""
-    if not OPENAI_API_KEY:
-        return True, [], []
-
-    model = os.getenv("OPENAI_VERIFIER_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
-    timeout_s = int(os.getenv("OPENAI_VERIFY_TIMEOUT", "18"))
-
-    system = "You are a strict verifier for exam answers. Check correctness, missing steps, equation/unit errors, and misleading claims. Return ONLY JSON: {ok:boolean, issues:[string], fix_instructions:[string]}"
-    payload = {
-        "model": model,
-        "temperature": 0.0,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps({
-                "question": question,
-                "draft_answer": draft_answer,
-                "context": {
-                    "exam_mode": ctx.get("exam_mode"),
-                    "class_level": ctx.get("class") or ctx.get("class_level"),
-                    "subject": ctx.get("subject"),
-                }
-            }, ensure_ascii=False)}
-        ]
-    }
-
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-        },
-        method="POST",
-    )
+    We previously passed timeout_s, but some ai_router versions expose different kwargs.
+    This wrapper tries common variants and finally calls without a timeout kwarg.
+    """
+    # Try the kwarg we used earlier
     try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            raw = resp.read().decode("utf-8", errors="ignore")
-        data = json.loads(raw)
-        content = data["choices"][0]["message"]["content"]
-        chk = json.loads(content)
-        ok = bool(chk.get("ok", False))
-        issues = list(chk.get("issues") or [])
-        fixes = list(chk.get("fix_instructions") or [])
-        return ok, issues[:12], fixes[:12]
-    except Exception as e:
-        # If verifier fails, do not block user; just skip
-        logger.warning(f"Verifier skipped due to error: {e}")
-        return True, [], []
+        return generate_json(prompt, timeout_s=timeout_s)  # type: ignore
+    except TypeError:
+        pass
+
+    # Try other common names
+    for kw in ("timeout_seconds", "timeout", "request_timeout", "timeout_sec"):
+        try:
+            return generate_json(prompt, **{kw: timeout_s})  # type: ignore
+        except TypeError:
+            continue
+
+    # Final fallback (no timeout kw)
+    return generate_json(prompt)  # type: ignore
 
 
-# -----------------------------
-# Public API: solve()
-# -----------------------------
+def solve(
+    question: str,
+    answer_mode: str = "tutor",
+    language: str = "en",
+    class_level: str = "",
+    board: str = "",
+    subject: str = "",
+    chapter: str = "",
+    exam_mode: str = "",
+    study_mode: str = "",
+) -> Dict[str, Any]:
+    """Main solver used by /v1/ai/answer (router.py).
 
-_STATS = {
-    "requests": 0,
-    "failures": 0,
-    "last_error": None,
-    "last_provider": None,
-}
-
-async def solve(question: str, context: Dict[str, Any], user_tier: str = "free") -> Dict[str, Any]:
-    """Backwards compatible entry used by router.py (async)."""
+    Returns:
+      {
+        ok: bool,
+        answer_object: {...},   # Answer-as-Learning-Object schema
+        meta: {...}
+      }
+    """
     t0 = time.time()
-    _STATS["requests"] += 1
+    mode = _normalize_mode(answer_mode)
 
-    ctx = context or {}
-    profile = _detect_profile(ctx)
-    mode = _normalize_mode(ctx.get("answer_mode") or ctx.get("mode") or "tutor")
+    # Model routing (env-driven so you can tune without code)
+    # IMPORTANT: These are MODEL NAMES as expected by your provider wrappers.
+    # If a model name is wrong for the provider SDK, ai_router should fallback.
+    # Defaults are conservative + cheap.
+    default_writer = {
+        "lite": os.getenv("WRITER_MODEL_LITE", "gemini-1.5-flash"),
+        "tutor": os.getenv("WRITER_MODEL_TUTOR", "claude-3-5-sonnet"),
+        "mastery": os.getenv("WRITER_MODEL_MASTERY", "claude-3-5-sonnet"),
+    }.get(mode, "claude-3-5-sonnet")
 
-    # Writer prompt
-    prompt = _build_writer_prompt(question, ctx, mode, profile)
+    verifier_model = os.getenv("VERIFIER_MODEL", "gpt-4o-mini")
 
-    # Decide if we run verifier:
-    difficulty = _norm(ctx.get("difficulty")).lower()
-    is_competitive = (profile == "competitive_mentor")
-    use_verifier = (is_competitive and mode == "mastery") or (difficulty in {"hard", "extreme"})
+    # Timeouts: keep within Render free limits. You can raise later.
+    timeout_s = int(os.getenv("AI_TIMEOUT_SECONDS", "45"))
 
-    providers_used: List[str] = []
-    ai_strategy = "gemini_only"
+    prompt = f"""You are KnowEasy (Luma) — a calm, premium AI teacher for Indian students.
+
+OUTPUT FORMAT:
+Return ONLY valid JSON matching this schema:
+{{
+  "title": string,
+  "mode": "{mode}",
+  "language": "{language}",
+  "sections": [
+    {{
+      "type": "concept" | "steps" | "example" | "visual" | "mistakes" | "practice" | "exam_footer",
+      "heading": string,
+      "content_markdown": string
+    }}
+  ],
+  "visuals": [
+    {{
+      "kind": "diagram" | "flow" | "table" | "graph",
+      "title": string,
+      "spec": string   // ASCII/mermaid-like spec; NO external links; keep short
+    }}
+  ],
+  "references": [string],
+  "meta": {{
+    "class_level": "{class_level}",
+    "board": "{board}",
+    "subject": "{subject}",
+    "chapter": "{chapter}",
+    "exam_mode": "{exam_mode}",
+    "study_mode": "{study_mode}",
+    "writer_model": "{default_writer}",
+    "verifier_model": "{verifier_model}"
+  }}
+}}
+
+RULES:
+- Be exam-safe and avoid hallucinations. If unsure, state assumption + safest explanation.
+- For JEE/NEET/CET/Olympiad tone: include multiple methods + common traps in Mastery.
+- Always include at least 1 visual in Tutor/Mastery (ASCII/mermaid spec).
+- Keep Lite short (1-3 lines + maybe one tiny visual).
+- Use simple, clear English by default. If language != "en", write in that language with English key-term anchors.
+QUESTION:
+{question}
+"""
 
     try:
-        # 1) Primary write (uses ai_router provider order; default Gemini)
-        out = generate_json(prompt, timeout_s=int(AI_TIMEOUT_SECONDS))
-        providers_used.append(out.get("provider") or os.getenv("AI_PROVIDER", "gemini"))
-        ai_strategy = out.get("strategy") or ai_strategy
+        # Writer pass
+        data = _generate_json_safe(prompt, timeout_s=timeout_s)
 
-        answer = _norm(out.get("answer"))
-        confidence = float(out.get("confidence") or 0.7)
+        # Basic sanity: ensure dict
+        if not isinstance(data, dict):
+            raise ValueError("generate_json did not return a JSON object")
 
-        # 2) Verify + repair once (optional)
-        verification_notes: List[str] = []
-        if use_verifier and answer:
-            ok, issues, fixes = _openai_verify(answer, question, ctx)
-            if not ok and fixes:
-                verification_notes.extend(issues)
-                repair_prompt = json.dumps({
-                    "instruction": "Regenerate a corrected answer. Return ONLY JSON {answer:string, confidence:number, key_points:[string], flags:[string]}",
-                    "question": question,
-                    "draft_answer": answer,
-                    "fix_instructions": fixes,
-                    "context": {"profile": profile, "mode": mode, "exam_mode": ctx.get("exam_mode"), "subject": ctx.get("subject")}
-                }, ensure_ascii=False)
-                out2 = generate_json(repair_prompt, timeout_s=int(AI_TIMEOUT_SECONDS))
-                providers_used.append(out2.get("provider") or "unknown")
-                answer = _norm(out2.get("answer")) or answer
-                confidence = float(out2.get("confidence") or confidence)
+        # Ensure required keys
+        data.setdefault("title", "Answer")
+        data.setdefault("mode", mode)
+        data.setdefault("language", language)
+        data.setdefault("sections", [])
+        data.setdefault("visuals", [])
+        data.setdefault("references", [])
+        data.setdefault("meta", {})
+        data["meta"] = {**data.get("meta", {}), "writer_model": default_writer, "verifier_model": verifier_model}
 
-        dt = time.time() - t0
-        _STATS["last_provider"] = providers_used[-1] if providers_used else None
-
-        flags = list(out.get("flags") or [])
-        if profile == "competitive_mentor":
-            flags.append("COMPETITIVE")
-        else:
-            flags.append("FOUNDATION")
-
-        return {
-            "success": True,
-            "answer": answer,
-            "confidence": max(0.05, min(0.99, confidence)),
-            "confidence_label": "high" if confidence >= 0.8 else "medium" if confidence >= 0.55 else "low",
-            "ai_strategy": ai_strategy,
-            "providers_used": providers_used[:4],
-            "latency_ms": int(dt * 1000),
-            "profile": profile,
+        meta = {
             "mode": mode,
-            "verification_notes": verification_notes[:8],
+            "ms": int((time.time() - t0) * 1000),
         }
-
-    except ProviderError as e:
-        _STATS["failures"] += 1
-        _STATS["last_error"] = str(e)
-        logger.exception("ProviderError in solve()", exc_info=True)
-        return {
-            "success": False,
-            "error": str(e),
-            "answer": "Sorry, I couldn't reach the AI provider. Please try again.",
-        }
+        return {"ok": True, "answer_object": data, "meta": meta}
     except Exception as e:
-        _STATS["failures"] += 1
-        _STATS["last_error"] = str(e)
-        logger.exception("Unexpected error in solve()", exc_info=True)
+        # Never crash the API. Return a safe error payload.
         return {
-            "success": False,
-            "error": str(e),
-            "answer": "Sorry, something went wrong while solving. Please try again.",
+            "ok": False,
+            "error": "AI_SOLVE_FAILED",
+            "message": str(e),
+            "answer_object": {
+                "title": "We hit a temporary issue",
+                "mode": mode,
+                "language": language,
+                "sections": [
+                    {
+                        "type": "concept",
+                        "heading": "Try again",
+                        "content_markdown": "The server could not generate the answer right now. Please retry in 10–20 seconds. If it keeps failing, share your Render logs.",
+                    }
+                ],
+                "visuals": [],
+                "references": [],
+                "meta": {"writer_model": default_writer, "verifier_model": verifier_model},
+            },
+            "meta": {"mode": mode, "ms": int((time.time() - t0) * 1000)},
         }
 
 
-def get_orchestrator_stats() -> Dict[str, Any]:
-    return dict(_STATS)
+def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:
+    """Compatibility wrapper used by learning_router (/learning/answer)."""
+    return solve(
+        question=ctx.question,
+        answer_mode=ctx.answer_mode,
+        language=ctx.language,
+        class_level=ctx.class_level,
+        board=ctx.board,
+        subject=ctx.subject,
+        chapter=ctx.chapter,
+        exam_mode=ctx.exam_mode,
+        study_mode=ctx.study_mode,
+    )
