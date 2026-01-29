@@ -86,20 +86,22 @@ AI_TIMEOUT_SECONDS = _env_int("AI_TIMEOUT_SECONDS", _env_int("REQUEST_TIMEOUT_SE
 
 # Gemini
 GEMINI_API_KEY = _env("GEMINI_API_KEY", _env("GOOGLE_API_KEY", ""))
-GEMINI_PRIMARY_MODEL = _env("GEMINI_PRIMARY_MODEL", _env("GEMINI_MODEL", "gemini-2.0-flash"))
+GEMINI_PRIMARY_MODEL = _env("GEMINI_PRIMARY_MODEL", _env("GEMINI_MODEL", "gemini-2.5-flash"))
 
 # Optional fallback models (comma-separated). Used if primary model is unavailable.
-GEMINI_FALLBACK_MODELS = [m.strip() for m in _env("GEMINI_FALLBACK_MODELS", "gemini-1.5-flash,gemini-1.5-pro").split(",") if m.strip()]
+GEMINI_FALLBACK_MODELS = [m.strip() for m in _env("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-2.5-pro,gemini-2.5-flash-lite").split(",") if m.strip()]
 GEMINI_FALLBACK_MODEL = _env("GEMINI_FALLBACK_MODEL", "gemini-1.5-flash")
 GEMINI_TIMEOUT_S = _env_int("GEMINI_TIMEOUT_S", _env_int("GEMINI_TIMEOUT_SECONDS", 40))
 
 # OpenAI (future)
 OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
 OPENAI_MODEL = _env("OPENAI_MODEL", _env("OPENAI_PRIMARY_MODEL", "gpt-4o-mini"))
+OPENAI_VERIFIER_MODEL = _env("OPENAI_VERIFIER_MODEL", _env("OPENAI_CHECKER_MODEL", "o3-mini"))
 
 # Claude (future)
 CLAUDE_API_KEY = _env("CLAUDE_API_KEY", _env("ANTHROPIC_API_KEY", ""))
 CLAUDE_MODEL = _env("CLAUDE_MODEL", _env("CLAUDE_PRIMARY_MODEL", "claude-3-5-sonnet-latest"))
+CLAUDE_WRITER_MODEL = _env("CLAUDE_WRITER_MODEL", _env("CLAUDE_DEEP_MODEL", CLAUDE_MODEL))
 
 # Confidence / output shaping (safe defaults)
 LOW_CONFIDENCE_THRESHOLD = _env_float("LOW_CONFIDENCE_THRESHOLD", 0.35)
