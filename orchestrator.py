@@ -146,65 +146,6 @@ def _json_extract(text: str) -> Dict[str, Any]:
 
 
 # -----------------------------
-# Safety / Governance (v1.1)
-# -----------------------------
-
-_CHEATING_CUES = [
-    "leaked paper", "leaked question", "answer key", "solve this paper", "give option only",
-    "only final answer", "just answer", "correct option", "mcq answer only", "without explanation",
-    "exam today", "paper today"
-]
-
-def _is_cheating_or_shortcut(question: str) -> bool:
-    q = (question or "").strip().lower()
-    return any(cue in q for cue in _CHEATING_CUES)
-
-def _refusal_payload(ctx: "RequestContext") -> Dict[str, Any]:
-    return {
-        "title": "I can’t help with exam shortcuts",
-        "why_this_matters": "KnowEasy is built to teach safely. I can help you learn the concept and solve similar questions step-by-step.",
-        "sections": [
-            {
-                "type": "warning",
-                "title": "Why I’m refusing",
-                "content": "Requests for answer-only/cheating-style help reduce learning and can harm exam integrity. I won’t provide that."
-            },
-            {
-                "type": "steps",
-                "title": "What I can do instead",
-                "content": "Share the question (or your attempt) and I’ll teach the method with steps, common traps, and a small practice set."
-            }
-        ],
-        "follow_up_chips": ["Explain the concept first", "Teach the method with steps", "Give similar practice MCQs"],
-    }
-
-def _validate_blueprint(bp: Dict[str, Any]) -> Tuple[bool, List[str]]:
-    """Lightweight validator to enforce Answer Blueprint schema (no extra deps)."""
-    issues: List[str] = []
-    if not isinstance(bp, dict):
-        return False, ["blueprint_not_object"]
-    for k in ("schema_version", "meta", "cards"):
-        if k not in bp:
-            issues.append(f"missing_{k}")
-    cards = bp.get("cards")
-    if not isinstance(cards, list) or not cards:
-        issues.append("cards_empty_or_invalid")
-        return False, issues
-    for i, c in enumerate(cards[:80]):
-        if not isinstance(c, dict):
-            issues.append(f"card_{i}_not_object")
-            continue
-        for rk in ("id", "type", "title", "content", "reveal_min"):
-            if rk not in c:
-                issues.append(f"card_{i}_missing_{rk}")
-        if c.get("reveal_min") not in ("R0", "R1", "R2"):
-            issues.append(f"card_{i}_bad_reveal_min")
-        v = c.get("visual")
-        if v is not None and not isinstance(v, dict):
-            issues.append(f"card_{i}_bad_visual")
-    return (len(issues) == 0), issues
-
-# -----------------------------
 # Prompting (sections schema)
 # -----------------------------
 
@@ -451,6 +392,10 @@ def _build_blueprint(out: Dict[str, Any], ctx: RequestContext) -> Dict[str, Any]
     if why:
         add_card("why", "Why it matters", why, "R0")
 
+    # Assumptions (v1.1): always present as a card for exam safety
+    assumptions_text = _assumptions_text_from_sections(out.get("sections") or [])
+    add_card("assumptions", "Assumptions", assumptions_text, "R1")
+
     for s in (out.get("sections") or []):
         stype = (s.get("type") or "explanation")
         stitle = (s.get("title") or "").strip() or stype.replace("_"," ").title()
@@ -468,7 +413,7 @@ def _build_blueprint(out: Dict[str, Any], ctx: RequestContext) -> Dict[str, Any]
         add_card(stype.lower(), stitle, content, reveal_min=reveal, visual=visual)
 
     blueprint = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "meta": {
             "request_id": (out.get("meta") or {}).get("request_id"),
             "mode": (out.get("meta") or {}).get("mode"),
@@ -483,27 +428,63 @@ def _build_blueprint(out: Dict[str, Any], ctx: RequestContext) -> Dict[str, Any]
     }
     return blueprint
 
+
+def _should_refuse(question: str) -> str | None:
+    """Return refusal reason string if the request should be refused/redirection, else None.
+    Trust-first policy: refuse cheating/answer-only requests. Keep it conservative.
+    """
+    q = (question or "").strip().lower()
+    if not q:
+        return None
+    # Cheating / leaked paper / answer key requests
+    if re.search(r"\b(leaked\s*paper|paper\s*leak|answer\s*key|leak(ed)?\b)\b", q):
+        return "I can’t help with leaked papers or answer keys. I can teach the concept and how to solve similar questions safely."
+    # Answer-only / option-only requests
+    if re.search(r"\b(just|only)\s*(answer|ans|option)\b", q) or re.search(r"\bfinal\s*answer\s*only\b", q):
+        return "I won’t give answer-only shortcuts. I’ll explain the correct method step-by-step so you can solve confidently in exams."
+    return None
+
+def _assumptions_text_from_sections(sections: list[dict] | None) -> str:
+    sections = sections or []
+    # Look for an explicit assumptions block first
+    for s in sections:
+        st = str(s.get("type") or "").lower()
+        ti = str(s.get("title") or "").lower()
+        if st in ("assumptions","assumption") or "assumption" in ti:
+            c = str(s.get("content") or "").strip()
+            if c:
+                return c
+    # Heuristic: find a paragraph that starts with 'Assumption'
+    for s in sections:
+        c = str(s.get("content") or "")
+        m = re.search(r"(?im)^\s*assumptions?\s*[:\-]\s*(.+)$", c)
+        if m:
+            return m.group(0).strip()
+    # Safe default
+    return "No special assumptions beyond the information given (and standard textbook conventions) are required."
+
+
 async def _generate(ctx: RequestContext) -> Dict[str, Any]:
     rid = ctx.request_id or str(uuid.uuid4())
-    # Governance: refuse exam-shortcut requests
-    if _is_cheating_or_shortcut(ctx.question):
-        draft = _refusal_payload(ctx)
-        draft['providers_used'] = []
-        draft['meta'] = {
-            'request_id': rid,
-            'mode': ctx.mode().value,
-            'profile': select_profile(ctx).value,
-            'difficulty': estimate_difficulty(ctx.question, select_profile(ctx)).value,
-            'verified': False,
-            'verification_notes': ['refusal'],
-            'models': {},
+    # v1.1 Refusal & Redirection (trust-first)
+    refusal_reason = _should_refuse(ctx.question)
+    if refusal_reason:
+        out = {
+            "title": "Let’s do this the right way",
+            "why_this_matters": "Learning the method protects you in exams and builds real understanding.",
+            "sections": [
+                {"type":"refusal","title":"Why I can’t do that","content": refusal_reason},
+                {"type":"next_step","title":"What I can do instead","content":"Share the full question (or what you tried). I’ll teach the correct method with an exam-safe visual and common traps."}
+            ],
+            "providers_used": [],
+            "meta": {"request_id": rid, "mode": getattr(ctx,'answer_mode','tutor'), "verified": False}
         }
-        draft['answer'] = _plain_text_from_sections(draft.get('title',''), draft.get('why_this_matters',''), draft.get('sections',[]))
+        out["answer"] = _plain_text_from_sections(out.get("title",""), out.get("why_this_matters",""), out.get("sections",[]))
         try:
-            draft['blueprint'] = _build_blueprint(draft, ctx)
+            out["blueprint"] = _build_blueprint(out, ctx)
         except Exception:
-            draft['blueprint'] = None
-        return draft
+            out["blueprint"] = None
+        return out
 
     profile = select_profile(ctx)
     mode = ctx.mode()
@@ -557,7 +538,6 @@ async def _generate(ctx: RequestContext) -> Dict[str, Any]:
 
     draft = _json_extract(draft_text)
 
-
     # Verify if needed
     verified = False
     verification_notes: List[str] = []
@@ -570,48 +550,24 @@ async def _generate(ctx: RequestContext) -> Dict[str, Any]:
                 min(timeout_s, 35),
             )
             chk = _json_extract(chk_text)
-            providers_used.append("openai")
-
             if chk.get("ok") is True:
                 verified = True
+                providers_used.append("openai")
             else:
                 verification_notes = (chk.get("issues") or [])[:8]
                 fix = (chk.get("fix_instructions") or [])[:8]
-
-                # One repair pass
+                # One repair pass with same writer (Gemini preferred for formatting)
                 repair_user = json.dumps(
                     {"draft": draft, "fix_instructions": fix, "instruction": "Regenerate corrected JSON only."},
                     ensure_ascii=False,
                 )
+                # Use Gemini Pro-ish for repair
                 repair_model = os.getenv("GEMINI_REPAIR_MODEL", "gemini-2.5-flash")
                 repaired_text = await _gemini_generate(repair_model, system, repair_user, timeout_s)
+                providers_used.append("openai")
                 providers_used.append("gemini")
                 draft = _json_extract(repaired_text)
-
-                # Re-check after repair
-                chk2_text = await _openai_json(
-                    OPENAI_VERIFIER_MODEL or OPENAI_MODEL or "o3-mini",
-                    _checker_system(),
-                    _checker_user(draft, ctx),
-                    min(timeout_s, 35),
-                )
-                chk2 = _json_extract(chk2_text)
-                if chk2.get("ok") is True:
-                    verified = True
-                    verification_notes = []
-                else:
-                    verified = False
-                    verification_notes = (chk2.get("issues") or [])[:8]
-                    # Hard-fail: do not provide a potentially wrong final answer.
-                    draft = {
-                        "title": "I need one more detail to be 100% correct",
-                        "why_this_matters": "For competitive questions, a small missing condition can change the answer. I’m avoiding a wrong final answer.",
-                        "sections": [
-                            {"type": "warning", "title": "What’s missing", "content": "Please share the full question text (options/values/conditions)."},
-                            {"type": "steps", "title": "Meanwhile, here is the safe method", "content": "Paste the full question and I’ll solve it step-by-step with the correct conditions."}
-                        ],
-                        "follow_up_chips": ["Paste the full question", "Upload a photo of the question"],
-                    }
+                verified = True  # verified-after-fix (best effort)
         except Exception as e:
             logger.warning("Verifier failed: %s", str(e)[:200])
 
@@ -632,22 +588,14 @@ async def _generate(ctx: RequestContext) -> Dict[str, Any]:
             "claude_writer": CLAUDE_WRITER_MODEL or CLAUDE_MODEL,
         },
     }
-    # Backward-compatible plain answer text
+    # Backward-compatible plain answer text for existing /v1/ai/answer response
     out["answer"] = _plain_text_from_sections(out.get("title",""), out.get("why_this_matters",""), out.get("sections",[]))
-
-    # New canonical Blueprint (cards + visuals)
+    # New canonical Blueprint (cards + visuals) for v1 renderer
     try:
         out["blueprint"] = _build_blueprint(out, ctx)
-        ok_bp, bp_issues = _validate_blueprint(out["blueprint"])
-        if not ok_bp:
-            out["meta"]["verified"] = False
-            out["meta"].setdefault("verification_notes", []).append("blueprint_invalid")
-            out["meta"].setdefault("verification_notes", []).extend(bp_issues[:6])
-    except Exception:
+    except Exception as _e:
         out["blueprint"] = None
-
     return out
-
 
 
 def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:

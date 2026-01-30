@@ -319,6 +319,7 @@ def _format_response(result: dict, request_id: str) -> dict:
         "confidence": float(result.get("confidence", 0.85)),
         "flags": flags,
         "safe_note": result.get("safe_note"),
+        "blueprint": result.get("blueprint"),
         "meta": {
             "engine": "knoweasy-orchestrator-v2",
             "request_id": request_id,

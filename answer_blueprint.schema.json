@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "KnowEasy Answer Blueprint v1",
+  "title": "KnowEasy Answer Blueprint v1.1",
   "type": "object",
   "required": [
     "schema_version",
@@ -9,10 +9,18 @@
   ],
   "properties": {
     "schema_version": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^1\\.1$"
     },
     "meta": {
-      "type": "object"
+      "type": "object",
+      "required": [
+        "request_id",
+        "mode",
+        "profile",
+        "difficulty",
+        "language"
+      ]
     },
     "cards": {
       "type": "array",
@@ -30,7 +38,24 @@
             "type": "string"
           },
           "type": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "title",
+              "why",
+              "assumptions",
+              "concept",
+              "diagram",
+              "graph",
+              "explanation",
+              "steps",
+              "alt_method",
+              "mistakes",
+              "practice",
+              "exam_footer",
+              "refusal",
+              "next_step",
+              "unknown"
+            ]
           },
           "title": {
             "type": "string"
