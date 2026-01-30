@@ -341,38 +341,88 @@ def _gemini_model_for(mode: Mode, difficulty: Difficulty) -> str:
         return os.getenv("GEMINI_MASTERY_MODEL", "gemini-2.5-pro")
     return GEMINI_PRIMARY_MODEL or "gemini-2.5-flash"
 
-def _should_verify(ctx: RequestContext, profile: AcademicProfile, mode: Mode, difficulty: Difficulty) -> bool:
-    """Return True when we must run the independent verifier.
-
-    CEO rules:
-    - Competitive tracks (JEE/NEET/CET/OLYMPIAD) should be verified by default.
-    - Verification is also enabled for HARD/EXTREME difficulty and for Mastery mode.
-    - Controlled by env flags so costs are predictable.
-    """
-    # Global off switch
-    if os.getenv("AI_ENABLED", "true").strip().lower() in {"0", "false", "no"}:
-        return False
-
-    # If not competitive mentor, never verify
+def _should_verify(profile: AcademicProfile, mode: Mode, difficulty: Difficulty) -> bool:
     if profile != AcademicProfile.COMPETITIVE_MENTOR:
         return False
-
-    # Track-based always-verify (configurable)
-    always_tracks = [t.strip().upper() for t in os.getenv("VERIFY_ALWAYS_FOR_TRACKS", "JEE,NEET,CET,OLYMPIAD").split(",") if t.strip()]
-    exam_mode = (ctx.exam_mode or "").strip().upper()
-    if exam_mode and exam_mode in always_tracks:
+    if difficulty in {Difficulty.HARD, Difficulty.EXTREME}:
         return True
-
-    # Difficulty gating
-    verify_hard = os.getenv("VERIFY_HARD_QUESTIONS", "true").strip().lower() in {"1", "true", "yes"}
-    if verify_hard and difficulty in {Difficulty.HARD, Difficulty.EXTREME}:
-        return True
-
-    # Mode gating
     if mode == Mode.MASTERY:
         return True
-
     return False
+
+
+def _plain_text_from_sections(title: str, why: str, sections: List[Dict[str, Any]]) -> str:
+    parts = []
+    if title: parts.append(title.strip())
+    if why: parts.append(why.strip())
+    for s in (sections or []):
+        st = (s.get("title") or "").strip()
+        sc = (s.get("content") or "").strip()
+        if st: parts.append(st)
+        if sc: parts.append(sc)
+    return "\n\n".join([p for p in parts if p])
+
+def _guess_reveal_min(section_type: str) -> str:
+    t = (section_type or "").lower()
+    if t in {"definition", "formula"}:
+        return "R0"
+    if t in {"diagram", "example", "warning", "note", "tips", "practice"}:
+        return "R1"
+    if t in {"steps", "derivation"}:
+        return "R2"
+    return "R1"
+
+def _build_blueprint(out: Dict[str, Any], ctx: RequestContext) -> Dict[str, Any]:
+    title = str(out.get("title") or "").strip()
+    why = str(out.get("why_this_matters") or "").strip()
+    cards = []
+    def add_card(card_type, card_title, content, reveal_min="R1", visual=None):
+        cards.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": card_type,
+            "title": card_title or "",
+            "content": content or "",
+            "reveal_min": reveal_min,
+            "visual": visual
+        })
+
+    # Title & Why as cards
+    if title:
+        add_card("title", "Title", title, "R0")
+    if why:
+        add_card("why", "Why it matters", why, "R0")
+
+    for s in (out.get("sections") or []):
+        stype = (s.get("type") or "explanation")
+        stitle = (s.get("title") or "").strip() or stype.replace("_"," ").title()
+        content = (s.get("content") or "").strip()
+        reveal = _guess_reveal_min(stype)
+        visual = None
+        if stype.lower() == "diagram":
+            # treat content as mermaid if it looks like it; else plain text
+            if re.search(r"^(graph|flowchart|sequenceDiagram|mindmap)\b", content.strip()):
+                visual = {"kind":"mermaid","code":content.strip()}
+                content = ""
+            else:
+                visual = {"kind":"text","text":content}
+                content = ""
+        add_card(stype.lower(), stitle, content, reveal_min=reveal, visual=visual)
+
+    blueprint = {
+        "schema_version": "1.0",
+        "meta": {
+            "request_id": (out.get("meta") or {}).get("request_id"),
+            "mode": (out.get("meta") or {}).get("mode"),
+            "profile": (out.get("meta") or {}).get("profile"),
+            "difficulty": (out.get("meta") or {}).get("difficulty"),
+            "language": getattr(ctx, "language", "en"),
+            "subject": getattr(ctx, "subject", ""),
+            "class_level": getattr(ctx, "class_level", ""),
+            "exam_mode": getattr(ctx, "exam_mode", ""),
+        },
+        "cards": cards
+    }
+    return blueprint
 
 async def _generate(ctx: RequestContext) -> Dict[str, Any]:
     rid = ctx.request_id or str(uuid.uuid4())
@@ -431,7 +481,7 @@ async def _generate(ctx: RequestContext) -> Dict[str, Any]:
     # Verify if needed
     verified = False
     verification_notes: List[str] = []
-    if _should_verify(ctx, profile, mode, difficulty) and OPENAI_API_KEY:
+    if _should_verify(profile, mode, difficulty) and OPENAI_API_KEY:
         try:
             chk_text = await _openai_json(
                 OPENAI_VERIFIER_MODEL or OPENAI_MODEL or "o3-mini",
@@ -478,6 +528,13 @@ async def _generate(ctx: RequestContext) -> Dict[str, Any]:
             "claude_writer": CLAUDE_WRITER_MODEL or CLAUDE_MODEL,
         },
     }
+    # Backward-compatible plain answer text for existing /v1/ai/answer response
+    out["answer"] = _plain_text_from_sections(out.get("title",""), out.get("why_this_matters",""), out.get("sections",[]))
+    # New canonical Blueprint (cards + visuals) for v1 renderer
+    try:
+        out["blueprint"] = _build_blueprint(out, ctx)
+    except Exception as _e:
+        out["blueprint"] = None
     return out
 
 
@@ -494,23 +551,20 @@ def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:
             loop.close()
 # --- Backward compatibility for router.py ---
 
-async def solve(
-    question: str,
-    *,
-    context: dict | None = None,
-    answer_mode: str = "tutor",
-    **kwargs
-):
-    """
-    Compatibility wrapper.
-    Router expects `solve()`, but new engine uses run_orchestrator().
-    """
-    return await run_orchestrator(
-        question=question,
-        context=context or {},
-        answer_mode=answer_mode,
-        **kwargs
+async def solve(question: str, context: dict = None, user_tier: str = "free", answer_mode: str = "tutor", **_kwargs):
+    """Async entrypoint used by router.py (positional args compatible)."""
+    ctx = RequestContext(
+        request_id=str(uuid.uuid4()),
+        question=question or "",
+        answer_mode=answer_mode or (context or {}).get("answer_mode") or "tutor",
+        user_tier=user_tier or (context or {}).get("user_tier") or "free",
     )
+    # hydrate from context if present
+    c = context or {}
+    for k in ["board","class_level","subject","chapter","exam_mode","language","study_mode"]:
+        if k in c and getattr(ctx, k, "") in ("", None):
+            setattr(ctx, k, c.get(k) or "")
+    return await _generate(ctx)
 
 
 def get_orchestrator_stats():
