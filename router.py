@@ -313,38 +313,27 @@ def _format_response(result: dict, request_id: str) -> dict:
         flags.append("CACHED")
     
     return {
-        # Back-compat fields
         "final_answer": answer,
-        "answer": answer,
-
-        # Tutor scaffolding
         "steps": result.get("steps", []),
         "assumptions": result.get("assumptions", []),
-
-        # Trust signals
         "confidence": float(result.get("confidence", 0.85)),
         "flags": flags,
         "safe_note": result.get("safe_note"),
-
-        # AnswerObject (preferred)
-        "title": result.get("title") or (result.get("learning_object") or {}).get("title"),
-        "why_this_matters": result.get("why_this_matters") or (result.get("learning_object") or {}).get("why_this_matters"),
-        "sections": result.get("sections") or (result.get("learning_object") or {}).get("sections"),
-        "providers_used": result.get("providers_used") or (result.get("learning_object") or {}).get("providers_used"),
-        "equation": result.get("equation") or (result.get("learning_object") or {}).get("equation"),
-
-        # Keep nested object too (optional)
-        "learning_object": result.get("learning_object"),
-
         "meta": {
             "engine": "knoweasy-orchestrator-v2",
             "request_id": request_id,
             "ai_strategy": result.get("ai_strategy"),
             "providers_used": result.get("providers_used", []),
             "complexity": result.get("complexity"),
-            "mode": result.get("mode") or result.get("answer_mode"),
-            "cached": bool(result.get("cached")),
-            "latency_ms": int(result.get("latency_ms", 0)),
+            "tokens": result.get("tokens_used", result.get("tokens", 0)),
+            "response_time_ms": result.get("response_time_ms", 0),
+            "credits_used": result.get("credits_used", 0),
+            "cost_inr": result.get("cost_inr", 0),
+            "premium_formatting": result.get("premium_formatting", False),
+            "sections": result.get("sections"),
+            "confidence_label": result.get("confidence_label"),
+            "verified": bool(result.get("verified")),
+            "verifier_provider": result.get("verifier_provider"),
         }
     }
 
@@ -820,7 +809,7 @@ async def solve_route(
             logger.info(f"🤖 [{trace_id}] Calling orchestrator | tier={user_tier} | mode={context.get('study_mode')}")
             
             # Call the orchestrator (properly awaited)
-            raw_result = await solve(question, context=context, answer_mode=req.answer_mode, user_tier=user_tier)
+            raw_result = await solve(question, context, user_tier)
             
             # Format response
             out = _format_response(raw_result, trace_id)
