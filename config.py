@@ -82,7 +82,7 @@ AI_ENABLED = _env_bool("AI_ENABLED", True)
 # Keep both names to avoid breaking older imports
 AI_PROVIDER = _env("AI_PROVIDER", _env("AI_PROVIDER_PRIMARY", "gemini"))   # gemini|openai|claude
 AI_MODE = _env("AI_MODE", "stable")  # placeholder: stable|debug|strict etc
-AI_TIMEOUT_SECONDS = _env_int("AI_TIMEOUT_SECONDS", _env_int("REQUEST_TIMEOUT_SECONDS", 60))
+AI_TIMEOUT_SECONDS = _env_int("AI_TIMEOUT_SECONDS", _env_int("REQUEST_TIMEOUT_SECONDS", 90))
 
 # Gemini
 GEMINI_API_KEY = _env("GEMINI_API_KEY", _env("GOOGLE_API_KEY", ""))
@@ -100,7 +100,7 @@ OPENAI_VERIFIER_MODEL = _env("OPENAI_VERIFIER_MODEL", _env("OPENAI_CHECKER_MODEL
 
 # Claude (future)
 CLAUDE_API_KEY = _env("CLAUDE_API_KEY", _env("ANTHROPIC_API_KEY", ""))
-CLAUDE_MODEL = _env("CLAUDE_MODEL", _env("CLAUDE_PRIMARY_MODEL", "claude-3-5-sonnet-20241022"))
+CLAUDE_MODEL = _env("CLAUDE_MODEL", _env("CLAUDE_PRIMARY_MODEL", "claude-3-5-sonnet-latest"))
 CLAUDE_WRITER_MODEL = _env("CLAUDE_WRITER_MODEL", _env("CLAUDE_DEEP_MODEL", CLAUDE_MODEL))
 
 # Confidence / output shaping (safe defaults)

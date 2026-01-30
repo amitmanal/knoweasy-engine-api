@@ -175,27 +175,9 @@ def _cache_key(payload: dict) -> str:
 
 
 def _normalize_answer_mode(v: str) -> str:
-    """Normalize UI mode to Phase-4 canonical 3 modes: lite | tutor | mastery.
-
-    Accepts back-compat values:
-    - quick/one_liner -> lite
-    - deep/step_by_step -> tutor
-    - exam/cbse_board -> mastery
-    """
     m = str(v or "").strip().lower()
     if not m:
-        return "tutor"
-
-    if m in {"lite", "luma_lite", "quick", "one_liner", "one-liner", "short"}:
-        return "lite"
-    if m in {"tutor", "luma_tutor", "deep", "step_by_step", "step-by-step"}:
-        return "tutor"
-    if m in {"mastery", "luma_mastery", "exam", "cbse_board", "board_exam"}:
-        return "mastery"
-
-    # unknown -> tutor safe default
-    return "tutor"
-
+        return "step_by_step"
 
     # Phase-4: canonical 3 modes
     if m in {"lite", "luma_lite"}:
@@ -236,15 +218,15 @@ def _apply_age_safety(answer_mode: str, context: dict) -> tuple[str, str | None]
     age = _class_to_age(cls)
 
     m = (answer_mode or "step_by_step").lower().strip()
-    # canonical modes: lite/tutor/mastery
-    is_mastery = m in {"mastery"}
-    is_tutor = m in {"tutor"}
+    # mastery maps to cbse_board earlier; detect both labels
+    is_mastery = m in {"cbse_board", "mastery", "luma_mastery", "exam"}
+    is_tutor = m in {"step_by_step", "tutor", "luma_tutor", "deep"}
 
     # Ceiling rules (conservative)
     if age <= 9 and is_mastery:
-        return ("tutor", "Kept it simpler for your level (safe learning depth). You can ask for more detail anytime.")
+        return ("step_by_step", "Kept it simpler for your level (safe learning depth). You can ask for more detail anytime.")
     if age <= 7 and (is_mastery or is_tutor):
-        return ("lite", "Kept it very simple for your level (safe learning depth). You can ask for more detail anytime.")
+        return ("one_liner", "Kept it very simple for your level (safe learning depth). You can ask for more detail anytime.")
 
     return (m, None)
 
