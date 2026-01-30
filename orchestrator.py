@@ -42,6 +42,7 @@ from config import (
     CLAUDE_MODEL,
     CLAUDE_WRITER_MODEL,
     AI_TIMEOUT_SECONDS,
+    MAX_CHARS_ANSWER,
 )
 
 logger = logging.getLogger("knoweasy.orchestrator")
@@ -468,6 +469,58 @@ def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:
             return loop.run_until_complete(_generate(ctx))
         finally:
             loop.close()
+
+# -----------------------------
+# Public Orchestrator API (async)
+# -----------------------------
+
+async def run_orchestrator(
+    *,
+    question: str,
+    context: dict | None = None,
+    answer_mode: str = "tutor",
+    user_tier: str | None = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Main orchestrator entrypoint expected by router.py.
+
+    Returns a dict that includes premium fields (title/sections/why_this_matters)
+    AND a compatibility `answer` string for older consumers.
+    """
+    ctx = RequestContext(
+        question=str(question or "").strip(),
+        board=str((context or {}).get("board") or ""),
+        class_level=int((context or {}).get("class_level") or (context or {}).get("class") or 11),
+        exam_goal=str((context or {}).get("exam_goal") or (context or {}).get("exam") or ""),
+        language=str((context or {}).get("language") or "en"),
+        answer_mode=str(answer_mode or "tutor"),
+        user_tier=str(user_tier or (context or {}).get("user_tier") or ""),
+        luma_context=(context or {}).get("luma_context") or None,
+        request_id=str((context or {}).get("request_id") or ""),
+    )
+    out = await _generate(ctx)
+
+    # Compatibility: provide a readable plain-text answer string (used by some UI paths).
+    if isinstance(out, dict) and not out.get("answer"):
+        parts: list[str] = []
+        if out.get("title"):
+            parts.append(str(out["title"]))
+        for sec in (out.get("sections") or []):
+            if not isinstance(sec, dict):
+                continue
+            t = sec.get("title")
+            c = sec.get("content")
+            if t:
+                parts.append(str(t))
+            if c:
+                parts.append(str(c))
+        if out.get("why_this_matters"):
+            parts.append("Why this matters")
+            parts.append(str(out["why_this_matters"]))
+        out["answer"] = "\n\n".join([p for p in parts if str(p).strip()])[:MAX_CHARS_ANSWER]
+
+    return out
+
 # --- Backward compatibility for router.py ---
 
 async def solve(

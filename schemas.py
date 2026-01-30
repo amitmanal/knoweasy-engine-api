@@ -160,12 +160,21 @@ class SolveRequest(BaseModel):
 
 
 class SolveResponse(BaseModel):
+    # Back-compat (existing UI paths)
     final_answer: str
     steps: List[str] = []
     assumptions: List[str] = []
     confidence: float = Field(..., ge=0.0, le=1.0)
     flags: List[str] = []
     safe_note: Optional[str] = None
+
+    # Premium AnswerObject (top-level for PremiumRenderer)
+    title: Optional[str] = None
+    why_this_matters: Optional[str] = None
+    sections: Optional[List[dict]] = None
+    providers_used: Optional[List[str]] = None
+
+    # Diagnostics / metadata
     meta: dict = {}
 
     # Phase-4: Answer-as-Learning-Object (optional for back-compat)
