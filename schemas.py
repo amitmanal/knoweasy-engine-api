@@ -160,22 +160,26 @@ class SolveRequest(BaseModel):
 
 
 class SolveResponse(BaseModel):
-    # Back-compat (existing UI paths)
-    final_answer: str
-    steps: List[str] = []
+    # Back-compat: older frontends read final_answer; newer renderers may read answer.
+    final_answer: str = ""
+    answer: Optional[str] = None
+
+    # Tutor-style scaffolding (back-compat)
+    steps: List[Union[str, dict]] = []
     assumptions: List[str] = []
-    confidence: float = Field(..., ge=0.0, le=1.0)
+
+    # Trust signals
+    confidence: float = Field(0.85, ge=0.0, le=1.0)
     flags: List[str] = []
     safe_note: Optional[str] = None
+    meta: dict = {}
 
-    # Premium AnswerObject (top-level for PremiumRenderer)
+    # Answer-as-Learning-Object (preferred)
     title: Optional[str] = None
     why_this_matters: Optional[str] = None
     sections: Optional[List[dict]] = None
     providers_used: Optional[List[str]] = None
+    equation: Optional[str] = None
 
-    # Diagnostics / metadata
-    meta: dict = {}
-
-    # Phase-4: Answer-as-Learning-Object (optional for back-compat)
+    # Optional container (some orchestrators return a nested object)
     learning_object: Optional[dict] = None
