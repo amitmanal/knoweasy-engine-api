@@ -952,6 +952,8 @@ async def solve_route(
             confidence=float(out.get("confidence", 0.85)),
             flags=final_flags,
             safe_note=out.get("safe_note") or context.get("_safety_note"),
+            blueprint=out.get("blueprint"),
+            learning_object={"blueprint": out.get("blueprint")} if out.get("blueprint") else None,
             meta=meta,
         )
 

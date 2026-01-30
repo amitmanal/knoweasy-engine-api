@@ -169,4 +169,5 @@ class SolveResponse(BaseModel):
     meta: dict = {}
 
     # Phase-4: Answer-as-Learning-Object (optional for back-compat)
+    blueprint: Optional[dict] = None  # Phase-1: canonical cards blueprint for PremiumRenderer
     learning_object: Optional[dict] = None
