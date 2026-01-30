@@ -468,3 +468,29 @@ def generate_learning_answer(ctx: RequestContext) -> Dict[str, Any]:
             return loop.run_until_complete(_generate(ctx))
         finally:
             loop.close()
+# --- Backward compatibility for router.py ---
+
+async def solve(
+    question: str,
+    *,
+    context: dict | None = None,
+    answer_mode: str = "tutor",
+    **kwargs
+):
+    """
+    Compatibility wrapper.
+    Router expects `solve()`, but new engine uses run_orchestrator().
+    """
+    return await run_orchestrator(
+        question=question,
+        context=context or {},
+        answer_mode=answer_mode,
+        **kwargs
+    )
+
+
+def get_orchestrator_stats():
+    return {
+        "engine": "one-brain",
+        "status": "ok"
+    }
