@@ -86,6 +86,7 @@ def answer(req: AnswerRequest) -> Dict[str, Any]:
         "follow_up_chips": ans.get("follow_up_chips") or [],
         "language": ctx.language or "en",
         "mode": (ctx.answer_mode or "tutor").lower(),
+        "blueprint": ans.get("blueprint") if isinstance(ans, dict) else None,
     }
 
     # Back-compat plain text
@@ -94,6 +95,7 @@ def answer(req: AnswerRequest) -> Dict[str, Any]:
     response: Dict[str, Any] = {
         "ok": True,
         "learning_object": learning_object,
+        "blueprint": ans.get("blueprint") if isinstance(ans, dict) else None,
         "sections": sections or [],
         "final_answer": final_text,
         "answer": final_text,
