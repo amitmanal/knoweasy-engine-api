@@ -1,0 +1,71 @@
+{
+  "id": "photosynthesis-neet-001",
+  "metadata": {
+    "class_level": 11,
+    "board": "NEET",
+    "subject": "Biology",
+    "chapter": "Photosynthesis in Higher Plants",
+    "topic": "Photosynthesis - Mechanism and Regulation",
+    "difficulty": "medium",
+    "engine": "competitive_mentor",
+    "tags": ["photosynthesis", "calvin cycle", "light reactions", "chloroplast", "neet", "high-yield"]
+  },
+  "blueprint": {
+    "title": "Photosynthesis — NEET High-Yield Topic",
+    "why_it_matters": "Foundation of all food chains and atmospheric oxygen production. NEET: Direct MCQs + assertion-reason + diagram-based questions. Repeatedly tested via Calvin cycle, photophosphorylation, and common misconceptions.",
+    "conceptual_foundation": "Photosynthesis is an anabolic, endergonic process in which green plants convert light energy into chemical energy stored in carbohydrates.\n\n**Overall Equation (oxygenic photosynthesis):**\n6CO₂ + 6H₂O + light → C₆H₁₂O₆ + 6O₂\n\n**Key Assumptions (Exam-Relevant):**\n- Occurs in chloroplasts\n- Oxygen released comes from water, NOT CO₂ (Hill reaction proof)\n- Two distinct but interdependent stages: light reactions and Calvin cycle",
+    "visual": {
+      "type": "mermaid",
+      "code": "graph TB\n    subgraph Chloroplast\n        A[Light Energy] --> B[Thylakoid Membrane]\n        B --> C[Light Reactions]\n        C --> D[ATP + NADPH]\n        \n        D --> E[Calvin Cycle]\n        F[CO₂] --> E\n        E --> G[Glucose]\n        \n        H[H₂O] --> C\n        C --> I[O₂ Released]\n    end\n    \n    style A fill:#fff3cd\n    style C fill:#d4edda\n    style E fill:#d1ecf1\n    style I fill:#f8d7da",
+      "caption": "Chloroplast as a functional unit showing light reactions (thylakoid) and Calvin cycle (stroma)"
+    },
+    "steps": [
+      {
+        "number": 1,
+        "title": "Stage I: Light-Dependent Reactions (Thylakoid)",
+        "content": "**Step 1a: Photoexcitation**\nChlorophyll absorbs photons in Photosystem II (P680) and Photosystem I (P700).\n\n**Step 1b: Photolysis of Water**\n2H₂O → 4H⁺ + 4e⁻ + O₂\n→ This is the source of atmospheric oxygen\n\n**Step 1c: Electron Transport Chain**\nEnergy released from excited electrons pumps protons (H⁺) into thylakoid lumen, creating a proton gradient.\n\n**Step 1d: Chemiosmosis**\nProton gradient drives ATP synthesis through ATP synthase (photophosphorylation).\n\n**Step 1e: NADP⁺ Reduction**\nFinal electron acceptor is NADP⁺, forming NADPH.\n\n**Outputs:** ATP + NADPH (used in Calvin cycle)",
+        "equation": "2H_2O \\rightarrow 4H^+ + 4e^- + O_2"
+      },
+      {
+        "number": 2,
+        "title": "Stage II: Calvin Cycle (Stroma)",
+        "content": "**Phase 1: Carbon Fixation**\n- Enzyme: RuBisCO (Ribulose-1,5-bisphosphate carboxylase/oxygenase)\n- Most abundant protein on Earth!\n- CO₂ + RuBP (5C) → unstable 6C intermediate → 2 × 3-PGA (3C)\n\n**Phase 2: Reduction**\n- ATP + NADPH convert 3-PGA → G3P (glyceraldehyde-3-phosphate)\n- This is the energy-consuming step\n\n**Phase 3: Regeneration**\n- 5 out of 6 G3P molecules regenerate RuBP\n- 1 G3P exits per 3 CO₂ fixed\n- Two G3P molecules combine to form one glucose\n\n**Net Requirement for 1 Glucose:**\n- 6 CO₂\n- 18 ATP\n- 12 NADPH",
+        "equation": "CO_2 + RuBP \\rightarrow 2 \\times 3PGA"
+      },
+      {
+        "number": 3,
+        "title": "Limiting Factors (Graph Insight)",
+        "content": "The rate of photosynthesis depends on three main factors:\n\n1. **Light Intensity:**\n   - Initial linear rise (light is limiting)\n   - Then plateau (CO₂ or temperature becomes limiting)\n   - Increasing light alone cannot increase rate indefinitely\n\n2. **CO₂ Concentration:**\n   - At low CO₂: rate increases sharply with CO₂\n   - At high CO₂: light becomes limiting\n\n3. **Temperature:**\n   - Affects enzyme activity (RuBisCO)\n   - Optimal range: 25-35°C\n   - Too high: enzyme denaturation\n\n**NEET Exam Insight:** Questions often ask what happens when one factor is increased while others are constant.",
+        "equation": null
+      }
+    ],
+    "alternative_method": "**Why RuBisCO is Inefficient (Advanced Concept):**\n\nRuBisCO has dual affinity for both CO₂ and O₂. When O₂ binds instead of CO₂, it leads to **photorespiration** - a wasteful process that consumes ATP and releases CO₂ without producing glucose.\n\n**C₄ Plants (Conceptual Contrast):**\n- Spatial separation of CO₂ fixation (mesophyll cells) and Calvin cycle (bundle sheath cells)\n- Initial CO₂ fixation by PEP carboxylase (no O₂ affinity)\n- Reduces photorespiration significantly\n- Examples: Maize, sugarcane, sorghum\n\n*Note: Full C₄ mechanism is asked as a separate question in NEET*",
+    "common_mistakes": [
+      "❌ **Mistake 1:** Oxygen released during photosynthesis comes from CO₂\n✅ **Correct:** Oxygen comes from H₂O (proven by Hill reaction with H₂O¹⁸ isotope)",
+      "❌ **Mistake 2:** Light reactions directly produce glucose\n✅ **Correct:** Light reactions produce ATP and NADPH. Calvin cycle produces glucose.",
+      "❌ **Mistake 3:** Calvin cycle requires light\n✅ **Correct:** Calvin cycle is light-independent but NOT light-insensitive (needs ATP/NADPH from light reactions)"
+    ],
+    "practice": [
+      {
+        "text": "**Q1 (Assertion-Reason):** Oxygen evolved in photosynthesis originates from water molecules.\nWhy is this assertion true? Explain the experimental proof.",
+        "difficulty": "medium",
+        "hint": "Think about Hill reaction with isotope-labeled water (H₂O¹⁸)"
+      },
+      {
+        "text": "**Q2 (MCQ):** Which step in Calvin cycle consumes ATP?\n(A) Carbon fixation\n(B) Reduction of 3-PGA\n(C) Regeneration of RuBP\n(D) Both B and C",
+        "difficulty": "easy",
+        "hint": "ATP is consumed wherever reduction or phosphorylation occurs"
+      },
+      {
+        "text": "**Q3 (Graph-based):** If CO₂ concentration is doubled at high light intensity but rate doesn't change, what is the limiting factor?\n(A) Light\n(B) Temperature\n(C) Water\n(D) Chlorophyll",
+        "difficulty": "hard",
+        "hint": "When increasing one factor has no effect, another factor is limiting"
+      }
+    ],
+    "exam_relevance": "**Importance:** HIGH\n\n**Usage in NEET:**\n- Conceptual MCQs (mechanism, products, location)\n- Diagram labeling (chloroplast structure, electron flow)\n- Assertion-Reason questions (oxygen source, limiting factors)\n- Graph interpretation (rate vs light/CO₂)\n- Numerical (ATP/NADPH requirements)\n\n**Common NEET Patterns:**\n- Source of O₂ in photosynthesis\n- Role of RuBisCO\n- Light reactions vs Calvin cycle (location, products)\n- C₃ vs C₄ comparison\n- Photorespiration basics",
+    "mode": "tutor"
+  },
+  "created_at": "2026-01-31T00:00:00Z",
+  "updated_at": "2026-01-31T00:00:00Z",
+  "published": true
+}
