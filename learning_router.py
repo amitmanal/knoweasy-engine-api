@@ -11,7 +11,7 @@ Frontend contract (core.js / chat.js):
 """
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field, AliasChoices, field_validator
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 
 from orchestrator import RequestContext, generate_learning_answer
@@ -45,27 +45,9 @@ class AnswerRequest(BaseModel):
     chapter: Optional[str] = Field(None, description="Chapter name or topic")
     exam_mode: Optional[str] = Field(None, description="Exam mode (BOARD, JEE, NEET, CET, OLYMPIAD, etc.)")
     language: Optional[str] = Field(None, description="Output language (en, hi, mr)")
-    answer_mode: Optional[str] = Field(
-        "tutor",
-        validation_alias=AliasChoices("answer_mode", "mode", "answerMode", "luma_mode"),
-        description="Answer mode: lite | tutor | mastery (also accepts mode=luma_lite/luma_tutor/luma_mastery)",
-    )
+    answer_mode: Optional[str] = Field("tutor", description="Answer mode: lite | tutor | mastery")
     study_mode: Optional[str] = Field(None, description="Study mode: chat or luma")
     request_id: Optional[str] = Field(None, description="Client idempotency id")
-
-    @field_validator("answer_mode", mode="before")
-    @classmethod
-    def _normalize_answer_mode(cls, v):
-        s = str(v or "").strip().lower()
-        # Accept legacy / frontend values
-        if s in ("luma_lite", "lite", "quick"):
-            return "lite"
-        if s in ("luma_tutor", "tutor", "guided", "step_by_step"):
-            return "tutor"
-        if s in ("luma_mastery", "mastery", "deep", "exam"):
-            return "mastery"
-        # Default
-        return "tutor"
 
     class Config:
         allow_population_by_field_name = True

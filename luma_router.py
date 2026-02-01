@@ -1,3 +1,11 @@
+
+try:
+    from auth_router import require_user
+except Exception:
+    def require_user():
+        raise Exception("Auth not configured")
+
+import json
 """Luma API Router
 
 FastAPI endpoints for Luma learning platform.
@@ -17,16 +25,13 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 
-from luma_store import (
+from luma_store import (, list_catalog, create_catalog_item, delete_catalog_item
     ensure_tables,
     get_content,
     list_content,
     save_progress,
     get_progress,
     log_event,
-    create_catalog_item,
-    list_catalog,
-    delete_catalog_item,
 )
 from luma_schemas import (
     LumaContentResponse,
@@ -34,11 +39,6 @@ from luma_schemas import (
     LumaProgressResponse,
     LumaAIAskRequest,
     LumaAIResponse,
-    LumaCatalogCreateRequest,
-    LumaCatalogListResponse,
-    LumaCatalogCreateResponse,
-    LumaCatalogDeleteResponse,
-
 )
 from luma_config import calculate_credits, validate_mode
 
@@ -58,27 +58,33 @@ except Exception as e:
 # ============================================================================
 
 async def get_current_user_id(authorization: str = Header(None)) -> Optional[int]:
-    """Extract user_id from Bearer session token (same system as /me).
-
-    Returns None if not authenticated.
+    """Extract user ID from Bearer token.
+    
+    Uses existing KnowEasy auth system.
+    Returns None if not authenticated (for public endpoints).
     """
     if not authorization:
         return None
+    
     try:
-        parts = authorization.split()
-        if len(parts) != 2 or parts[0].lower() != "bearer":
+        # Import auth utilities (same as other routers)
+        from auth_utils import decode_token
+        
+        if not authorization.startswith("Bearer "):
             return None
-        token = parts[1].strip()
-        if not token:
+        
+        token = authorization.split(" ", 1)[1]
+        payload = decode_token(token)
+        
+        if not payload or "sub" not in payload:
             return None
-        from auth_store import session_user
-        u = session_user(token)
-        if not u:
-            return None
-        return int(u.get("user_id"))
+        
+        return int(payload["sub"])
+    
     except Exception as e:
         logger.warning(f"luma_router: auth failed: {e}")
         return None
+
 
 # ============================================================================
 # CONTENT ENDPOINTS
@@ -279,56 +285,6 @@ async def get_progress_endpoint(
 # LUMA AI CHATBOX (Auth Required, Uses Credits)
 # ============================================================================
 
-
-
-# ============================================================================
-# CATALOG (User Library) ENDPOINTS
-# ============================================================================
-
-@router.get("/catalog", response_model=LumaCatalogListResponse)
-async def list_catalog_endpoint(
-    limit: int = 50,
-    offset: int = 0,
-    user_id: Optional[int] = Depends(get_current_user_id),
-):
-    """List current user's library items."""
-    if not user_id:
-        return LumaCatalogListResponse(ok=False, error="UNAUTHORIZED", items=[])
-    items = list_catalog(user_id=int(user_id), limit=limit, offset=offset)
-    return LumaCatalogListResponse(ok=True, items=items)
-
-@router.post("/catalog", response_model=LumaCatalogCreateResponse)
-async def create_catalog_endpoint(
-    payload: LumaCatalogCreateRequest,
-    user_id: Optional[int] = Depends(get_current_user_id),
-):
-    """Create or upsert a catalog item for the current user."""
-    if not user_id:
-        return LumaCatalogCreateResponse(ok=False, error="UNAUTHORIZED", item=None)
-    item = create_catalog_item(
-        user_id=int(user_id),
-        title=payload.title,
-        doc_type=payload.doc_type,
-        source=payload.source,
-        file_url=payload.file_url,
-        file_key=(payload.file_key or ""),
-        metadata=(payload.metadata or {}),
-    )
-    if not item:
-        return LumaCatalogCreateResponse(ok=False, error="CREATE_FAILED", item=None)
-    return LumaCatalogCreateResponse(ok=True, item=item)
-
-@router.delete("/catalog/{item_id}", response_model=LumaCatalogDeleteResponse)
-async def delete_catalog_endpoint(
-    item_id: int,
-    user_id: Optional[int] = Depends(get_current_user_id),
-):
-    """Delete one catalog item."""
-    if not user_id:
-        return LumaCatalogDeleteResponse(ok=False, deleted=False, error="UNAUTHORIZED")
-    ok = delete_catalog_item(user_id=int(user_id), item_id=int(item_id))
-    return LumaCatalogDeleteResponse(ok=True, deleted=bool(ok), error=None if ok else "NOT_FOUND")
-
 @router.post("/ai/ask", response_model=LumaAIResponse)
 async def luma_ai_ask(
     request: LumaAIAskRequest,
@@ -476,3 +432,31 @@ async def luma_health():
             "POST /api/luma/ai/ask"
         ]
     }
+
+
+
+# -------------------- User Catalog (Library) --------------------
+@router.get("/catalog")
+def luma_catalog_list(limit: int = 50, offset: int = 0, user=Depends(require_user)):
+    """List current user's saved library items."""
+    return {"ok": True, "items": list_catalog(user_id=user["id"], limit=limit, offset=offset)}
+
+@router.post("/catalog")
+def luma_catalog_create(payload: dict, user=Depends(require_user)):
+    """Create a library item for current user."""
+    item = {
+        "user_id": user["id"],
+        "title": payload.get("title") or "Untitled",
+        "doc_type": payload.get("doc_type") or "link",
+        "source": payload.get("source") or "user",
+        "file_url": payload.get("file_url") or "",
+        "file_key": payload.get("file_key"),
+        "metadata_json": json.dumps(payload.get("metadata", {})) if not isinstance(payload.get("metadata"), str) else payload.get("metadata"),
+    }
+    create_catalog_item(item)
+    return {"ok": True}
+
+@router.delete("/catalog/{item_id}")
+def luma_catalog_delete(item_id: int, user=Depends(require_user)):
+    delete_catalog_item(user_id=user["id"], item_id=item_id)
+    return {"ok": True}
