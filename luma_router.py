@@ -35,9 +35,10 @@ logger = logging.getLogger("knoweasy-engine-api")
 
 router = APIRouter(prefix="/api/luma", tags=["luma"])
 
-# Ensure tables on module load (non-blocking)
+# Ensure Luma tables on module load (non-blocking)
 try:
-    ensure_tables()
+    import luma_store
+    luma_store.ensure_tables()
 except Exception as e:
     logger.warning(f"luma_router: table setup failed: {e}")
 
