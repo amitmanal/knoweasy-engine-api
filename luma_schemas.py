@@ -237,3 +237,44 @@ class LumaListResponse(BaseModel):
     contents: List[LumaContent] = Field(default_factory=list)
     total: int = Field(default=0)
     error: Optional[str] = None
+
+
+# ============================================================================
+# CANONICAL LUMA CATALOG CONTRACT (Production lock)
+# ============================================================================
+# This is the ONLY contract used by:
+# - GET /api/luma/content
+# - GET /api/luma/content/{id}
+#
+# It is intentionally minimal and stable for frontend + production.
+from pydantic import ConfigDict
+
+class CanonicalLumaContent(BaseModel):
+    """Canonical Luma catalog item contract (locked)."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    blueprint: Dict[str, Any] = Field(default_factory=dict)
+    published: bool = Field(default=False)
+    created_at: datetime
+    updated_at: datetime
+
+
+class CanonicalLumaListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ok: bool = True
+    contents: List[CanonicalLumaContent]
+
+
+class CanonicalLumaSingleResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ok: bool = True
+    content: CanonicalLumaContent
+
+
+class CanonicalLumaErrorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ok: bool = False
+    error: str

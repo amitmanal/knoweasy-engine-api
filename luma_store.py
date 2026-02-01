@@ -305,13 +305,26 @@ def get_content(content_id: str, *, include_unpublished: bool = False) -> Option
             metadata = _from_json(row[1], {})
             blueprint = _from_json(row[2], {})
 
+            md = metadata if isinstance(metadata, dict) else {}
+            bp = blueprint if isinstance(blueprint, dict) else {}
+
+            # Canonical title: prefer blueprint.title, fallback to metadata topic/chapter, then id
+            title = ""
+            if isinstance(bp, dict):
+                title = str(bp.get("title") or "").strip()
+            if not title:
+                title = str(md.get("topic") or md.get("chapter") or "").strip()
+            if not title:
+                title = str(row[0])
+
             return {
                 "id": row[0],
-                "metadata": metadata if isinstance(metadata, dict) else {},
-                "blueprint": blueprint if isinstance(blueprint, dict) else {},
+                "title": title,
+                "metadata": md,
+                "blueprint": bp,
+                "published": bool(row[5]),
                 "created_at": row[3].isoformat() if row[3] else None,
                 "updated_at": row[4].isoformat() if row[4] else None,
-                "published": bool(row[5]),
             }
 
     except Exception as e:
@@ -358,11 +371,11 @@ def list_content(
 
         out: List[Dict[str, Any]] = []
         for r in rows:
-            md = _from_json(r[1], {})
-            bp = _from_json(r[2], {})
+            md_raw = _from_json(r[1], {})
+            bp_raw = _from_json(r[2], {})
 
-            md = md if isinstance(md, dict) else {}
-            bp = bp if isinstance(bp, dict) else {}
+            md = md_raw if isinstance(md_raw, dict) else {}
+            bp = bp_raw if isinstance(bp_raw, dict) else {}
 
             # Production rule: public listing should not leak unpublished content.
             if (not include_unpublished) and (not bool(r[5])):
@@ -384,13 +397,23 @@ def list_content(
                 if board.lower() not in bv.lower():
                     continue
 
+            # Canonical title: prefer blueprint.title, fallback to metadata topic/chapter, then id
+            title = ""
+            if isinstance(bp, dict):
+                title = str(bp.get("title") or "").strip()
+            if not title:
+                title = str(md.get("topic") or md.get("chapter") or "").strip()
+            if not title:
+                title = str(r[0])
+
             out.append({
                 "id": r[0],
+                "title": title,
                 "metadata": md,
                 "blueprint": bp,
+                "published": bool(r[5]),
                 "created_at": r[3].isoformat() if r[3] else None,
                 "updated_at": r[4].isoformat() if r[4] else None,
-                "published": bool(r[5]),
             })
 
         return out
@@ -399,10 +422,6 @@ def list_content(
         logger.exception(f"luma_store: list_content failed: {e}")
         return []
 
-
-# ============================================================================
-# PROGRESS OPERATIONS
-# ============================================================================
 
 def save_progress(
     user_id: int,

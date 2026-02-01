@@ -21,8 +21,17 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 
-from luma_store import list_catalog, create_catalog_item, delete_catalog_item
+from luma_store import (
+    list_catalog,
+    create_catalog_item,
+    delete_catalog_item,
+    get_content,
+    list_content,
+)
 from luma_schemas import (
+    CanonicalLumaListResponse,
+    CanonicalLumaSingleResponse,
+    CanonicalLumaErrorResponse,
     LumaContentResponse,
     LumaProgressSaveRequest,
     LumaProgressResponse,
@@ -87,93 +96,64 @@ async def get_current_user_id(authorization: str = Header(None)) -> Optional[int
 # ============================================================================
 # CONTENT ENDPOINTS
 # ============================================================================
+# ============================================================================
+# CONTENT ENDPOINTS
+# ============================================================================
 
-@router.get("/content/{content_id}", response_model=LumaContentResponse)
+@router.get(
+    "/content/{content_id}",
+    response_model=CanonicalLumaSingleResponse,
+    responses={404: {"model": CanonicalLumaErrorResponse}, 500: {"model": CanonicalLumaErrorResponse}},
+)
 async def get_content_endpoint(content_id: str):
-    """Get learning content by ID.
-    
-    Public endpoint - no auth required.
-    Content must be published to be accessible.
-    
-    Args:
-        content_id: Content identifier (e.g., "photosynthesis-neet-001")
-        
-    Returns:
-        Content with Answer Blueprint structure
-        
-    Example:
-        GET /api/luma/content/photosynthesis-neet-001
+    """Get learning content by ID (public).
+
+    Returns canonical LumaContent contract for frontend consumption.
     """
     try:
         content = get_content(content_id)
-        
+
         if not content:
-            return LumaContentResponse(
-                ok=False,
-                error="CONTENT_NOT_FOUND"
-            )
-        
-        return LumaContentResponse(
-            ok=True,
-            content=content
-        )
-    
+            raise HTTPException(status_code=404, detail={"ok": False, "error": "CONTENT_NOT_FOUND"})
+
+        return {"ok": True, "content": content}
+
+    except HTTPException:
+        raise
     except Exception as e:
+        # TEMP: do not mask catalog errors until stable
         logger.exception(f"luma_router: get_content failed: {e}")
-        return LumaContentResponse(
-            ok=False,
-            error="INTERNAL_ERROR"
-        )
+        raise HTTPException(status_code=500, detail={"ok": False, "error": f"{e.__class__.__name__}: {str(e)}"})
 
 
-@router.get("/content", response_model=dict)
+@router.get(
+    "/content",
+    response_model=CanonicalLumaListResponse,
+    responses={500: {"model": CanonicalLumaErrorResponse}},
+)
 async def list_content_endpoint(
     class_level: Optional[int] = None,
     subject: Optional[str] = None,
     board: Optional[str] = None,
     limit: int = 50
 ):
-    """List published content with optional filters.
-    
-    Public endpoint - no auth required.
-    
-    Query Parameters:
-        class_level: Filter by class (5-12)
-        subject: Filter by subject (Physics/Chemistry/Biology/Math)
-        board: Filter by board (CBSE/ICSE/Maharashtra/JEE/NEET)
-        limit: Maximum results (default: 50, max: 100)
-        
-    Returns:
-        List of content items
-        
-    Example:
-        GET /api/luma/content?class_level=11&subject=Biology&board=NEET
-    """
+    """List published content with optional filters (public)."""
     try:
-        # Cap limit to prevent abuse
         limit = min(limit, 100)
-        
+
         contents = list_content(
             class_level=class_level,
             subject=subject,
             board=board,
             limit=limit
         )
-        
-        return {
-            "ok": True,
-            "contents": contents,
-            "total": len(contents)
-        }
-    
+
+        return {"ok": True, "contents": contents}
+
     except Exception as e:
+        # TEMP: do not mask catalog errors until stable
         logger.exception(f"luma_router: list_content failed: {e}")
-        return {
-            "ok": False,
-            "error": "INTERNAL_ERROR"
-        }
-
-
+        raise HTTPException(status_code=500, detail={"ok": False, "error": f"{e.__class__.__name__}: {str(e)}"})
 # ============================================================================
 # PROGRESS ENDPOINTS (Auth Required)
 # ============================================================================
