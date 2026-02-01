@@ -101,19 +101,6 @@ def _get_engine() -> Optional[Engine]:
         return None
 
 
-
-
-# -----------------------------
-# Public safe engine getter (for other modules)
-# -----------------------------
-
-def get_engine_safe() -> Optional[Engine]:
-    """Return a SQLAlchemy engine or None (never raises).
-
-    Luma modules import this helper. It is intentionally stable API.
-    """
-    return _get_engine()
-
 # -----------------------------
 # Init / Health
 # -----------------------------
