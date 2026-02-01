@@ -213,6 +213,9 @@ def ensure_tables() -> None:
                 ON luma_catalog(user_id, file_key)
                 WHERE file_key IS NOT NULL AND file_key <> '';
             """))
+    except Exception as e:
+        raise
+
 conn.execute(_t("""
                 CREATE INDEX IF NOT EXISTS idx_luma_content_published
                 ON luma_content(published) WHERE published = TRUE;
