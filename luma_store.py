@@ -24,6 +24,16 @@ except Exception:
     def get_engine_safe():
         return None
 
+# SQLAlchemy 2.x requires text() for raw SQL strings.
+try:
+    from sqlalchemy import text as _sql_text
+
+    def _t(q: str):
+        return _sql_text(q)
+except Exception:
+    def _t(q: str):
+        return q
+
 
 # ============================================================================
 # TABLE DEFINITIONS (Non-breaking, idempotent)
@@ -43,7 +53,7 @@ def ensure_tables() -> None:
     try:
         with engine.begin() as conn:
             # Content table - stores Answer Blueprints
-            conn.execute("""
+            conn.execute(_t("""
                 CREATE TABLE IF NOT EXISTS luma_content (
                     id TEXT PRIMARY KEY,
                     metadata_json TEXT NOT NULL,
@@ -52,10 +62,21 @@ def ensure_tables() -> None:
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     published BOOLEAN NOT NULL DEFAULT FALSE
                 );
-            """)
+            """))
+
+            # Non-breaking migrations for existing installs (ADD COLUMN IF NOT EXISTS)
+            # This fixes cases where luma_content was created earlier with fewer columns.
+            conn.execute(_t("""
+                ALTER TABLE luma_content
+                    ADD COLUMN IF NOT EXISTS metadata_json TEXT NOT NULL DEFAULT '{}'::text,
+                    ADD COLUMN IF NOT EXISTS blueprint_json TEXT NOT NULL DEFAULT '{}'::text,
+                    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT FALSE;
+            """))
             
             # Progress table - user learning progress
-            conn.execute("""
+            conn.execute(_t("""
                 CREATE TABLE IF NOT EXISTS luma_progress (
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
@@ -67,10 +88,10 @@ def ensure_tables() -> None:
                     bookmarked BOOLEAN NOT NULL DEFAULT FALSE,
                     UNIQUE(user_id, content_id)
                 );
-            """)
+            """))
             
             # Analytics table - usage events
-            conn.execute("""
+            conn.execute(_t("""
                 CREATE TABLE IF NOT EXISTS luma_analytics (
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
@@ -79,23 +100,23 @@ def ensure_tables() -> None:
                     metadata_json TEXT,
                     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
-            """)
+            """))
             
             # Indexes for performance
-            conn.execute("""
+            conn.execute(_t("""
                 CREATE INDEX IF NOT EXISTS idx_luma_content_published 
                 ON luma_content(published) WHERE published = TRUE;
-            """)
+            """))
             
-            conn.execute("""
+            conn.execute(_t("""
                 CREATE INDEX IF NOT EXISTS idx_luma_progress_user 
                 ON luma_progress(user_id, last_visited_at DESC);
-            """)
+            """))
             
-            conn.execute("""
+            conn.execute(_t("""
                 CREATE INDEX IF NOT EXISTS idx_luma_analytics_user 
                 ON luma_analytics(user_id, timestamp DESC);
-            """)
+            """))
             
         logger.info("luma_store: tables ensured successfully")
     except Exception as e:
@@ -130,7 +151,7 @@ def insert_content(
     try:
         with engine.begin() as conn:
             conn.execute(
-                """
+                _t("""
                 INSERT INTO luma_content (id, metadata_json, blueprint_json, published)
                 VALUES (:id, :metadata, :blueprint, :published)
                 ON CONFLICT (id) DO UPDATE SET
@@ -138,7 +159,7 @@ def insert_content(
                     blueprint_json = EXCLUDED.blueprint_json,
                     published = EXCLUDED.published,
                     updated_at = NOW()
-                """,
+                """),
                 {
                     "id": content_id,
                     "metadata": json.dumps(metadata),
@@ -171,11 +192,11 @@ def get_content(content_id: str) -> Optional[Dict[str, Any]]:
     try:
         with engine.connect() as conn:
             result = conn.execute(
-                """
+                _t("""
                 SELECT id, metadata_json, blueprint_json, created_at, updated_at, published
                 FROM luma_content
                 WHERE id = :id AND published = TRUE
-                """,
+                """),
                 {"id": content_id}
             ).fetchone()
             
@@ -238,13 +259,13 @@ def list_content(
         
         with engine.connect() as conn:
             results = conn.execute(
-                f"""
+                _t(f"""
                 SELECT id, metadata_json, blueprint_json, created_at, updated_at
                 FROM luma_content
                 WHERE {where_clause}
                 ORDER BY created_at DESC
                 LIMIT :limit
-                """,
+                """),
                 params
             ).fetchall()
             
@@ -296,7 +317,7 @@ def save_progress(
     try:
         with engine.begin() as conn:
             conn.execute(
-                """
+                _t("""
                 INSERT INTO luma_progress 
                     (user_id, content_id, completed, time_spent_seconds, notes, bookmarked, last_visited_at)
                 VALUES 
@@ -307,7 +328,7 @@ def save_progress(
                     notes = COALESCE(EXCLUDED.notes, luma_progress.notes),
                     bookmarked = EXCLUDED.bookmarked,
                     last_visited_at = NOW()
-                """,
+                """),
                 {
                     "user_id": user_id,
                     "content_id": content_id,
@@ -342,11 +363,11 @@ def get_progress(user_id: int, content_id: str) -> Optional[Dict[str, Any]]:
     try:
         with engine.connect() as conn:
             result = conn.execute(
-                """
+                _t("""
                 SELECT completed, time_spent_seconds, notes, bookmarked, last_visited_at
                 FROM luma_progress
                 WHERE user_id = :user_id AND content_id = :content_id
-                """,
+                """),
                 {"user_id": user_id, "content_id": content_id}
             ).fetchone()
             
@@ -391,10 +412,10 @@ def log_event(
     try:
         with engine.begin() as conn:
             conn.execute(
-                """
+                _t("""
                 INSERT INTO luma_analytics (user_id, event_type, content_id, metadata_json)
                 VALUES (:user_id, :event_type, :content_id, :metadata)
-                """,
+                """),
                 {
                     "user_id": user_id,
                     "event_type": event_type,
