@@ -40,15 +40,48 @@ except Exception:
 # HELPERS
 # ============================================================================
 
-def _to_json_str(value: Any) -> str:
-    """
-    Ensure we store JSON as a STRING in DB (TEXT column).
-    Accepts dict/list/str/None safely.
+def _to_json_str(value: Any, *, require_object: bool = True) -> str:
+    """Serialize JSON safely for TEXT columns.
+
+    Why:
+    - Your DB columns are TEXT, but downstream code (and list filters) assume valid JSON.
+    - Accepting arbitrary strings without validation can poison the table and later queries.
+
+    Behavior:
+    - dict/list -> json.dumps
+    - str -> validate it's JSON (and optionally an object) then re-dump for canonical form
+    - None -> '{}'
+
+    NOTE: We *never* raise out of this helper; store a safe default instead.
     """
     if value is None:
         return "{}"
+
+    # If caller passed a Python object, dump it.
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return "{}"
+
+    # If caller passed a string, validate and normalize.
     if isinstance(value, str):
-        return value
+        s = value.strip()
+        if not s:
+            return "{}"
+        try:
+            obj = json.loads(s)
+        except Exception:
+            return "{}"
+        if require_object and not isinstance(obj, dict):
+            # For metadata_json / blueprint_json we expect an object.
+            return "{}"
+        try:
+            return json.dumps(obj, ensure_ascii=False)
+        except Exception:
+            return "{}"
+
+    # Unknown types: safest fallback.
     try:
         return json.dumps(value, ensure_ascii=False)
     except Exception:
@@ -191,8 +224,8 @@ def insert_content(
                 """),
                 {
                     "id": content_id,
-                    "metadata": _to_json_str(metadata),
-                    "blueprint": _to_json_str(blueprint),
+                    "metadata": _to_json_str(metadata, require_object=True),
+                    "blueprint": _to_json_str(blueprint, require_object=True),
                     "published": bool(published),
                 }
             )
@@ -203,10 +236,12 @@ def insert_content(
         return {"ok": False, "error": str(e)}
 
 
-def get_content(content_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Get content by ID.
-    Phase-1 behavior: return content if it exists (do NOT block by published flag).
+def get_content(content_id: str, *, include_unpublished: bool = False) -> Optional[Dict[str, Any]]:
+    """Get content by ID.
+
+    Production rule:
+    - Public reads should only return published content.
+    - Admin tooling can opt-in to unpublished via include_unpublished=True.
     """
     engine = get_engine_safe()
     if not engine:
@@ -224,6 +259,9 @@ def get_content(content_id: str) -> Optional[Dict[str, Any]]:
             ).fetchone()
 
             if not row:
+                return None
+
+            if (not include_unpublished) and (not bool(row[5])):
                 return None
 
             metadata = _from_json(row[1], {})
@@ -247,7 +285,9 @@ def list_content(
     class_level: Optional[int] = None,
     subject: Optional[str] = None,
     board: Optional[str] = None,
-    limit: int = 50
+    limit: int = 50,
+    *,
+    include_unpublished: bool = False
 ) -> List[Dict[str, Any]]:
     """
     List content with optional filters.
@@ -258,48 +298,64 @@ def list_content(
         return []
 
     try:
-        conditions = ["1=1"]
-        params: Dict[str, Any] = {"limit": min(int(limit), 100)}
+        # IMPORTANT:
+        # Your JSON columns are TEXT. Casting TEXT -> jsonb in SQL will throw if any row contains
+        # invalid JSON, which turns simple list endpoints into INTERNAL_ERROR.
+        #
+        # For production safety (and your current scale), we fetch recent rows and filter in Python.
+        # Later, if you migrate columns to JSONB with constraints, you can move filters back to SQL.
 
-        if class_level is not None:
-            conditions.append("metadata_json::jsonb->>'class_level' = :class_level")
-            params["class_level"] = str(class_level)
-
-        if subject:
-            conditions.append("metadata_json::jsonb->>'subject' ILIKE :subject")
-            params["subject"] = f"%{subject}%"
-
-        if board:
-            conditions.append("metadata_json::jsonb->>'board' ILIKE :board")
-            params["board"] = f"%{board}%"
-
-        where_clause = " AND ".join(conditions)
+        lim = min(int(limit), 100)
 
         with engine.connect() as conn:
             rows = conn.execute(
-                _t(f"""
+                _t("""
                 SELECT id, metadata_json, blueprint_json, created_at, updated_at, published
                 FROM luma_content
-                WHERE {where_clause}
                 ORDER BY created_at DESC
                 LIMIT :limit
                 """),
-                params
+                {"limit": lim}
             ).fetchall()
 
-            out: List[Dict[str, Any]] = []
-            for r in rows:
-                md = _from_json(r[1], {})
-                bp = _from_json(r[2], {})
-                out.append({
-                    "id": r[0],
-                    "metadata": md if isinstance(md, dict) else {},
-                    "blueprint": bp if isinstance(bp, dict) else {},
-                    "created_at": r[3].isoformat() if r[3] else None,
-                    "updated_at": r[4].isoformat() if r[4] else None,
-                    "published": bool(r[5]),
-                })
-            return out
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            md = _from_json(r[1], {})
+            bp = _from_json(r[2], {})
+
+            md = md if isinstance(md, dict) else {}
+            bp = bp if isinstance(bp, dict) else {}
+
+            # Production rule: public listing should not leak unpublished content.
+            if (not include_unpublished) and (not bool(r[5])):
+                continue
+
+            # Apply optional filters in Python (safe even if some rows are malformed).
+            if class_level is not None:
+                v = str(md.get("class_level", "")).strip()
+                if v != str(class_level):
+                    continue
+
+            if subject:
+                sv = str(md.get("subject", ""))
+                if subject.lower() not in sv.lower():
+                    continue
+
+            if board:
+                bv = str(md.get("board", ""))
+                if board.lower() not in bv.lower():
+                    continue
+
+            out.append({
+                "id": r[0],
+                "metadata": md,
+                "blueprint": bp,
+                "created_at": r[3].isoformat() if r[3] else None,
+                "updated_at": r[4].isoformat() if r[4] else None,
+                "published": bool(r[5]),
+            })
+
+        return out
 
     except Exception as e:
         logger.exception(f"luma_store: list_content failed: {e}")
