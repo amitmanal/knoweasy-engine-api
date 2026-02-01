@@ -1,6 +1,6 @@
 # KnowEasy Backend Routes (auto-extracted)
 
-This list is extracted from router decorators in the codebase.
+Open this file after deploying to know which URLs exist.
 
 ## Routes
 

@@ -1,12 +1,10 @@
-
+import json
+"""Luma API Router
 try:
     from auth_router import require_user
 except Exception:
-    def require_user():
-        raise Exception("Auth not configured")
+    require_user = None
 
-import json
-"""Luma API Router
 
 FastAPI endpoints for Luma learning platform.
 
@@ -434,16 +432,19 @@ async def luma_health():
     }
 
 
-
 # -------------------- User Catalog (Library) --------------------
 @router.get("/catalog")
-def luma_catalog_list(limit: int = 50, offset: int = 0, user=Depends(require_user)):
+def catalog_list(limit: int = 50, offset: int = 0, user=Depends(require_user)):
     """List current user's saved library items."""
+    if require_user is None:
+        return {"ok": False, "error": "auth_not_configured"}
     return {"ok": True, "items": list_catalog(user_id=user["id"], limit=limit, offset=offset)}
 
 @router.post("/catalog")
-def luma_catalog_create(payload: dict, user=Depends(require_user)):
+def catalog_create(payload: dict, user=Depends(require_user)):
     """Create a library item for current user."""
+    if require_user is None:
+        return {"ok": False, "error": "auth_not_configured"}
     item = {
         "user_id": user["id"],
         "title": payload.get("title") or "Untitled",
@@ -457,6 +458,9 @@ def luma_catalog_create(payload: dict, user=Depends(require_user)):
     return {"ok": True}
 
 @router.delete("/catalog/{item_id}")
-def luma_catalog_delete(item_id: int, user=Depends(require_user)):
+def catalog_delete(item_id: int, user=Depends(require_user)):
+    if require_user is None:
+        return {"ok": False, "error": "auth_not_configured"}
     delete_catalog_item(user_id=user["id"], item_id=item_id)
     return {"ok": True}
+
