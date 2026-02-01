@@ -106,18 +106,6 @@ def _get_engine() -> Optional[Engine]:
 # -----------------------------
 
 
-def get_engine_safe() -> Optional[Engine]:
-    """Compatibility helper for modules (e.g., luma_store.py).
-
-    Returns a cached SQLAlchemy Engine if DB is enabled and configured; otherwise None.
-    Never raises.
-    """
-    try:
-        return _get_engine()
-    except Exception:
-        return None
-
-
 def db_init() -> Dict[str, Any]:
     """Create DB tables used by the API (best-effort)."""
     engine = _get_engine()
