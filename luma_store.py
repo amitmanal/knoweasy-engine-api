@@ -175,7 +175,45 @@ def ensure_tables() -> None:
                 );
             """))
 
+            
+            # User Catalog (uploads / saved resources)
             conn.execute(_t("""
+                CREATE TABLE IF NOT EXISTS luma_catalog (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    doc_type TEXT NOT NULL DEFAULT 'link',
+                    source TEXT NOT NULL DEFAULT 'user',
+                    file_url TEXT NOT NULL,
+                    file_key TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'::text,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """))
+
+            # Non-breaking migrations
+            conn.execute(_t("""
+                ALTER TABLE luma_catalog
+                    ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT 'Untitled',
+                    ADD COLUMN IF NOT EXISTS doc_type TEXT NOT NULL DEFAULT 'link',
+                    ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'user',
+                    ADD COLUMN IF NOT EXISTS file_url TEXT NOT NULL DEFAULT '',
+                    ADD COLUMN IF NOT EXISTS file_key TEXT,
+                    ADD COLUMN IF NOT EXISTS metadata_json TEXT NOT NULL DEFAULT '{}'::text,
+                    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+            """))
+
+            conn.execute(_t("""
+                CREATE INDEX IF NOT EXISTS idx_luma_catalog_user_created
+                ON luma_catalog(user_id, created_at DESC);
+            """))
+
+            conn.execute(_t("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_luma_catalog_user_filekey
+                ON luma_catalog(user_id, file_key)
+                WHERE file_key IS NOT NULL AND file_key <> '';
+            """))
+conn.execute(_t("""
                 CREATE INDEX IF NOT EXISTS idx_luma_content_published
                 ON luma_content(published) WHERE published = TRUE;
             """))
@@ -471,3 +509,149 @@ def log_event(
             )
     except Exception as e:
         logger.warning(f"luma_store: analytics logging failed: {e}")
+
+
+# ============================================================================
+# CATALOG OPERATIONS (User Library)
+# ============================================================================
+
+def create_catalog_item(
+    *,
+    user_id: int,
+    title: str,
+    doc_type: str,
+    source: str,
+    file_url: str,
+    file_key: str = "",
+    metadata: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Create a catalog row for a user's saved resource.
+
+    Best-effort: returns created row dict, or None.
+    """
+    ensure_tables()
+    engine = get_engine_safe()
+    if not engine:
+        return None
+
+    title = (title or "Untitled").strip()[:200] or "Untitled"
+    doc_type = (doc_type or "link").strip().lower()[:40] or "link"
+    source = (source or "user").strip().lower()[:40] or "user"
+    file_url = (file_url or "").strip()
+    file_key = (file_key or "").strip()[:240]
+
+    if not file_url:
+        return None
+
+    meta_json = _to_json_str(metadata or {}, require_object=True)
+
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                _t("""
+                    INSERT INTO luma_catalog (user_id, title, doc_type, source, file_url, file_key, metadata_json)
+                    VALUES (:user_id, :title, :doc_type, :source, :file_url, :file_key, :metadata_json)
+                    ON CONFLICT (user_id, file_key) WHERE (file_key IS NOT NULL AND file_key <> '')
+                    DO UPDATE SET title=EXCLUDED.title, doc_type=EXCLUDED.doc_type, source=EXCLUDED.source, file_url=EXCLUDED.file_url, metadata_json=EXCLUDED.metadata_json
+                    RETURNING id, user_id, title, doc_type, source, file_url, file_key, metadata_json, created_at
+                """),
+                {
+                    "user_id": int(user_id),
+                    "title": title,
+                    "doc_type": doc_type,
+                    "source": source,
+                    "file_url": file_url,
+                    "file_key": file_key,
+                    "metadata_json": meta_json,
+                },
+            ).mappings().first()
+
+            if not row:
+                return None
+
+            return {
+                "id": row.get("id"),
+                "user_id": row.get("user_id"),
+                "title": row.get("title"),
+                "doc_type": row.get("doc_type"),
+                "source": row.get("source"),
+                "file_url": row.get("file_url"),
+                "file_key": row.get("file_key") or "",
+                "metadata": _from_json(row.get("metadata_json"), {}),
+                "created_at": str(row.get("created_at")) if row.get("created_at") is not None else None,
+            }
+    except Exception:
+        logger.exception("luma_store: create_catalog_item failed")
+        return None
+
+
+def list_catalog(
+    *,
+    user_id: int,
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """List a user's catalog items (newest first)."""
+    ensure_tables()
+    engine = get_engine_safe()
+    if not engine:
+        return []
+    try:
+        limit = max(1, min(int(limit or 50), 200))
+        offset = max(0, int(offset or 0))
+    except Exception:
+        limit, offset = 50, 0
+
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(
+                _t("""
+                    SELECT id, user_id, title, doc_type, source, file_url, file_key, metadata_json, created_at
+                    FROM luma_catalog
+                    WHERE user_id = :user_id
+                    ORDER BY created_at DESC
+                    LIMIT :limit OFFSET :offset
+                """),
+                {"user_id": int(user_id), "limit": limit, "offset": offset},
+            ).mappings().all()
+
+            out = []
+            for r in rows or []:
+                out.append(
+                    {
+                        "id": r.get("id"),
+                        "user_id": r.get("user_id"),
+                        "title": r.get("title"),
+                        "doc_type": r.get("doc_type"),
+                        "source": r.get("source"),
+                        "file_url": r.get("file_url"),
+                        "file_key": r.get("file_key") or "",
+                        "metadata": _from_json(r.get("metadata_json"), {}),
+                        "created_at": str(r.get("created_at")) if r.get("created_at") is not None else None,
+                    }
+                )
+            return out
+    except Exception:
+        logger.exception("luma_store: list_catalog failed")
+        return []
+
+
+def delete_catalog_item(*, user_id: int, item_id: int) -> bool:
+    """Delete one catalog item owned by user."""
+    ensure_tables()
+    engine = get_engine_safe()
+    if not engine:
+        return False
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(
+                _t("""
+                    DELETE FROM luma_catalog
+                    WHERE id = :id AND user_id = :user_id
+                """),
+                {"id": int(item_id), "user_id": int(user_id)},
+            )
+            return (res.rowcount or 0) > 0
+    except Exception:
+        logger.exception("luma_store: delete_catalog_item failed")
+        return False

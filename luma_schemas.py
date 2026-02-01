@@ -237,3 +237,43 @@ class LumaListResponse(BaseModel):
     contents: List[LumaContent] = Field(default_factory=list)
     total: int = Field(default=0)
     error: Optional[str] = None
+
+
+# ============================================================================
+# CATALOG SCHEMAS (User Library)
+# ============================================================================
+
+from typing import List as _List, Optional as _Optional, Dict as _Dict, Any as _Any
+
+class LumaCatalogItem(BaseModel):
+    id: int
+    title: str
+    doc_type: str
+    source: str
+    file_url: str
+    file_key: _Optional[str] = None
+    metadata: _Dict[str, _Any] = {}
+    created_at: _Optional[str] = None
+
+class LumaCatalogCreateRequest(BaseModel):
+    title: str
+    doc_type: str = "link"
+    source: str = "user"
+    file_url: str
+    file_key: _Optional[str] = None
+    metadata: _Dict[str, _Any] = {}
+
+class LumaCatalogListResponse(BaseModel):
+    ok: bool
+    items: _List[LumaCatalogItem] = []
+    error: _Optional[str] = None
+
+class LumaCatalogCreateResponse(BaseModel):
+    ok: bool
+    item: _Optional[LumaCatalogItem] = None
+    error: _Optional[str] = None
+
+class LumaCatalogDeleteResponse(BaseModel):
+    ok: bool
+    deleted: bool = False
+    error: _Optional[str] = None
