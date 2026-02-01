@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 """Luma API Router
 try:
@@ -17,8 +19,6 @@ Endpoints:
 
 All endpoints require authentication except content listing.
 """
-
-from __future__ import annotations
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
