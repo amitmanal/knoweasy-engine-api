@@ -53,6 +53,17 @@ def ensure_tables() -> None:
                     published BOOLEAN NOT NULL DEFAULT FALSE
                 );
             """)
+
+            # Non-breaking migrations for older tables (add columns if missing)
+            conn.execute("""
+                ALTER TABLE luma_content
+                    ADD COLUMN IF NOT EXISTS metadata_json TEXT,
+                    ADD COLUMN IF NOT EXISTS blueprint_json TEXT,
+                    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+
             
             # Progress table - user learning progress
             conn.execute("""
@@ -172,7 +183,7 @@ def get_content(content_id: str) -> Optional[Dict[str, Any]]:
         with engine.connect() as conn:
             result = conn.execute(
                 """
-                SELECT id, metadata_json, blueprint_json, created_at, updated_at, published
+                SELECT id, metadata_json, blueprint_json, published
                 FROM luma_content
                 WHERE id = :id AND published = TRUE
                 """,
@@ -186,9 +197,7 @@ def get_content(content_id: str) -> Optional[Dict[str, Any]]:
                 "id": result[0],
                 "metadata": json.loads(result[1]),
                 "blueprint": json.loads(result[2]),
-                "created_at": result[3].isoformat() if result[3] else None,
-                "updated_at": result[4].isoformat() if result[4] else None,
-                "published": result[5],
+                "published": result[3],
             }
     
     except Exception as e:
@@ -239,7 +248,7 @@ def list_content(
         with engine.connect() as conn:
             results = conn.execute(
                 f"""
-                SELECT id, metadata_json, blueprint_json, created_at, updated_at
+                SELECT id, metadata_json, blueprint_json, created_at
                 FROM luma_content
                 WHERE {where_clause}
                 ORDER BY created_at DESC
@@ -254,8 +263,7 @@ def list_content(
                     "metadata": json.loads(r[1]),
                     "blueprint": json.loads(r[2]),
                     "created_at": r[3].isoformat() if r[3] else None,
-                    "updated_at": r[4].isoformat() if r[4] else None,
-                }
+                    }
                 for r in results
             ]
     
