@@ -30,9 +30,7 @@ except Exception:
         return None
 
 try:
-    from sqlalchemy import text
-
-import luma_store as _sql_text
+    from sqlalchemy import text as _sql_text
     def _t(q: str):
         return _sql_text(q)
 except Exception:
