@@ -30,7 +30,9 @@ except Exception:
         return None
 
 try:
-    from sqlalchemy import text as _sql_text
+    from sqlalchemy import text
+
+import luma_store as _sql_text
     def _t(q: str):
         return _sql_text(q)
 except Exception:
@@ -421,6 +423,51 @@ def resolve_asset(
             fallback = fetch_asset(anchor[0], anchor[1])
             if fallback and fallback.get("status") == "published" and str(fallback.get("ref_value") or "").strip():
                 return {"ok": True, **fallback, "track": anchor[0], "program": anchor[1], "inherited": True}
+
+    
+    # AUTO-MATCH LUMA CONTENT (no explicit mapping yet)
+    # If we have published luma_content with matching metadata/title, use it and cache into chapter_assets.
+    if asset_type == "luma":
+        req_meta = {
+            "class_level": class_num,
+            "subject": subject_slug.replace("_", " ").title(),
+            "chapter": title,
+        }
+        if track == TRACK_BOARDS:
+            req_meta["board"] = program.upper()
+        elif track == TRACK_ENTRANCE:
+            # normalize exam names
+            exam_map = {
+                "jee": "JEE",
+                "neet": "NEET",
+                "cet_pcm": "CET (PCM)",
+                "cet_pcb": "CET (PCB)",
+            }
+            req_meta["exam"] = exam_map.get(program, program.upper())
+        best_id = luma_store.find_best_content_id(title or "", req_meta)
+        if best_id:
+            try:
+                upsert_luma_asset_mapping(
+                    class_num=class_num,
+                    track=track,
+                    program=program,
+                    subject_slug=subject_slug,
+                    chapter_id=chapter_id,
+                    content_id=best_id,
+                )
+            except Exception:
+                pass
+            # return as published link
+            return {
+                "ok": True,
+                "status": "published",
+                "ref_kind": "luma_content_id",
+                "ref_value": best_id,
+                "meta": {},
+                "track": track,
+                "program": program,
+                "auto_matched": True,
+            }
 
     return {"ok": False, "status": "coming_soon"}
 

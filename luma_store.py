@@ -13,6 +13,7 @@ Design Principles:
 from __future__ import annotations
 
 import json
+import re
 import logging
 from typing import Dict, Any, List, Optional
 
@@ -706,3 +707,88 @@ def delete_catalog_item(*, user_id: int, item_id: int) -> bool:
     except Exception:
         logger.exception("luma_store: delete_catalog_item failed")
         return False
+
+
+def list_published_contents(limit: int = 500):
+    """Return lightweight rows for published content (id,title,metadata_json)."""
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT id, title, metadata_json
+            FROM luma_content
+            WHERE status = 'published'
+            ORDER BY created_at DESC
+            LIMIT :limit
+        """), {"limit": limit}).fetchall()
+    return [{"id": r[0], "title": r[1] or "", "metadata_json": r[2] or "{}"} for r in rows]
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower())).strip()
+
+
+def find_best_content_id(request_title: str, request_meta: dict) -> str | None:
+    """Best-effort matching when explicit mapping doesn't exist."""
+    req_title = _norm(request_title)
+    req_subject = _norm(request_meta.get("subject", ""))
+    req_board = _norm(request_meta.get("board", ""))
+    req_exam = _norm(request_meta.get("exam", ""))
+    req_class = str(request_meta.get("class_level") or request_meta.get("class") or "")
+    req_chapter = _norm(request_meta.get("chapter", ""))
+
+    candidates = list_published_contents(limit=800)
+    best = None
+    best_score = -1
+
+    for c in candidates:
+        cid = c["id"]
+        title = _norm(c.get("title", ""))
+        try:
+            meta = json.loads(c.get("metadata_json") or "{}")
+        except Exception:
+            meta = {}
+        c_subject = _norm(meta.get("subject", ""))
+        c_board = _norm(meta.get("board", ""))
+        c_exam = _norm(meta.get("exam", ""))
+        c_class = str(meta.get("class_level") or meta.get("class") or "")
+        c_chapter = _norm(meta.get("chapter", ""))
+
+        score = 0
+        # strong signals
+        if req_subject and c_subject and req_subject == c_subject:
+            score += 4
+        if req_board and c_board and req_board == c_board:
+            score += 5
+        if req_exam and c_exam and req_exam == c_exam:
+            score += 5
+        if req_class and c_class and req_class == c_class:
+            score += 3
+
+        # title / chapter similarity
+        if req_chapter and c_chapter and req_chapter == c_chapter:
+            score += 4
+        if req_title and title and req_title == title:
+            score += 4
+
+        # partial overlap bonus
+        if req_title and title:
+            overlap = len(set(req_title.split()) & set(title.split()))
+            score += min(3, overlap)
+
+        if req_chapter and c_chapter:
+            overlap2 = len(set(req_chapter.split()) & set(c_chapter.split()))
+            score += min(3, overlap2)
+
+        # small penalty if board/exam mismatched explicitly
+        if req_board and c_board and req_board != c_board:
+            score -= 2
+        if req_exam and c_exam and req_exam != c_exam:
+            score -= 2
+
+        if score > best_score:
+            best_score = score
+            best = cid
+
+    # require minimum confidence
+    if best_score >= 6:
+        return best
+    return None

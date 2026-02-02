@@ -416,12 +416,12 @@ async def luma_health():
 
 # -------------------- User Catalog (Library) --------------------
 @router.get("/catalog")
-def catalog_list(limit: int = 50, offset: int = 0, user_id: int = Depends(require_user)):
+def catalog_list(limit: int = 50, offset: int = 0, user: dict = Depends(require_user)):
     """List current user's saved library items."""
     return {"ok": True, "items": list_catalog(user_id=user["id"], limit=limit, offset=offset)}
 
 @router.post("/catalog")
-def catalog_create(payload: dict, user_id: int = Depends(require_user)):
+def catalog_create(payload: dict, user: dict = Depends(require_user)):
     """Create a library item for current user."""
     item = {
         "user_id": user["id"],
@@ -436,7 +436,7 @@ def catalog_create(payload: dict, user_id: int = Depends(require_user)):
     return {"ok": True}
 
 @router.delete("/catalog/{item_id}")
-def catalog_delete(item_id: int, user_id: int = Depends(require_user)):
+def catalog_delete(item_id: int, user: dict = Depends(require_user)):
     delete_catalog_item(user_id=user["id"], item_id=item_id)
     return {"ok": True}
 
