@@ -21,7 +21,8 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 
-from luma_store import (, resolve_content_id
+from luma_store import (
+    resolve_content_id,
     list_catalog,
     create_catalog_item,
     delete_catalog_item,
