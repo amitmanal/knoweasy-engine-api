@@ -20,6 +20,7 @@ from billing_router import router as billing_router
 from admin_router import router as admin_router
 from learning_router import router as learning_router
 from luma_router import router as luma_router
+from study_router import router as study_router
 import phase1_store
 from redis_store import redis_health
 from db import db_health, db_init
@@ -129,6 +130,7 @@ app.include_router(billing_router)
 app.include_router(admin_router)
 app.include_router(learning_router)
 app.include_router(luma_router)
+app.include_router(study_router)
 
 # -----------------------------
 # Razorpay webhook (optional)

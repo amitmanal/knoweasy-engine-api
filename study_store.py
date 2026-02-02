@@ -1,0 +1,557 @@
+"""
+study_store.py - Curriculum + Chapter Asset Wiring Store (Postgres)
+
+Purpose:
+- Provide a deterministic, exam-safe resolver from (class, track, program, subject, chapter_id, asset_type)
+  -> either a content_id (for Luma JSON in DB) or a URL/path reference (for PDFs etc).
+- Seed syllabus chapters from packaged syllabus JS files (boards) and derived entrance programs (optional).
+
+Design:
+- CREATE TABLE IF NOT EXISTS + non-breaking migrations
+- Best-effort: never crash app if DB unavailable
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("knoweasy-engine-api")
+
+try:
+    from db import get_engine_safe
+except Exception:
+    def get_engine_safe():
+        return None
+
+try:
+    from sqlalchemy import text as _sql_text
+    def _t(q: str):
+        return _sql_text(q)
+except Exception:
+    def _t(q: str):
+        return q
+
+
+# -----------------------------
+# Constants / Enums
+# -----------------------------
+
+TRACK_BOARDS = "boards"
+TRACK_ENTRANCE = "entrance"
+
+# Programs (boards + entrance)
+BOARD_PROGRAMS = {"cbse", "icse", "maharashtra"}
+ENTRANCE_PROGRAMS = {"jee", "neet", "cet_pcm", "cet_pcb"}
+
+ASSET_TYPES = {
+    "luma",
+    "notes",
+    "mindmap",
+    "formula",
+    "pyq",
+    "practice_mcq",
+}
+
+REF_KINDS = {"db", "url", "file"}
+STATUS_VALUES = {"published", "coming_soon", "draft"}
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
+
+_slug_re = re.compile(r"[^a-z0-9]+")
+
+def _slugify(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = _slug_re.sub("_", s).strip("_")
+    return s
+
+
+def ensure_tables() -> None:
+    engine = get_engine_safe()
+    if not engine:
+        logger.warning("study_store: DB unavailable, tables not created")
+        return
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(_t("""
+                CREATE TABLE IF NOT EXISTS syllabus_chapters (
+                    id BIGSERIAL PRIMARY KEY,
+                    class_num INT NOT NULL,
+                    track TEXT NOT NULL,
+                    program TEXT NOT NULL,
+                    subject_slug TEXT NOT NULL,
+                    chapter_id TEXT NOT NULL,
+                    chapter_title TEXT NOT NULL,
+                    order_index INT NOT NULL DEFAULT 0,
+                    meta_json TEXT NOT NULL DEFAULT '{}',
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """))
+            conn.execute(_t("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_syllabus_chapter_key
+                ON syllabus_chapters (class_num, track, program, subject_slug, chapter_id);
+            """))
+
+            conn.execute(_t("""
+                CREATE TABLE IF NOT EXISTS chapter_assets (
+                    id BIGSERIAL PRIMARY KEY,
+                    class_num INT NOT NULL,
+                    track TEXT NOT NULL,
+                    program TEXT NOT NULL,
+                    subject_slug TEXT NOT NULL,
+                    chapter_id TEXT NOT NULL,
+                    asset_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'coming_soon',
+                    ref_kind TEXT NOT NULL DEFAULT 'url',
+                    ref_value TEXT NOT NULL DEFAULT '',
+                    meta_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """))
+            conn.execute(_t("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_chapter_asset_key
+                ON chapter_assets (class_num, track, program, subject_slug, chapter_id, asset_type);
+            """))
+
+            # Non-breaking migrations (add columns if missing)
+            conn.execute(_t("""ALTER TABLE syllabus_chapters ADD COLUMN IF NOT EXISTS meta_json TEXT NOT NULL DEFAULT '{}';"""))
+            conn.execute(_t("""ALTER TABLE chapter_assets ADD COLUMN IF NOT EXISTS meta_json TEXT NOT NULL DEFAULT '{}';"""))
+
+    except Exception as e:
+        logger.warning(f"study_store: ensure_tables failed: {e}")
+
+
+def _read_json_from_syllabus_js(fp: Path) -> Optional[Dict[str, Any]]:
+    """
+    Syllabus JS format:
+    window.KnowEasySyllabus["11_cbse"] = { ... };
+    Extract the { ... } as JSON and parse.
+    """
+    try:
+        txt = fp.read_text(encoding="utf-8", errors="ignore")
+        # Find first '{' after '='
+        eq = txt.find("=")
+        if eq < 0:
+            return None
+        brace = txt.find("{", eq)
+        if brace < 0:
+            return None
+        # Remove trailing ';'
+        data_str = txt[brace:].strip()
+        if data_str.endswith(";"):
+            data_str = data_str[:-1].strip()
+        # Some files may end with "};" already handled
+        return json.loads(data_str)
+    except Exception as e:
+        logger.warning(f"study_store: parse syllabus js failed for {fp.name}: {e}")
+        return None
+
+
+def _normalize_program(track: str, program: str) -> str:
+    p = (program or "").strip().lower()
+    if track == TRACK_BOARDS:
+        if p in ("msb", "mh"):
+            return "maharashtra"
+        return p
+    # entrance
+    if p in ("jee_adv", "jee_main"):
+        return "jee"
+    if p in ("cet", "cet_engg"):
+        return "cet_pcm"
+    if p in ("cet_med",):
+        return "cet_pcb"
+    return p
+
+
+def count_syllabus_rows() -> int:
+    engine = get_engine_safe()
+    if not engine:
+        return 0
+    try:
+        with engine.connect() as conn:
+            r = conn.execute(_t("SELECT COUNT(1) FROM syllabus_chapters;")).scalar()
+            return int(r or 0)
+    except Exception:
+        return 0
+
+
+def seed_syllabus_from_packaged_files(seed_dir: Path) -> Dict[str, Any]:
+    """
+    Seed boards syllabus from packaged JS files in seed_dir.
+    Also derives entrance syllabi for class 11/12 from board anchors:
+      - JEE/NEET from CBSE (default anchor)
+      - CET_PCM/CET_PCB from Maharashtra (default anchor)
+    This is a safe default and can be replaced by explicit entrance syllabi later.
+
+    Returns counts for logging.
+    """
+    ensure_tables()
+    engine = get_engine_safe()
+    if not engine:
+        return {"ok": False, "reason": "db_unavailable"}
+
+    files = sorted(seed_dir.glob("*.js"))
+    if not files:
+        return {"ok": False, "reason": "no_seed_files"}
+
+    inserted = 0
+    skipped = 0
+
+    def upsert_many(rows: List[Tuple[int, str, str, str, str, str, int, str]]):
+        nonlocal inserted, skipped
+        with engine.begin() as conn:
+            for row in rows:
+                try:
+                    conn.execute(_t("""
+                        INSERT INTO syllabus_chapters
+                            (class_num, track, program, subject_slug, chapter_id, chapter_title, order_index, meta_json)
+                        VALUES
+                            (:class_num, :track, :program, :subject_slug, :chapter_id, :chapter_title, :order_index, :meta_json)
+                        ON CONFLICT (class_num, track, program, subject_slug, chapter_id)
+                        DO UPDATE SET
+                            chapter_title = EXCLUDED.chapter_title,
+                            order_index = EXCLUDED.order_index,
+                            meta_json = EXCLUDED.meta_json,
+                            updated_at = NOW();
+                    """), {
+                        "class_num": row[0],
+                        "track": row[1],
+                        "program": row[2],
+                        "subject_slug": row[3],
+                        "chapter_id": row[4],
+                        "chapter_title": row[5],
+                        "order_index": row[6],
+                        "meta_json": row[7],
+                    })
+                    inserted += 1
+                except Exception:
+                    skipped += 1
+
+    # First seed boards from JS
+    boards_index: Dict[Tuple[int, str], Dict[str, List[Dict[str, Any]]]] = {}
+    # key: (class_num, program) -> subject_slug -> list chapters with id/title/order
+    for fp in files:
+        data = _read_json_from_syllabus_js(fp)
+        if not data:
+            continue
+        meta = data.get("meta") or {}
+        class_num = int(str(meta.get("class") or "0") or "0")
+        program = _normalize_program(TRACK_BOARDS, str(meta.get("board") or ""))
+        subjects = data.get("subjects") or []
+        if class_num < 5 or class_num > 12:
+            continue
+        if program not in BOARD_PROGRAMS:
+            continue
+
+        boards_index[(class_num, program)] = {}
+        rows: List[Tuple[int, str, str, str, str, str, int, str]] = []
+
+        for subj in subjects:
+            name = str(subj.get("name") or "").strip()
+            subject_slug = _slugify(name)
+            chapters = subj.get("chapters") or []
+            boards_index[(class_num, program)][subject_slug] = []
+            for i, ch in enumerate(chapters):
+                ch_id = str(ch.get("id") or "").strip()
+                ch_title = str(ch.get("title") or "").strip()
+                if not ch_id or not ch_title:
+                    continue
+                boards_index[(class_num, program)][subject_slug].append({
+                    "chapter_id": ch_id,
+                    "chapter_title": ch_title,
+                    "order_index": i,
+                })
+                rows.append((
+                    class_num,
+                    TRACK_BOARDS,
+                    program,
+                    subject_slug,
+                    ch_id,
+                    ch_title,
+                    i,
+                    json.dumps({"source": fp.name, "meta": meta}, ensure_ascii=False),
+                ))
+        upsert_many(rows)
+
+    # Derive entrance for 11/12
+    def derive_from_board(anchor_program: str, entrance_program: str, class_num: int):
+        src = boards_index.get((class_num, anchor_program))
+        if not src:
+            return
+        rows: List[Tuple[int, str, str, str, str, str, int, str]] = []
+        for subject_slug, chlist in src.items():
+            # Entrance program subject filtering:
+            # - JEE: physics/chemistry/mathematics
+            # - NEET: physics/chemistry/biology
+            # - CET_PCM: physics/chemistry/mathematics
+            # - CET_PCB: physics/chemistry/biology
+            allowed = None
+            if entrance_program in ("jee", "cet_pcm"):
+                allowed = {"physics", "chemistry", "mathematics", "math"}
+            elif entrance_program in ("neet", "cet_pcb"):
+                allowed = {"physics", "chemistry", "biology"}
+            if allowed and subject_slug not in allowed:
+                continue
+
+            for item in chlist:
+                rows.append((
+                    class_num,
+                    TRACK_ENTRANCE,
+                    entrance_program,
+                    subject_slug,
+                    item["chapter_id"],
+                    item["chapter_title"],
+                    int(item["order_index"]),
+                    json.dumps({"derived_from": anchor_program}, ensure_ascii=False),
+                ))
+        upsert_many(rows)
+
+    for cls in (11, 12):
+        derive_from_board("cbse", "jee", cls)
+        derive_from_board("cbse", "neet", cls)
+        derive_from_board("maharashtra", "cet_pcm", cls)
+        derive_from_board("maharashtra", "cet_pcb", cls)
+
+    return {"ok": True, "inserted": inserted, "skipped": skipped, "seed_files": len(files)}
+
+
+def resolve_asset(
+    *,
+    class_num: int,
+    track: str,
+    program: str,
+    subject_slug: str,
+    chapter_id: str,
+    asset_type: str,
+) -> Dict[str, Any]:
+    """
+    Deterministic resolver:
+    1) Try exact match in chapter_assets.
+    2) If not found AND track=entrance, fallback to derived board anchor (CBSE for JEE/NEET; Maharashtra for CET_*).
+    3) If still not found: coming_soon.
+    """
+    ensure_tables()
+    engine = get_engine_safe()
+    if not engine:
+        return {"ok": False, "status": "db_unavailable"}
+
+    track = (track or "").strip().lower()
+    program = _normalize_program(track, program)
+    subject_slug = _slugify(subject_slug)
+    chapter_id = (chapter_id or "").strip()
+    asset_type = (asset_type or "").strip().lower()
+
+    if asset_type not in ASSET_TYPES:
+        return {"ok": False, "status": "bad_asset_type"}
+
+    # Ensure chapter exists (syllabus)
+    try:
+        with engine.connect() as conn:
+            exists = conn.execute(_t("""
+                SELECT 1 FROM syllabus_chapters
+                WHERE class_num=:class_num AND track=:track AND program=:program
+                  AND subject_slug=:subject_slug AND chapter_id=:chapter_id AND is_active=TRUE
+                LIMIT 1;
+            """), {
+                "class_num": class_num,
+                "track": track,
+                "program": program,
+                "subject_slug": subject_slug,
+                "chapter_id": chapter_id,
+            }).fetchone()
+        if not exists:
+            return {"ok": False, "status": "chapter_not_found"}
+    except Exception as e:
+        logger.warning(f"study_store: chapter exists check failed: {e}")
+        # Still proceed; but safer to say not found.
+        return {"ok": False, "status": "chapter_not_found"}
+
+    def fetch_asset(tk: str, pr: str) -> Optional[Dict[str, Any]]:
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(_t("""
+                    SELECT status, ref_kind, ref_value, meta_json
+                    FROM chapter_assets
+                    WHERE class_num=:class_num AND track=:track AND program=:program
+                      AND subject_slug=:subject_slug AND chapter_id=:chapter_id AND asset_type=:asset_type
+                    LIMIT 1;
+                """), {
+                    "class_num": class_num,
+                    "track": tk,
+                    "program": pr,
+                    "subject_slug": subject_slug,
+                    "chapter_id": chapter_id,
+                    "asset_type": asset_type,
+                }).fetchone()
+            if not row:
+                return None
+            return {
+                "status": row[0],
+                "ref_kind": row[1],
+                "ref_value": row[2],
+                "meta": json.loads(row[3] or "{}") if isinstance(row[3], str) else {},
+            }
+        except Exception:
+            return None
+
+    exact = fetch_asset(track, program)
+    if exact and exact.get("status") == "published" and str(exact.get("ref_value") or "").strip():
+        return {"ok": True, **exact, "track": track, "program": program}
+
+    # Entrance fallback to board anchor (safe default)
+    if track == TRACK_ENTRANCE:
+        anchor = None
+        if program in ("jee", "neet"):
+            anchor = ("boards", "cbse")
+        elif program in ("cet_pcm", "cet_pcb"):
+            anchor = ("boards", "maharashtra")
+        if anchor:
+            fallback = fetch_asset(anchor[0], anchor[1])
+            if fallback and fallback.get("status") == "published" and str(fallback.get("ref_value") or "").strip():
+                return {"ok": True, **fallback, "track": anchor[0], "program": anchor[1], "inherited": True}
+
+    return {"ok": False, "status": "coming_soon"}
+
+
+def upsert_luma_asset_mapping(
+    *,
+    class_num: int,
+    track: str,
+    program: str,
+    subject_slug: str,
+    chapter_id: str,
+    content_id: str,
+) -> bool:
+    ensure_tables()
+    engine = get_engine_safe()
+    if not engine:
+        return False
+    try:
+        with engine.begin() as conn:
+            conn.execute(_t("""
+                INSERT INTO chapter_assets
+                    (class_num, track, program, subject_slug, chapter_id, asset_type, status, ref_kind, ref_value, meta_json)
+                VALUES
+                    (:class_num, :track, :program, :subject_slug, :chapter_id, 'luma', 'published', 'db', :ref_value, '{}')
+                ON CONFLICT (class_num, track, program, subject_slug, chapter_id, asset_type)
+                DO UPDATE SET
+                    status='published', ref_kind='db', ref_value=EXCLUDED.ref_value, updated_at=NOW();
+            """), {
+                "class_num": class_num,
+                "track": track,
+                "program": program,
+                "subject_slug": _slugify(subject_slug),
+                "chapter_id": chapter_id,
+                "ref_value": content_id,
+            })
+        return True
+    except Exception as e:
+        logger.warning(f"study_store: upsert_luma_asset_mapping failed: {e}")
+        return False
+
+
+def seed_luma_mappings_from_luma_content() -> Dict[str, Any]:
+    """
+    Best-effort mapping from existing luma_content rows into chapter_assets for 'luma' asset type.
+    Uses metadata fields (class_level, board, subject, chapter) and matches chapter title to syllabus_chapters.
+    """
+    ensure_tables()
+    engine = get_engine_safe()
+    if not engine:
+        return {"ok": False, "reason": "db_unavailable"}
+
+    # Load syllabus title->chapter_id lookup per (class, boards program, subject_slug)
+    title_lookup: Dict[Tuple[int, str, str], Dict[str, str]] = {}
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(_t("""
+                SELECT class_num, track, program, subject_slug, chapter_id, chapter_title
+                FROM syllabus_chapters
+                WHERE track='boards';
+            """)).fetchall()
+        for r in rows:
+            cls, _, prog, subj, cid, ctitle = int(r[0]), r[1], r[2], r[3], r[4], r[5]
+            key = (cls, prog, subj)
+            title_lookup.setdefault(key, {})[_slugify(str(ctitle))] = cid
+    except Exception as e:
+        logger.warning(f"study_store: building title lookup failed: {e}")
+
+    inserted = 0
+    skipped = 0
+
+    def infer_track_program(board_str: str) -> Tuple[str, str]:
+        b = (board_str or "").strip().lower()
+        if b in ("cbse", "icse", "maharashtra", "msb", "mh"):
+            return (TRACK_BOARDS, _normalize_program(TRACK_BOARDS, b))
+        if b in ("neet", "jee", "jee_adv", "jee_main", "cet", "cet_engg", "cet_med"):
+            return (TRACK_ENTRANCE, _normalize_program(TRACK_ENTRANCE, b))
+        # Default: treat as boards if unknown
+        return (TRACK_BOARDS, _slugify(b) or "cbse")
+
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(_t("""
+                SELECT id, metadata_json, published
+                FROM luma_content
+                ORDER BY created_at DESC
+                LIMIT 500;
+            """)).fetchall()
+    except Exception as e:
+        return {"ok": False, "reason": f"read_luma_content_failed:{e}"}
+
+    for r in rows:
+        content_id = str(r[0])
+        try:
+            md = json.loads(r[1] or "{}")
+        except Exception:
+            md = {}
+        if not bool(r[2]):
+            continue
+        cls = int(md.get("class_level") or 0) or 0
+        board = str(md.get("board") or "").strip()
+        subject = _slugify(str(md.get("subject") or ""))
+        chapter_title = str(md.get("chapter") or md.get("topic") or "").strip()
+        if not cls or not subject or not chapter_title:
+            skipped += 1
+            continue
+
+        track, program = infer_track_program(board)
+
+        # Determine chapter_id:
+        # Prefer explicit metadata.chapter_id if present
+        ch_id = str(md.get("chapter_id") or "").strip()
+        if not ch_id:
+            # Lookup by title in boards syllabus for same class/program/subject
+            key = (cls, program if track == TRACK_BOARDS else ("cbse" if program in ("jee", "neet") else "maharashtra"), subject)
+            lookup = title_lookup.get(key, {})
+            ch_id = lookup.get(_slugify(chapter_title)) or ""
+        if not ch_id:
+            skipped += 1
+            continue
+
+        ok = upsert_luma_asset_mapping(
+            class_num=cls,
+            track=track,
+            program=program,
+            subject_slug=subject,
+            chapter_id=ch_id,
+            content_id=content_id,
+        )
+        if ok:
+            inserted += 1
+        else:
+            skipped += 1
+
+    return {"ok": True, "inserted": inserted, "skipped": skipped}
