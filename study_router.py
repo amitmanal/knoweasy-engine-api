@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -70,39 +71,111 @@ def list_chapters(
         return {"ok": False, "status": "error", "chapters": []}
 
 
+@router.post("/asset/set")
+def asset_set(
+    seed_token: str = Query(...),
+    payload: dict = Body(...),
+):
+    """Upsert an asset mapping for a chapter.
+
+    This is an admin/seed endpoint protected by STUDY_SEED_TOKEN.
+    Frontend can use it to publish a Luma content_id for a chapter.
+    """
+    expected = os.getenv("STUDY_SEED_TOKEN")
+    if not expected or seed_token != expected:
+        raise HTTPException(status_code=403, detail="Invalid seed token")
+
+    track = (payload.get("track") or "").strip().lower()
+    program = (payload.get("program") or "").strip().lower()
+    class_num = int(payload.get("class_num") or payload.get("class") or 0)
+    subject_slug = (payload.get("subject_slug") or payload.get("subject") or "").strip().lower()
+    chapter_id = (payload.get("chapter_id") or "").strip().lower()
+    chapter_title = (payload.get("chapter_title") or payload.get("title") or "").strip()
+
+    asset_type = (payload.get("asset_type") or "luma").strip().lower()
+    status = (payload.get("status") or "published").strip().lower()
+    ref_kind = (payload.get("ref_kind") or "db").strip().lower()
+    ref_value = (payload.get("ref_value") or "").strip()
+    meta_json = payload.get("meta_json") or payload.get("meta") or {}
+
+    if not chapter_id and chapter_title:
+        # use same slug style the frontend uses
+        chapter_id = re.sub(r"\s+", " ", chapter_title).strip().lower()
+        chapter_id = re.sub(r"[^a-z0-9]+", "-", chapter_id).strip("-")
+
+    if not (track and program and class_num and subject_slug and chapter_id and ref_value):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    if asset_type != "luma":
+        raise HTTPException(status_code=400, detail="Only asset_type=luma is supported")
+
+    out = study_store.upsert_luma_asset_mapping(
+        track=track,
+        program=program,
+        class_num=class_num,
+        subject_slug=subject_slug,
+        chapter_id=chapter_id,
+        status=status,
+        ref_kind=ref_kind,
+        ref_value=ref_value,
+        meta_json=meta_json,
+    )
+    return {"ok": True, "status": "upserted", "result": out, "chapter_id": chapter_id}
+
+
 @router.get("/resolve")
 def resolve(
     class_num: int = Query(..., ge=5, le=12),
     track: str = Query(...),
     program: str = Query(...),
     subject_slug: str = Query(...),
-    chapter_id: str = Query(...),
+    chapter_id: str = Query(""),
+    chapter_title: Optional[str] = Query(None),
     asset_type: str = Query("luma"),
 ):
+    """Resolve the content behind a chapter.
+
+    - For boards track, syllabus_chapters usually exists.
+    - For entrance track, syllabus may be absent; we still resolve via chapter_assets.
     """
-    Resolve a tab click (asset_type) into either:
-    - Luma content_id (ref_kind=db)
-    - URL/file ref (ref_kind=url|file)
-    - coming_soon
-    """
-    res = study_store.resolve_asset(
-        class_num=class_num,
+    result = study_store.resolve_asset(
         track=track,
         program=program,
+        class_num=class_num,
         subject_slug=subject_slug,
         chapter_id=chapter_id,
+        chapter_title=chapter_title,
         asset_type=asset_type,
     )
 
-    if res.get("ok"):
-        # For Luma, standardize key name
-        if res.get("ref_kind") == "db":
-            return {"ok": True, "status": "published", "kind": "luma", "content_id": res.get("ref_value"), "inherited": bool(res.get("inherited"))}
-        return {"ok": True, "status": "published", "kind": res.get("asset_type", asset_type), "ref_kind": res.get("ref_kind"), "ref_value": res.get("ref_value"), "inherited": bool(res.get("inherited"))}
+    # pass through errors
+    if not result.get("ok"):
+        return result
 
-    status = res.get("status") or "coming_soon"
-    return {"ok": False, "status": status}
+    asset = result.get("asset") or {}
+    if asset_type == "luma" and asset.get("ref_kind") == "db":
+        cid = asset.get("ref_value")
+        content = result.get("luma_content")
+        # Return a stable, frontend-friendly shape
+        return {
+            "ok": True,
+            "status": "resolved",
+            "kind": "db",
+            "content_id": cid,
+            "chapter_title": result.get("chapter_title"),
+            "asset": asset,
+            "content": content,
+        }
 
+    # Non-db or other assets
+    return {
+        "ok": True,
+        "status": "resolved",
+        "kind": asset.get("ref_kind"),
+        "ref_value": asset.get("ref_value"),
+        "chapter_title": result.get("chapter_title"),
+        "asset": asset,
+    }
 
 @router.post("/seed")
 def seed(seed_token: Optional[str] = Query(None, description="Set STUDY_SEED_TOKEN in env; pass it here to run once")):
