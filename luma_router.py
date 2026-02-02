@@ -21,7 +21,7 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 
-from luma_store import (
+from luma_store import (, resolve_content_id
     list_catalog,
     create_catalog_item,
     delete_catalog_item,
@@ -439,4 +439,17 @@ def catalog_create(payload: dict, user: dict = Depends(require_user)):
 def catalog_delete(item_id: int, user: dict = Depends(require_user)):
     delete_catalog_item(user_id=user["id"], item_id=item_id)
     return {"ok": True}
+
+
+@router.get("/resolve")
+async def resolve_content_endpoint(
+    board: str | None = None,
+    class_level: int | None = None,
+    subject: str | None = None,
+    chapter: str | None = None,
+):
+    """Resolve a luma content_id for the given study context."""
+    content_id = resolve_content_id(board=board, class_level=class_level, subject=subject, chapter=chapter)
+    return {"ok": True, "content_id": content_id}
+
 

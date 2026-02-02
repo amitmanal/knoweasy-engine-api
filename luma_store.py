@@ -398,12 +398,11 @@ def list_content(
             # Board filtering is handled after collecting candidates,
             # so we can support fallback behavior when board-specific content isn't available.
 
-            # Canonical title: prefer blueprint.title, fallback to metadata topic/chapter, then id
-            title = ""
-            if isinstance(bp, dict):
+            # Canonical title: prefer syllabus chapter/topic (stable for matching from Study UI),
+            # then blueprint title, then id.
+            title = str(md.get("chapter") or md.get("topic") or "").strip()
+            if not title and isinstance(bp, dict):
                 title = str(bp.get("title") or "").strip()
-            if not title:
-                title = str(md.get("topic") or md.get("chapter") or "").strip()
             if not title:
                 title = str(r[0])
 
@@ -442,6 +441,37 @@ def list_content(
     except Exception as e:
         logger.exception(f"luma_store: list_content failed: {e}")
         return []
+
+
+
+def resolve_content_id(board: str | None, class_level: int | None, subject: str | None, chapter: str | None) -> str | None:
+    """Resolve the best content_id for a given (board/class/subject/chapter) tuple.
+    Matching priority: exact chapter match > topic match > title contains.
+    """
+    chapter_n = normalize_text(chapter or "")
+    if not chapter_n:
+        return None
+    items = list_content(board=board, class_level=class_level, subject=subject)
+    best_id = None
+    best_score = -1
+    for it in items:
+        md = it.get("metadata") or {}
+        title_n = normalize_text(it.get("title") or "")
+        chap_n = normalize_text(md.get("chapter") or "")
+        topic_n = normalize_text(md.get("topic") or "")
+        score = 0
+        if chap_n and chap_n == chapter_n:
+            score = 100
+        elif chap_n and (chapter_n in chap_n or chap_n in chapter_n):
+            score = 85
+        elif topic_n and (chapter_n in topic_n or topic_n in chapter_n):
+            score = 70
+        elif title_n and (chapter_n in title_n or title_n in chapter_n):
+            score = 60
+        if score > best_score:
+            best_score = score
+            best_id = it.get("id")
+    return best_id
 
 
 def save_progress(
