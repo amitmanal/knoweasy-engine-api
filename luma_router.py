@@ -135,6 +135,7 @@ async def list_content_endpoint(
     class_level: Optional[int] = None,
     subject: Optional[str] = None,
     board: Optional[str] = None,
+    fallback: bool = False,
     limit: int = 50
 ):
     """List published content with optional filters (public)."""
@@ -145,6 +146,7 @@ async def list_content_endpoint(
             class_level=class_level,
             subject=subject,
             board=board,
+            fallback=fallback,
             limit=limit
         )
 

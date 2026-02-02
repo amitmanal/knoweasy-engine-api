@@ -336,6 +336,7 @@ def list_content(
     class_level: Optional[int] = None,
     subject: Optional[str] = None,
     board: Optional[str] = None,
+    fallback: bool = False,
     limit: int = 50,
     *,
     include_unpublished: bool = False
@@ -370,6 +371,7 @@ def list_content(
             ).fetchall()
 
         out: List[Dict[str, Any]] = []
+        has_board_match = False
         for r in rows:
             md_raw = _from_json(r[1], {})
             bp_raw = _from_json(r[2], {})
@@ -392,10 +394,8 @@ def list_content(
                 if subject.lower() not in sv.lower():
                     continue
 
-            if board:
-                bv = str(md.get("board", ""))
-                if board.lower() not in bv.lower():
-                    continue
+            # Board filtering is handled after collecting candidates,
+            # so we can support fallback behavior when board-specific content isn't available.
 
             # Canonical title: prefer blueprint.title, fallback to metadata topic/chapter, then id
             title = ""
@@ -406,8 +406,16 @@ def list_content(
             if not title:
                 title = str(r[0])
 
+            board_match = False
+            if board:
+                bv = str(md.get("board", ""))
+                board_match = board.lower() in bv.lower()
+                if board_match:
+                    has_board_match = True
+
             out.append({
                 "id": r[0],
+                "_board_match": board_match,
                 "title": title,
                 "metadata": md,
                 "blueprint": bp,
@@ -415,6 +423,18 @@ def list_content(
                 "created_at": r[3].isoformat() if r[3] else None,
                 "updated_at": r[4].isoformat() if r[4] else None,
             })
+
+        # Apply board filtering after collecting candidates
+        if board:
+            if fallback:
+                if has_board_match:
+                    out = [x for x in out if x.get("_board_match")]
+            else:
+                out = [x for x in out if x.get("_board_match")]
+
+        # Remove internal flags before returning
+        for x in out:
+            x.pop("_board_match", None)
 
         return out
 
@@ -649,7 +669,19 @@ def list_catalog(
                         "created_at": str(r.get("created_at")) if r.get("created_at") is not None else None,
                     }
                 )
-            return out
+            # Apply board filtering after collecting candidates
+        if board:
+            if fallback:
+                if has_board_match:
+                    out = [x for x in out if x.get("_board_match")]
+            else:
+                out = [x for x in out if x.get("_board_match")]
+
+        # Remove internal flags before returning
+        for x in out:
+            x.pop("_board_match", None)
+
+        return out
     except Exception:
         logger.exception("luma_store: list_catalog failed")
         return []
