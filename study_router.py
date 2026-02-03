@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Request
 
 import study_store
 
@@ -72,18 +72,54 @@ def list_chapters(
 
 
 @router.post("/asset/set")
-def asset_set(
+async def asset_set(
     seed_token: str = Query(...),
-    payload: dict = Body(...),
+    request: Request = None,
 ):
     """Upsert an asset mapping for a chapter.
 
-    This is an admin/seed endpoint protected by STUDY_SEED_TOKEN.
-    Frontend can use it to publish a Luma content_id for a chapter.
+    Patch goals:
+    - Accept JSON *and* x-www-form-urlencoded (PowerShell default) payloads
+    - Normalize chapter_id variants (_ and -) so resolve is reliable
+    - Return inserted/updated row id(s) for debugging
     """
     expected = os.getenv("STUDY_SEED_TOKEN")
     if not expected or seed_token != expected:
         raise HTTPException(status_code=403, detail="Invalid seed token")
+
+    # Parse payload robustly
+    payload: dict = {}
+    try:
+        if request is None:
+            payload = {}
+        else:
+            ctype = (request.headers.get("content-type") or "").lower()
+            if "application/json" in ctype:
+                payload = await request.json()
+            elif "application/x-www-form-urlencoded" in ctype or "multipart/form-data" in ctype:
+                form = await request.form()
+                payload = dict(form)
+            else:
+                # Try JSON first, then form
+                try:
+                    payload = await request.json()
+                except Exception:
+                    try:
+                        form = await request.form()
+                        payload = dict(form)
+                    except Exception:
+                        payload = {}
+    except Exception:
+        payload = {}
+
+    if not payload:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Body missing or unreadable. Send JSON (recommended) or form-encoded. "
+                "Example JSON: {track, program, class_num, subject_slug, chapter_id, asset_type, status, ref_kind, ref_value}"
+            ),
+        )
 
     track = (payload.get("track") or "").strip().lower()
     program = (payload.get("program") or "").strip().lower()
@@ -95,13 +131,12 @@ def asset_set(
     asset_type = (payload.get("asset_type") or "luma").strip().lower()
     status = (payload.get("status") or "published").strip().lower()
     ref_kind = (payload.get("ref_kind") or "db").strip().lower()
-    ref_value = (payload.get("ref_value") or "").strip()
+    ref_value = (payload.get("ref_value") or payload.get("content_id") or "").strip()
     meta_json = payload.get("meta_json") or payload.get("meta") or {}
 
     if not chapter_id and chapter_title:
-        # use same slug style the frontend uses
-        chapter_id = re.sub(r"\s+", " ", chapter_title).strip().lower()
-        chapter_id = re.sub(r"[^a-z0-9]+", "-", chapter_id).strip("-")
+        # Canonical: use underscore slug for internal, and we will also store hyphen alias
+        chapter_id = study_store._slugify(chapter_title)  # type: ignore
 
     if not (track and program and class_num and subject_slug and chapter_id and ref_value):
         raise HTTPException(status_code=400, detail="Missing required fields")
@@ -109,18 +144,31 @@ def asset_set(
     if asset_type != "luma":
         raise HTTPException(status_code=400, detail="Only asset_type=luma is supported")
 
-    out = study_store.upsert_luma_asset_mapping(
-        track=track,
-        program=program,
-        class_num=class_num,
-        subject_slug=subject_slug,
-        chapter_id=chapter_id,
-        status=status,
-        ref_kind=ref_kind,
-        ref_value=ref_value,
-        meta_json=meta_json,
-    )
-    return {"ok": True, "status": "upserted", "result": out, "chapter_id": chapter_id}
+    # Normalize: store both underscore and hyphen variants so either resolves
+    chapter_id_u = chapter_id.replace("-", "_")
+    chapter_id_h = chapter_id.replace("_", "-")
+
+    results = []
+    for cid in [chapter_id_u, chapter_id_h]:
+        out = study_store.upsert_luma_asset_mapping(
+            track=track,
+            program=program,
+            class_num=class_num,
+            subject_slug=subject_slug,
+            chapter_id=cid,
+            status=status,
+            ref_kind=ref_kind,
+            ref_value=ref_value,
+            meta_json=meta_json,
+        )
+        results.append({"chapter_id": cid, "result": out})
+
+    return {
+        "ok": True,
+        "status": "upserted",
+        "normalized": {"underscore": chapter_id_u, "hyphen": chapter_id_h},
+        "results": results,
+    }
 
 
 @router.get("/resolve")
@@ -165,6 +213,7 @@ def resolve(
             "chapter_title": result.get("chapter_title"),
             "asset": asset,
             "content": content,
+            "debug": result.get("debug"),
         }
 
     # Non-db or other assets
@@ -175,6 +224,7 @@ def resolve(
         "ref_value": asset.get("ref_value"),
         "chapter_title": result.get("chapter_title"),
         "asset": asset,
+        "debug": result.get("debug"),
     }
 
 @router.post("/seed")

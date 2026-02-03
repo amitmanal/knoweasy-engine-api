@@ -386,6 +386,21 @@ def resolve_asset(
     subject_variants = _variants(subject_slug_in) or [subject_slug_in]
     chapter_variants = _variants(chapter_id_in)
 
+    debug_info: Dict[str, Any] = {
+        "input": {
+            "track": track,
+            "program": program,
+            "class_num": int(class_num),
+            "subject_slug": subject_slug_in,
+            "chapter_id": chapter_id_in,
+            "asset_type": asset_type,
+        },
+        "searched": {
+            "subject_variants": subject_variants,
+            "chapter_variants": chapter_variants,
+        },
+    }
+
     # 1) best-effort chapter metadata
     chapter_row = None
     try:
@@ -446,8 +461,8 @@ def resolve_asset(
 
             if not row:
                 if not chapter_row:
-                    return {"ok": False, "status": "chapter_not_found", "debug": {"chapter_id": chapter_id_in}}
-                return {"ok": False, "status": "asset_not_found"}
+                    return {"ok": False, "status": "chapter_not_found", "debug": debug_info}
+                return {"ok": False, "status": "asset_not_found", "debug": debug_info}
 
             if chapter_row and chapter_row.get("chapter_title"):
                 chapter_title_final = chapter_row["chapter_title"]
@@ -466,6 +481,7 @@ def resolve_asset(
                 "chapter_id": chapter_id_in,
                 "chapter_title": chapter_title_final,
                 "asset": dict(row),
+                "debug": debug_info,
             }
 
             if asset_type == "luma" and row.get("ref_kind") == "db":
@@ -486,6 +502,7 @@ def resolve_asset(
     except Exception as e:
         logger.warning(f"study_store: resolve_asset failed: {e}")
         return {"ok": False, "status": "error"}
+
 def upsert_luma_asset_mapping(
     *,
     class_num: int,
@@ -493,34 +510,79 @@ def upsert_luma_asset_mapping(
     program: str,
     subject_slug: str,
     chapter_id: str,
-    content_id: str,
-) -> bool:
+    # Back-compat: older callers used content_id
+    content_id: Optional[str] = None,
+    # New canonical args (used by /api/study/asset/set)
+    status: str = "published",
+    ref_kind: str = "db",
+    ref_value: Optional[str] = None,
+    meta_json: Any = None,
+) -> Dict[str, Any]:
+    """Upsert a chapter -> asset mapping row for Luma.
+
+    Patch goals:
+    - Accept `status` (fixes crash: unexpected keyword argument 'status')
+    - Accept `ref_value` / `content_id` (either works)
+    - Return a helpful result payload for API debugging
+    """
     ensure_tables()
     engine = get_engine_safe()
     if not engine:
-        return False
+        return {"ok": False, "status": "db_unavailable"}
+
+    track = (track or "").strip().lower()
+    program = (program or "").strip().lower()
+    subject_slug_n = _slugify(subject_slug)
+    chapter_id_n = (chapter_id or "").strip().lower()
+    status_n = (status or "published").strip().lower()
+    if status_n not in STATUS_VALUES:
+        status_n = "published"
+    ref_kind_n = (ref_kind or "db").strip().lower()
+    if ref_kind_n not in REF_KINDS:
+        ref_kind_n = "db"
+
+    # canonical ref_value
+    rv = (ref_value or content_id or "").strip()
+    if not rv:
+        return {"ok": False, "status": "missing_ref_value"}
+
+    # meta_json as string
+    try:
+        meta_s = json.dumps(meta_json or {}, ensure_ascii=False)
+    except Exception:
+        meta_s = "{}"
+
     try:
         with engine.begin() as conn:
-            conn.execute(_t("""
+            row = conn.execute(_t("""
                 INSERT INTO chapter_assets
                     (class_num, track, program, subject_slug, chapter_id, asset_type, status, ref_kind, ref_value, meta_json)
                 VALUES
-                    (:class_num, :track, :program, :subject_slug, :chapter_id, 'luma', 'published', 'db', :ref_value, '{}')
+                    (:class_num, :track, :program, :subject_slug, :chapter_id, 'luma', :status, :ref_kind, :ref_value, :meta_json)
                 ON CONFLICT (class_num, track, program, subject_slug, chapter_id, asset_type)
                 DO UPDATE SET
-                    status='published', ref_kind='db', ref_value=EXCLUDED.ref_value, updated_at=NOW();
+                    status=EXCLUDED.status,
+                    ref_kind=EXCLUDED.ref_kind,
+                    ref_value=EXCLUDED.ref_value,
+                    meta_json=EXCLUDED.meta_json,
+                    updated_at=NOW()
+                RETURNING id;
             """), {
-                "class_num": class_num,
+                "class_num": int(class_num),
                 "track": track,
                 "program": program,
-                "subject_slug": _slugify(subject_slug),
-                "chapter_id": chapter_id,
-                "ref_value": content_id,
-            })
-        return True
+                "subject_slug": subject_slug_n,
+                "chapter_id": chapter_id_n,
+                "status": status_n,
+                "ref_kind": ref_kind_n,
+                "ref_value": rv,
+                "meta_json": meta_s,
+            }).fetchone()
+
+        return {"ok": True, "status": "upserted", "id": int(row[0]) if row else None}
     except Exception as e:
         logger.warning(f"study_store: upsert_luma_asset_mapping failed: {e}")
-        return False
+        return {"ok": False, "status": "error", "error": f"{e.__class__.__name__}: {str(e)}"}
 
 
 def seed_luma_mappings_from_luma_content() -> Dict[str, Any]:
