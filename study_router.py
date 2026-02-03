@@ -10,6 +10,12 @@ from fastapi import APIRouter, HTTPException, Query, Body, Request
 
 import study_store
 
+# Optional adapter to canonical Luma content system
+try:
+    from luma_store import get_content as luma_get_content
+except Exception:
+    luma_get_content = None
+
 logger = logging.getLogger("knoweasy-engine-api")
 
 router = APIRouter(prefix="/api/study", tags=["study"])
@@ -174,13 +180,25 @@ async def asset_set(
 
 @router.get("/asset/get")
 async def asset_get(content_id: str = ""):
-    """
-    Fetch a single Luma blueprint by content_id (ref_value).
+    """Compatibility adapter.
 
-    Frontend deep-link: /luma.html?content_id=photosynthesis-neet-001
+    Historically the frontend used /api/study/asset/get?content_id=X.
+    The canonical Luma system now serves content at /api/luma/content/{id}.
+
+    This endpoint now proxies to the canonical source and returns the SAME shape as /api/luma/content/{id}:
+    { ok: true, content: {...} }
     """
     if not content_id:
         return {"ok": False, "status": "missing_content_id"}
+
+    # Prefer canonical Luma store
+    if callable(luma_get_content):
+        c = luma_get_content(content_id)
+        if not c:
+            return {"ok": False, "status": "not_found"}
+        return {"ok": True, "content": c}
+
+    # Fallback to legacy study_store helper
     return study_store.get_luma_content_by_id(content_id)
 
 @router.get("/resolve")

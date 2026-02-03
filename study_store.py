@@ -23,6 +23,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("knoweasy-engine-api")
 
+
+# Optional: read from new Luma content system (canonical)
+try:
+    from luma_store import get_content as luma_get_content, list_content as luma_list_content
+except Exception:
+    luma_get_content = None
+    luma_list_content = None
+
 try:
     from db import get_engine_safe
 except Exception:
@@ -458,11 +466,64 @@ def resolve_asset(
                 "chapters": chapter_variants,
                 "asset_type": asset_type,
             }).mappings().first()
-
             if not row:
-                if not chapter_row:
-                    return {"ok": False, "status": "chapter_not_found", "debug": debug_info}
-                return {"ok": False, "status": "asset_not_found", "debug": debug_info}
+                # Fallback (no explicit chapter_assets mapping):
+                # Try to locate a published Luma content item using its metadata (class/board/subject + chapter match).
+                # This prevents "Coming Soon" when content exists but mapping hasn't been seeded yet.
+                try:
+                    if callable(luma_list_content):
+                        # Canonicalize board/program
+                        prog = program
+                        b = (prog or "").strip().lower()
+                        if track == TRACK_BOARDS:
+                            canonical_board = "CBSE" if b == "cbse" else ("ICSE" if b == "icse" else ("Maharashtra" if b in ("mh","msb","maharashtra") else (prog or "").upper()))
+                        else:
+                            canonical_board = "NEET" if b == "neet" else ("JEE" if b.startswith("jee") else ("CET" if b.startswith("cet") else (prog or "").upper()))
+
+                        s = (subject_slug_in or "").strip().lower()
+                        canonical_subject = "Physics" if s == "physics" else ("Chemistry" if s == "chemistry" else ("Biology" if s in ("biology","bio") else ("Math" if s in ("math","mathematics") else subject_slug)))
+
+                        candidates = luma_list_content(
+                            class_level=int(class_num),
+                            board=str(canonical_board),
+                            subject=str(canonical_subject),
+                            limit=100,
+                        ) or []
+
+                        want_slug = _slugify(chapter_title_in or chapter_id_in).replace("_", "-")
+                        want_slug2 = _slugify(chapter_id_in).replace("_", "-")
+
+                        def _cand_slug(c: Dict[str, Any]) -> str:
+                            md = c.get("metadata") or {}
+                            bp = c.get("blueprint") or {}
+                            # prefer explicit chapter id/title in metadata
+                            base = (md.get("chapter_id") or md.get("chapter") or bp.get("chapter") or bp.get("title") or c.get("title") or c.get("id") or "")
+                            return _slugify(str(base)).replace("_", "-")
+
+                        hit = None
+                        for c in candidates:
+                            cs = _cand_slug(c)
+                            if cs == want_slug or cs == want_slug2:
+                                hit = c
+                                break
+
+                        if hit and hit.get("id"):
+                            # synthetic asset row
+                            row = {
+                                "asset_type": asset_type,
+                                "status": "published",
+                                "ref_kind": "db",
+                                "ref_value": hit.get("id"),
+                                "meta_json": "{}",
+                                "updated_at": None,
+                            }
+                except Exception:
+                    pass
+
+                if not row:
+                    if not chapter_row:
+                        return {"ok": False, "status": "chapter_not_found", "debug": debug_info}
+                    return {"ok": False, "status": "asset_not_found", "debug": debug_info}
 
             if chapter_row and chapter_row.get("chapter_title"):
                 chapter_title_final = chapter_row["chapter_title"]
@@ -486,15 +547,12 @@ def resolve_asset(
 
             if asset_type == "luma" and row.get("ref_kind") == "db":
                 content_id = row.get("ref_value")
+                # Attach canonical content (best-effort). Do NOT fail resolution if content is missing;
+                # frontend can still use content_id to attempt /api/luma/content/{id}.
                 try:
-                    content = conn.execute(_t("""
-                        SELECT content_id, title, blueprint_json, created_at, updated_at
-                        FROM luma_content
-                        WHERE content_id = :cid
-                        LIMIT 1;
-                    """), {"cid": content_id}).mappings().first()
-                    if content:
-                        payload["luma_content"] = dict(content)
+                    c = get_luma_content_by_id(str(content_id or ""))
+                    if c.get("ok"):
+                        payload["luma_content"] = c.get("content") or c.get("luma_content")
                 except Exception:
                     pass
 
@@ -505,18 +563,30 @@ def resolve_asset(
 
 
 def get_luma_content_by_id(content_id: str) -> Dict[str, Any]:
-    """Fetch a single luma_content row by content_id.
+    """Fetch canonical Luma content by ID.
 
-    Used by frontend deep-links like: luma.html?content_id=photosynthesis-neet-001
+    IMPORTANT:
+    - Legacy Study endpoints previously read from a different luma_content schema
+      (content_id/title columns).
+    - The new Luma system stores content in luma_content(id, metadata_json, blueprint_json, published).
+    - This adapter makes Study routes compatible without duplicating data.
     """
+    cid = (content_id or "").strip()
+    if not cid:
+        return {"ok": False, "status": "missing_content_id"}
+
+    # Prefer canonical Luma store (published-only).
+    if callable(luma_get_content):
+        content = luma_get_content(cid)
+        if content:
+            return {"ok": True, "status": "ok", "content": content}
+        return {"ok": False, "status": "not_found"}
+
+    # Fallback: old table shape (if present)
     ensure_tables()
     engine = get_engine_safe()
     if not engine:
         return {"ok": False, "status": "db_unavailable"}
-
-    cid = (content_id or "").strip()
-    if not cid:
-        return {"ok": False, "status": "missing_content_id"}
 
     try:
         with engine.begin() as conn:
