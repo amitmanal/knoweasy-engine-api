@@ -204,74 +204,81 @@ async def asset_get(content_id: str = ""):
 @router.get("/resolve")
 def resolve(
     class_num: int = Query(..., ge=5, le=12),
-
-    # Preferred (new): track + program + subject_slug + chapter_id/chapter_title
-    track: str | None = Query(None),
-    program: str | None = Query(None),
-    subject_slug: str | None = Query(None),
-    chapter_id: str | None = Query(None),
-    chapter_title: str | None = Query(None),
-
-    # Back-compat (older frontends)
-    board: str | None = Query(None),
-    subject: str | None = Query(None),
-    chapter_slug: str | None = Query(None, alias="chapter_slug"),
-    title: str | None = Query(None, alias="title"),
-
+    track: str = Query(...),
+    program: str = Query(...),
+    subject_slug: str = Query(...),
+    chapter_id: str = Query(""),
+    chapter_title: Optional[str] = Query(None),
     asset_type: str = Query("luma"),
 ):
-    # ---------- normalize + infer ----------
-    subj = (subject_slug or subject or "").strip()
-    if not subj:
-        raise HTTPException(status_code=422, detail="subject_slug is required")
-    subject_slug_in = subj.lower()
+    """Resolve the content behind a chapter.
 
-    chap_id = (chapter_id or chapter_slug or "").strip()
-    chap_title = (chapter_title or title or "").strip()
+    - For boards track, syllabus_chapters usually exists.
+    - For entrance track, syllabus may be absent; we still resolve via chapter_assets.
+    """
+    # Normalize inputs (production hardening):
+    # - frontend may send program variants (mh/msb/cet/jee_main)
+    # - subject may be mixed-case
+    # - chapter_id may be empty when only a title is present
+    track_n = (track or "").strip().lower()
+    program_n = (program or "").strip().lower()
+    try:
+        program_n = study_store._normalize_program(track_n, program_n)  # type: ignore
+    except Exception:
+        pass
+    try:
+        subject_n = study_store._slugify(subject_slug)  # type: ignore
+    except Exception:
+        subject_n = (subject_slug or "").strip().lower()
 
-    track_in = (track or "").strip().lower() or None
-    program_in = (program or "").strip().lower() or None
-    board_in = (board or "").strip().lower() or None
+    chap_id_n = (chapter_id or "").strip().lower()
+    chap_title_n = (chapter_title or "").strip() if chapter_title else None
+    if not chap_id_n and chap_title_n:
+        try:
+            chap_id_n = study_store._slugify(chap_title_n)  # type: ignore
+        except Exception:
+            chap_id_n = chap_title_n
 
-    if track_in is None:
-        if board_in:
-            track_in = "board"
-        elif program_in in {"neet", "jee", "cet"}:
-            track_in = "entrance"
-        else:
-            track_in = "board"
-
-    if track_in == "entrance":
-        if not program_in:
-            if board_in in {"neet", "jee", "cet"}:
-                program_in = board_in
-            else:
-                raise HTTPException(status_code=422, detail="program is required for entrance track")
-    else:
-        # board track: keep data in program field for storage/lookup
-        if not board_in:
-            if program_in and program_in not in {"neet", "jee", "cet"}:
-                board_in = program_in
-            else:
-                board_in = "cbse"
-        program_in = board_in
-
-    class_num_in = int(class_num)
-
-    res = resolve_asset(
-        track=track_in,
-        program=program_in,
-        class_num=class_num_in,
-        subject_slug=subject_slug_in,
-        chapter_id=chap_id or chap_title,  # allow title-only calls
-        chapter_title=chap_title or None,
+    result = study_store.resolve_asset(
+        track=track_n,
+        program=program_n,
+        class_num=class_num,
+        subject_slug=subject_n,
+        chapter_id=chap_id_n,
+        chapter_title=chap_title_n,
         asset_type=asset_type,
     )
 
-    if not res:
-        return {"ok": True, "status": "not_found", "kind": "none", "content_id": None, "chapter_title": chap_title or chap_id}
+    # pass through errors
+    if not result.get("ok"):
+        return result
 
-    return {"ok": True, "status": "resolved", **res}
+    asset = result.get("asset") or {}
+    if asset_type == "luma" and asset.get("ref_kind") == "db":
+        cid = asset.get("ref_value")
+        content = result.get("luma_content")
+        # Return a stable, frontend-friendly shape
+        return {
+            "ok": True,
+            "status": "resolved",
+            "kind": "db",
+            "content_id": cid,
+            "chapter_title": result.get("chapter_title"),
+            "asset": asset,
+            "content": content,
+            "debug": result.get("debug"),
+        }
+
+    # Non-db or other assets
+    return {
+        "ok": True,
+        "status": "resolved",
+        "kind": asset.get("ref_kind"),
+        "ref_value": asset.get("ref_value"),
+        "chapter_title": result.get("chapter_title"),
+        "asset": asset,
+        "debug": result.get("debug"),
+    }
 
 @router.post("/seed")
 def seed(seed_token: Optional[str] = Query(None, description="Set STUDY_SEED_TOKEN in env; pass it here to run once")):
