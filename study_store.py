@@ -503,6 +503,39 @@ def resolve_asset(
         logger.warning(f"study_store: resolve_asset failed: {e}")
         return {"ok": False, "status": "error"}
 
+
+def get_luma_content_by_id(content_id: str) -> Dict[str, Any]:
+    """Fetch a single luma_content row by content_id.
+
+    Used by frontend deep-links like: luma.html?content_id=photosynthesis-neet-001
+    """
+    ensure_tables()
+    engine = get_engine_safe()
+    if not engine:
+        return {"ok": False, "status": "db_unavailable"}
+
+    cid = (content_id or "").strip()
+    if not cid:
+        return {"ok": False, "status": "missing_content_id"}
+
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(_t("""
+                SELECT content_id, title, blueprint_json, created_at, updated_at
+                FROM luma_content
+                WHERE content_id = :cid
+                LIMIT 1;
+            """), {"cid": cid}).mappings().first()
+
+            if not row:
+                return {"ok": False, "status": "not_found"}
+
+            return {"ok": True, "status": "ok", "luma_content": dict(row)}
+    except Exception as e:
+        logger.warning(f"study_store: get_luma_content_by_id failed: {e}")
+        return {"ok": False, "status": "error"}
+
+
 def upsert_luma_asset_mapping(
     *,
     class_num: int,

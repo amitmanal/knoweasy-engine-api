@@ -171,6 +171,18 @@ async def asset_set(
     }
 
 
+
+@router.get("/asset/get")
+async def asset_get(content_id: str = ""):
+    """
+    Fetch a single Luma blueprint by content_id (ref_value).
+
+    Frontend deep-link: /luma.html?content_id=photosynthesis-neet-001
+    """
+    if not content_id:
+        return {"ok": False, "status": "missing_content_id"}
+    return study_store.get_luma_content_by_id(content_id)
+
 @router.get("/resolve")
 def resolve(
     class_num: int = Query(..., ge=5, le=12),
