@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Body, Request
-from pydantic import BaseModel
 
 import study_store
 
@@ -26,35 +25,6 @@ try:
     study_store.ensure_tables()
 except Exception as e:
     logger.warning(f"study_router: ensure_tables failed: {e}")
-
-class ResolveRequest(BaseModel):
-    track: str
-    program: str
-    class_num: int
-    subject_slug: str
-    chapter_id: str
-    chapter_title: Optional[str] = None
-    asset_type: str = "luma"
-    allow_fallback: bool = True
-
-def _resolve_core(req: ResolveRequest):
-    # Normalize inputs for safety
-    track = (req.track or "").strip()
-    program = (req.program or "").strip()
-    subject_slug = (req.subject_slug or "").strip()
-    chapter_id = (req.chapter_id or "").strip()
-    chapter_title = (req.chapter_title or "").strip() if req.chapter_title else ""
-    asset_type = (req.asset_type or "luma").strip() or "luma"
-    return study_store.resolve_asset(
-        track=track,
-        program=program,
-        class_num=int(req.class_num),
-        subject_slug=subject_slug,
-        chapter_id=chapter_id,
-        chapter_title=chapter_title,
-        asset_type=asset_type,
-        allow_fallback=bool(req.allow_fallback),
-    )
 
 
 @router.get("/chapters")
@@ -234,96 +204,74 @@ async def asset_get(content_id: str = ""):
 @router.get("/resolve")
 def resolve(
     class_num: int = Query(..., ge=5, le=12),
-    track: str = Query(...),
-    program: str = Query(...),
-    subject_slug: str = Query(...),
-    chapter_id: str = Query(""),
-    chapter_title: Optional[str] = Query(None),
+
+    # Preferred (new): track + program + subject_slug + chapter_id/chapter_title
+    track: str | None = Query(None),
+    program: str | None = Query(None),
+    subject_slug: str | None = Query(None),
+    chapter_id: str | None = Query(None),
+    chapter_title: str | None = Query(None),
+
+    # Back-compat (older frontends)
+    board: str | None = Query(None),
+    subject: str | None = Query(None),
+    chapter_slug: str | None = Query(None, alias="chapter_slug"),
+    title: str | None = Query(None, alias="title"),
+
     asset_type: str = Query("luma"),
 ):
-    """Resolve the content behind a chapter.
+    # ---------- normalize + infer ----------
+    subj = (subject_slug or subject or "").strip()
+    if not subj:
+        raise HTTPException(status_code=422, detail="subject_slug is required")
+    subject_slug_in = subj.lower()
 
-    - For boards track, syllabus_chapters usually exists.
-    - For entrance track, syllabus may be absent; we still resolve via chapter_assets.
-    """
-    result = study_store.resolve_asset(
-        track=track,
-        program=program,
-        class_num=class_num,
-        subject_slug=subject_slug,
-        chapter_id=chapter_id,
-        chapter_title=chapter_title,
+    chap_id = (chapter_id or chapter_slug or "").strip()
+    chap_title = (chapter_title or title or "").strip()
+
+    track_in = (track or "").strip().lower() or None
+    program_in = (program or "").strip().lower() or None
+    board_in = (board or "").strip().lower() or None
+
+    if track_in is None:
+        if board_in:
+            track_in = "board"
+        elif program_in in {"neet", "jee", "cet"}:
+            track_in = "entrance"
+        else:
+            track_in = "board"
+
+    if track_in == "entrance":
+        if not program_in:
+            if board_in in {"neet", "jee", "cet"}:
+                program_in = board_in
+            else:
+                raise HTTPException(status_code=422, detail="program is required for entrance track")
+    else:
+        # board track: keep data in program field for storage/lookup
+        if not board_in:
+            if program_in and program_in not in {"neet", "jee", "cet"}:
+                board_in = program_in
+            else:
+                board_in = "cbse"
+        program_in = board_in
+
+    class_num_in = int(class_num)
+
+    res = resolve_asset(
+        track=track_in,
+        program=program_in,
+        class_num=class_num_in,
+        subject_slug=subject_slug_in,
+        chapter_id=chap_id or chap_title,  # allow title-only calls
+        chapter_title=chap_title or None,
         asset_type=asset_type,
     )
 
-    # pass through errors
-    if not result.get("ok"):
-        return result
+    if not res:
+        return {"ok": True, "status": "not_found", "kind": "none", "content_id": None, "chapter_title": chap_title or chap_id}
 
-    asset = result.get("asset") or {}
-    if asset_type == "luma" and asset.get("ref_kind") == "db":
-        cid = asset.get("ref_value")
-        content = result.get("luma_content")
-        # Return a stable, frontend-friendly shape
-        return {
-            "ok": True,
-            "status": "resolved",
-            "kind": "db",
-            "content_id": cid,
-            "chapter_title": result.get("chapter_title"),
-            "asset": asset,
-            "content": content,
-            "debug": result.get("debug"),
-        }
-
-    # Non-db or other assets
-    return {
-        "ok": True,
-        "status": "resolved",
-        "kind": asset.get("ref_kind"),
-        "ref_value": asset.get("ref_value"),
-        "chapter_title": result.get("chapter_title"),
-        "asset": asset,
-        "debug": result.get("debug"),
-    }
-
-
-@router.post("/resolve")
-def resolve_asset_post(req: ResolveRequest = Body(...)):
-    """POST alias for /resolve so frontend can call with JSON body."""
-    try:
-        resolved = _resolve_core(req)
-        return {"ok": True, **resolved}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("resolve_asset_post failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Backward/forward compatibility aliases
-@router.get("/asset/resolve")
-def resolve_asset_get_alias(
-    track: str = Query(...),
-    program: str = Query(...),
-    class_num: int = Query(..., ge=5, le=12),
-    subject_slug: str = Query(...),
-    chapter_id: str = Query(...),
-    chapter_title: Optional[str] = Query(None),
-    asset_type: str = Query("luma"),
-    allow_fallback: bool = Query(True),
-):
-    req = ResolveRequest(
-        track=track, program=program, class_num=class_num, subject_slug=subject_slug,
-        chapter_id=chapter_id, chapter_title=chapter_title, asset_type=asset_type, allow_fallback=allow_fallback
-    )
-    resolved = _resolve_core(req)
-    return {"ok": True, **resolved}
-
-@router.post("/asset/resolve")
-def resolve_asset_post_alias(req: ResolveRequest = Body(...)):
-    resolved = _resolve_core(req)
-    return {"ok": True, **resolved}
-
+    return {"ok": True, "status": "resolved", **res}
 
 @router.post("/seed")
 def seed(seed_token: Optional[str] = Query(None, description="Set STUDY_SEED_TOKEN in env; pass it here to run once")):
