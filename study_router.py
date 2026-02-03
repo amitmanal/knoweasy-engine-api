@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Body, Request
+from pydantic import BaseModel
 
 import study_store
 
@@ -25,6 +26,35 @@ try:
     study_store.ensure_tables()
 except Exception as e:
     logger.warning(f"study_router: ensure_tables failed: {e}")
+
+class ResolveRequest(BaseModel):
+    track: str
+    program: str
+    class_num: int
+    subject_slug: str
+    chapter_id: str
+    chapter_title: Optional[str] = None
+    asset_type: str = "luma"
+    allow_fallback: bool = True
+
+def _resolve_core(req: ResolveRequest):
+    # Normalize inputs for safety
+    track = (req.track or "").strip()
+    program = (req.program or "").strip()
+    subject_slug = (req.subject_slug or "").strip()
+    chapter_id = (req.chapter_id or "").strip()
+    chapter_title = (req.chapter_title or "").strip() if req.chapter_title else ""
+    asset_type = (req.asset_type or "luma").strip() or "luma"
+    return study_store.resolve_asset(
+        track=track,
+        program=program,
+        class_num=int(req.class_num),
+        subject_slug=subject_slug,
+        chapter_id=chapter_id,
+        chapter_title=chapter_title,
+        asset_type=asset_type,
+        allow_fallback=bool(req.allow_fallback),
+    )
 
 
 @router.get("/chapters")
@@ -256,6 +286,44 @@ def resolve(
         "asset": asset,
         "debug": result.get("debug"),
     }
+
+
+@router.post("/resolve")
+def resolve_asset_post(req: ResolveRequest = Body(...)):
+    """POST alias for /resolve so frontend can call with JSON body."""
+    try:
+        resolved = _resolve_core(req)
+        return {"ok": True, **resolved}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("resolve_asset_post failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Backward/forward compatibility aliases
+@router.get("/asset/resolve")
+def resolve_asset_get_alias(
+    track: str = Query(...),
+    program: str = Query(...),
+    class_num: int = Query(..., ge=5, le=12),
+    subject_slug: str = Query(...),
+    chapter_id: str = Query(...),
+    chapter_title: Optional[str] = Query(None),
+    asset_type: str = Query("luma"),
+    allow_fallback: bool = Query(True),
+):
+    req = ResolveRequest(
+        track=track, program=program, class_num=class_num, subject_slug=subject_slug,
+        chapter_id=chapter_id, chapter_title=chapter_title, asset_type=asset_type, allow_fallback=allow_fallback
+    )
+    resolved = _resolve_core(req)
+    return {"ok": True, **resolved}
+
+@router.post("/asset/resolve")
+def resolve_asset_post_alias(req: ResolveRequest = Body(...)):
+    resolved = _resolve_core(req)
+    return {"ok": True, **resolved}
+
 
 @router.post("/seed")
 def seed(seed_token: Optional[str] = Query(None, description="Set STUDY_SEED_TOKEN in env; pass it here to run once")):
