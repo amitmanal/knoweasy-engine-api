@@ -1,824 +1,205 @@
-"""
-Luma Database Store
-
-Database operations for Luma content, progress, and analytics.
-
-Design Principles:
-- CREATE TABLE IF NOT EXISTS (non-breaking migrations)
-- Best-effort (never crash the app)
-- Safe defaults if DB unavailable
-- Atomic operations where needed
-"""
-
+"""LUMA STORE - PRODUCTION PATCH
+Canonical ID: {chapter-slug}-{board}-{class}-{subject}
+One chapter = One ID (deterministic)"""
 from __future__ import annotations
-
-import json
-import re
-import logging
+import json, re, logging
 from typing import Dict, Any, List, Optional
-
 logger = logging.getLogger("knoweasy-engine-api")
-
-# Safe imports - never crash if DB is unavailable
 try:
     from db import get_engine_safe
-except Exception:
-    def get_engine_safe():
-        return None
-
-# SQLAlchemy 2.x requires text() for raw SQL strings.
+except: 
+    def get_engine_safe(): return None
 try:
-    from sqlalchemy import text as _sql_text
+    from sqlalchemy import text as _t
+except: 
+    def _t(q): return q
 
-    def _t(q: str):
-        return _sql_text(q)
-except Exception:
-    def _t(q: str):
-        return q
+# CANONICAL ID FORMAT
+SUBJ_MAP = {"mathematics":"math","physics":"phy","chemistry":"chem","biology":"bio","science":"sci"}
+BRD_MAP = {"cbse":"cbse","icse":"icse","maharashtra":"maha","jee":"jee","jee mains":"jee","jee advanced":"jee-adv","neet":"neet"}
 
+def slugify(t):
+    t=t.lower().strip()
+    t=re.sub(r'[^\w\s-]','',t)
+    return re.sub(r'[-\s]+','-',t)
 
-# ============================================================================
-# HELPERS
-# ============================================================================
+def canonical_id(chapter,board,cls,subject):
+    """DETERMINISTIC ID: same inputs = same ID always"""
+    ch=slugify(chapter)
+    b=BRD_MAP.get(board.lower(),slugify(board))
+    s=SUBJ_MAP.get(subject.lower(),slugify(subject))
+    return f"{ch}-{b}-{cls}-{s}"
 
-def _to_json_str(value: Any, *, require_object: bool = True) -> str:
-    """Serialize JSON safely for TEXT columns.
+def norm(s):
+    if not s: return ""
+    s=s.lower().strip()
+    s=re.sub(r'[^\w\s]','',s)
+    return re.sub(r'\s+',' ',s)
 
-    Why:
-    - Your DB columns are TEXT, but downstream code (and list filters) assume valid JSON.
-    - Accepting arbitrary strings without validation can poison the table and later queries.
+def _json_str(v):
+    if v is None: return "{}"
+    if isinstance(v,(dict,list)):
+        try: return json.dumps(v,ensure_ascii=False)
+        except: return "{}"
+    if isinstance(v,str):
+        s=v.strip()
+        if not s: return "{}"
+        try: return json.dumps(json.loads(s),ensure_ascii=False)
+        except: return "{}"
+    return "{}"
 
-    Behavior:
-    - dict/list -> json.dumps
-    - str -> validate it's JSON (and optionally an object) then re-dump for canonical form
-    - None -> '{}'
+def _json_load(v,d):
+    if v is None: return d
+    if isinstance(v,(dict,list)): return v
+    if isinstance(v,(bytes,bytearray)):
+        try: v=v.decode("utf-8")
+        except: return d
+    if isinstance(v,str):
+        s=v.strip()
+        if not s: return d
+        try: return json.loads(s)
+        except: return d
+    return d
 
-    NOTE: We *never* raise out of this helper; store a safe default instead.
-    """
-    if value is None:
-        return "{}"
-
-    # If caller passed a Python object, dump it.
-    if isinstance(value, (dict, list)):
-        try:
-            return json.dumps(value, ensure_ascii=False)
-        except Exception:
-            return "{}"
-
-    # If caller passed a string, validate and normalize.
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return "{}"
-        try:
-            obj = json.loads(s)
-        except Exception:
-            return "{}"
-        if require_object and not isinstance(obj, dict):
-            # For metadata_json / blueprint_json we expect an object.
-            return "{}"
-        try:
-            return json.dumps(obj, ensure_ascii=False)
-        except Exception:
-            return "{}"
-
-    # Unknown types: safest fallback.
-    try:
-        return json.dumps(value, ensure_ascii=False)
-    except Exception:
-        return "{}"
-
-
-def _from_json(value: Any, default: Any) -> Any:
-    """
-    Safe JSON loader:
-    - If DB driver returns dict/list already -> return it
-    - If returns str -> json.loads
-    - If None/empty -> default
-    """
-    if value is None:
-        return default
-    if isinstance(value, (dict, list)):
-        return value
-    if isinstance(value, (bytes, bytearray)):
-        try:
-            value = value.decode("utf-8", errors="ignore")
-        except Exception:
-            return default
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return default
-        try:
-            return json.loads(s)
-        except Exception:
-            # If it's not valid JSON, fallback safely
-            return default
-    return default
-
-
-# ============================================================================
-# TABLE DEFINITIONS (Non-breaking, idempotent)
-# ============================================================================
-
-def ensure_tables() -> None:
-    """Create Luma tables if they don't exist. Never crashes the app."""
-    engine = get_engine_safe()
-    if not engine:
-        logger.warning("luma_store: DB unavailable, tables not created")
+def ensure_tables():
+    e=get_engine_safe()
+    if not e: 
+        logger.warning("luma_store: DB unavailable")
         return
-
     try:
-        with engine.begin() as conn:
-            conn.execute(_t("""
-                CREATE TABLE IF NOT EXISTS luma_content (
-                    id TEXT PRIMARY KEY,
-                    metadata_json TEXT NOT NULL,
-                    blueprint_json TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    published BOOLEAN NOT NULL DEFAULT FALSE
-                );
-            """))
+        with e.begin() as c:
+            c.execute(_t("""CREATE TABLE IF NOT EXISTS luma_content(
+                id TEXT PRIMARY KEY,
+                metadata_json TEXT NOT NULL,
+                blueprint_json TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                published BOOLEAN DEFAULT FALSE)"""))
+            c.execute(_t("""CREATE TABLE IF NOT EXISTS luma_progress(
+                user_id INTEGER,
+                content_id TEXT,
+                completed BOOLEAN DEFAULT FALSE,
+                time_spent_seconds INTEGER DEFAULT 0,
+                notes TEXT,
+                bookmarked BOOLEAN DEFAULT FALSE,
+                last_visited_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY(user_id,content_id))"""))
+            c.execute(_t("""CREATE TABLE IF NOT EXISTS user_catalog(
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                title TEXT,
+                doc_type TEXT,
+                source TEXT,
+                file_url TEXT,
+                file_key TEXT,
+                metadata_json TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW())"""))
+    except Exception as ex:
+        logger.warning(f"table setup: {ex}")
 
-            # Non-breaking migrations
-            conn.execute(_t("""
-                ALTER TABLE luma_content
-                    ADD COLUMN IF NOT EXISTS metadata_json TEXT NOT NULL DEFAULT '{}'::text,
-                    ADD COLUMN IF NOT EXISTS blueprint_json TEXT NOT NULL DEFAULT '{}'::text,
-                    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT FALSE;
-            """))
-
-            conn.execute(_t("""
-                CREATE TABLE IF NOT EXISTS luma_progress (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    content_id TEXT NOT NULL,
-                    completed BOOLEAN NOT NULL DEFAULT FALSE,
-                    time_spent_seconds INTEGER NOT NULL DEFAULT 0,
-                    last_visited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    notes TEXT,
-                    bookmarked BOOLEAN NOT NULL DEFAULT FALSE,
-                    UNIQUE(user_id, content_id)
-                );
-            """))
-
-            conn.execute(_t("""
-                CREATE TABLE IF NOT EXISTS luma_analytics (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    event_type TEXT NOT NULL,
-                    content_id TEXT,
-                    metadata_json TEXT,
-                    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-            """))
-
-            
-            # User Catalog (uploads / saved resources)
-            conn.execute(_t("""
-                CREATE TABLE IF NOT EXISTS luma_catalog (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    doc_type TEXT NOT NULL DEFAULT 'link',
-                    source TEXT NOT NULL DEFAULT 'user',
-                    file_url TEXT NOT NULL,
-                    file_key TEXT,
-                    metadata_json TEXT NOT NULL DEFAULT '{}'::text,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-            """))
-
-            # Non-breaking migrations
-            conn.execute(_t("""
-                ALTER TABLE luma_catalog
-                    ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT 'Untitled',
-                    ADD COLUMN IF NOT EXISTS doc_type TEXT NOT NULL DEFAULT 'link',
-                    ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'user',
-                    ADD COLUMN IF NOT EXISTS file_url TEXT NOT NULL DEFAULT '',
-                    ADD COLUMN IF NOT EXISTS file_key TEXT,
-                    ADD COLUMN IF NOT EXISTS metadata_json TEXT NOT NULL DEFAULT '{}'::text,
-                    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-            """))
-
-            conn.execute(_t("""
-                CREATE INDEX IF NOT EXISTS idx_luma_catalog_user_created
-                ON luma_catalog(user_id, created_at DESC);
-            """))
-
-            conn.execute(_t("""
-                CREATE UNIQUE INDEX IF NOT EXISTS uq_luma_catalog_user_filekey
-                ON luma_catalog(user_id, file_key)
-                WHERE file_key IS NOT NULL AND file_key <> '';
-            """))
-            conn.execute(_t("""
-                CREATE INDEX IF NOT EXISTS idx_luma_content_published
-                ON luma_content(published) WHERE published = TRUE;
-            """))
-
-            conn.execute(_t("""
-                CREATE INDEX IF NOT EXISTS idx_luma_progress_user
-                ON luma_progress(user_id, last_visited_at DESC);
-            """))
-
-            conn.execute(_t("""
-                CREATE INDEX IF NOT EXISTS idx_luma_analytics_user
-                ON luma_analytics(user_id, timestamp DESC);
-            """))
-
-        logger.info("luma_store: tables ensured successfully")
-    except Exception as e:
-        logger.exception(f"luma_store: table creation failed: {e}")
-
-
-# ============================================================================
-# CONTENT OPERATIONS
-# ============================================================================
-
-def insert_content(
-    content_id: str,
-    metadata: Dict[str, Any],
-    blueprint: Dict[str, Any],
-    published: bool = False
-) -> Dict[str, Any]:
-    """Insert or update learning content."""
-    engine = get_engine_safe()
-    if not engine:
-        return {"ok": False, "error": "DB_UNAVAILABLE"}
-
+def get_content(cid):
+    e=get_engine_safe()
+    if not e: return None
     try:
-        with engine.begin() as conn:
-            conn.execute(
-                _t("""
-                INSERT INTO luma_content (id, metadata_json, blueprint_json, published)
-                VALUES (:id, :metadata, :blueprint, :published)
-                ON CONFLICT (id) DO UPDATE SET
-                    metadata_json = EXCLUDED.metadata_json,
-                    blueprint_json = EXCLUDED.blueprint_json,
-                    published = EXCLUDED.published,
-                    updated_at = NOW()
-                """),
-                {
-                    "id": content_id,
-                    "metadata": _to_json_str(metadata, require_object=True),
-                    "blueprint": _to_json_str(blueprint, require_object=True),
-                    "published": bool(published),
-                }
-            )
-        return {"ok": True, "content_id": content_id}
-
-    except Exception as e:
-        logger.exception(f"luma_store: insert_content failed: {e}")
-        return {"ok": False, "error": str(e)}
-
-
-def get_content(content_id: str, *, include_unpublished: bool = False) -> Optional[Dict[str, Any]]:
-    """Get content by ID.
-
-    Production rule:
-    - Public reads should only return published content.
-    - Admin tooling can opt-in to unpublished via include_unpublished=True.
-    """
-    engine = get_engine_safe()
-    if not engine:
+        with e.connect() as c:
+            r=c.execute(_t("SELECT id,metadata_json,blueprint_json,created_at,updated_at,published FROM luma_content WHERE id=:id"),{"id":cid}).fetchone()
+        if not r: return None
+        return {"content_id":r[0],"metadata":_json_load(r[1],{}),"blueprint":_json_load(r[2],{}),"published":bool(r[5])}
+    except Exception as ex:
+        logger.error(f"get_content: {ex}")
         return None
 
+def list_content(class_level=None,subject=None,board=None,limit=50):
+    e=get_engine_safe()
+    if not e: return []
     try:
-        with engine.connect() as conn:
-            row = conn.execute(
-                _t("""
-                SELECT id, metadata_json, blueprint_json, created_at, updated_at, published
-                FROM luma_content
-                WHERE id = :id
-                """),
-                {"id": content_id}
-            ).fetchone()
-
-            if not row:
-                return None
-
-            if (not include_unpublished) and (not bool(row[5])):
-                return None
-
-            metadata = _from_json(row[1], {})
-            blueprint = _from_json(row[2], {})
-
-            md = metadata if isinstance(metadata, dict) else {}
-            bp = blueprint if isinstance(blueprint, dict) else {}
-
-            # Canonical title: prefer blueprint.title, fallback to metadata topic/chapter, then id
-            title = ""
-            if isinstance(bp, dict):
-                title = str(bp.get("title") or "").strip()
-            if not title:
-                title = str(md.get("topic") or md.get("chapter") or "").strip()
-            if not title:
-                title = str(row[0])
-
-            return {
-                "id": row[0],
-                "title": title,
-                "metadata": md,
-                "blueprint": bp,
-                "published": bool(row[5]),
-                "created_at": row[3].isoformat() if row[3] else None,
-                "updated_at": row[4].isoformat() if row[4] else None,
-            }
-
-    except Exception as e:
-        logger.exception(f"luma_store: get_content failed: {e}")
-        return None
-
-
-def list_content(
-    class_level: Optional[int] = None,
-    subject: Optional[str] = None,
-    board: Optional[str] = None,
-    fallback: bool = False,
-    limit: int = 50,
-    *,
-    include_unpublished: bool = False
-) -> List[Dict[str, Any]]:
-    """
-    List content with optional filters.
-    Phase-1 behavior: do NOT block by published flag.
-    """
-    engine = get_engine_safe()
-    if not engine:
-        return []
-
-    try:
-        # IMPORTANT:
-        # Your JSON columns are TEXT. Casting TEXT -> jsonb in SQL will throw if any row contains
-        # invalid JSON, which turns simple list endpoints into INTERNAL_ERROR.
-        #
-        # For production safety (and your current scale), we fetch recent rows and filter in Python.
-        # Later, if you migrate columns to JSONB with constraints, you can move filters back to SQL.
-
-        lim = min(int(limit), 100)
-
-        with engine.connect() as conn:
-            rows = conn.execute(
-                _t("""
-                SELECT id, metadata_json, blueprint_json, created_at, updated_at, published
-                FROM luma_content
-                ORDER BY created_at DESC
-                LIMIT :limit
-                """),
-                {"limit": lim}
-            ).fetchall()
-
-        out: List[Dict[str, Any]] = []
-        has_board_match = False
-        for r in rows:
-            md_raw = _from_json(r[1], {})
-            bp_raw = _from_json(r[2], {})
-
-            md = md_raw if isinstance(md_raw, dict) else {}
-            bp = bp_raw if isinstance(bp_raw, dict) else {}
-
-            # Production rule: public listing should not leak unpublished content.
-            if (not include_unpublished) and (not bool(r[5])):
-                continue
-
-            # Apply optional filters in Python (safe even if some rows are malformed).
-            if class_level is not None:
-                v = str(md.get("class_level", "")).strip()
-                if v != str(class_level):
-                    continue
-
-            if subject:
-                sv = str(md.get("subject", ""))
-                if subject.lower() not in sv.lower():
-                    continue
-
-            # Board filtering is handled after collecting candidates,
-            # so we can support fallback behavior when board-specific content isn't available.
-
-            # Canonical title: prefer syllabus chapter/topic (stable for matching from Study UI),
-            # then blueprint title, then id.
-            title = str(md.get("chapter") or md.get("topic") or "").strip()
-            if not title and isinstance(bp, dict):
-                title = str(bp.get("title") or "").strip()
-            if not title:
-                title = str(r[0])
-
-            board_match = False
-            if board:
-                bv = str(md.get("board", ""))
-                board_match = board.lower() in bv.lower()
-                if board_match:
-                    has_board_match = True
-
-            out.append({
-                "id": r[0],
-                "_board_match": board_match,
-                "title": title,
-                "metadata": md,
-                "blueprint": bp,
-                "published": bool(r[5]),
-                "created_at": r[3].isoformat() if r[3] else None,
-                "updated_at": r[4].isoformat() if r[4] else None,
-            })
-
-        # Apply board filtering after collecting candidates
-        if board:
-            if fallback:
-                if has_board_match:
-                    out = [x for x in out if x.get("_board_match")]
-            else:
-                out = [x for x in out if x.get("_board_match")]
-
-        # Remove internal flags before returning
-        for x in out:
-            x.pop("_board_match", None)
-
+        with e.connect() as c:
+            rs=c.execute(_t("SELECT id,metadata_json,blueprint_json,published FROM luma_content WHERE published=TRUE LIMIT :lim"),{"lim":limit}).fetchall()
+        out=[]
+        for r in rs:
+            m=_json_load(r[1],{})
+            if class_level and int(m.get("class_level",0))!=class_level: continue
+            if subject and subject.lower() not in str(m.get("subject","")).lower(): continue
+            if board and board.lower() not in str(m.get("board","")).lower(): continue
+            out.append({"content_id":r[0],"metadata":m,"blueprint":_json_load(r[2],{}),"published":r[3]})
         return out
-
-    except Exception as e:
-        logger.exception(f"luma_store: list_content failed: {e}")
+    except Exception as ex:
+        logger.error(f"list_content: {ex}")
         return []
 
-
-
-def resolve_content_id(board: str | None, class_level: int | None, subject: str | None, chapter: str | None) -> str | None:
-    """Resolve the best content_id for a given (board/class/subject/chapter) tuple.
-    Matching priority: exact chapter match > topic match > title contains.
-    """
-    chapter_n = normalize_text(chapter or "")
-    if not chapter_n:
-        return None
-    items = list_content(board=board, class_level=class_level, subject=subject)
-    best_id = None
-    best_score = -1
+def resolve_content_id(board,class_level,subject,chapter):
+    """CANONICAL RESOLVER: returns content_id or None"""
+    cn=norm(chapter or "")
+    if not cn: return {"ok":False,"content_id":None,"status":"not_found","error":"NO_CHAPTER"}
+    items=list_content(board=board,class_level=class_level,subject=subject)
+    best_id,best_score=None,-1
     for it in items:
-        md = it.get("metadata") or {}
-        title_n = normalize_text(it.get("title") or "")
-        chap_n = normalize_text(md.get("chapter") or "")
-        topic_n = normalize_text(md.get("topic") or "")
-        score = 0
-        if chap_n and chap_n == chapter_n:
-            score = 100
-        elif chap_n and (chapter_n in chap_n or chap_n in chapter_n):
-            score = 85
-        elif topic_n and (chapter_n in topic_n or topic_n in chapter_n):
-            score = 70
-        elif title_n and (chapter_n in title_n or title_n in chapter_n):
-            score = 60
-        if score > best_score:
-            best_score = score
-            best_id = it.get("id")
-    return best_id
+        m=it["metadata"]
+        ch_n=norm(m.get("chapter",""))
+        tp_n=norm(m.get("topic",""))
+        ti_n=norm(m.get("title",""))
+        sc=0
+        if ch_n==cn: sc=100
+        elif ch_n and(cn in ch_n or ch_n in cn): sc=85
+        elif tp_n and(cn in tp_n or tp_n in cn): sc=70
+        elif ti_n and(cn in ti_n or ti_n in cn): sc=60
+        if sc>best_score:
+            best_score,best_id=sc,it["content_id"]
+    if best_id:
+        return {"ok":True,"content_id":best_id,"status":"published"}
+    return {"ok":False,"content_id":None,"status":"coming_soon","error":"NO_MATCH"}
 
-
-def save_progress(
-    user_id: int,
-    content_id: str,
-    completed: bool = False,
-    time_spent_seconds: int = 0,
-    notes: Optional[str] = None,
-    bookmarked: bool = False
-) -> Dict[str, Any]:
-    engine = get_engine_safe()
-    if not engine:
-        return {"ok": False, "error": "DB_UNAVAILABLE"}
-
+def save_progress(uid,cid,comp=False,tsec=0,notes=None,bm=False):
+    e=get_engine_safe()
+    if not e: return {"ok":False,"error":"DB_UNAVAILABLE"}
     try:
-        with engine.begin() as conn:
-            conn.execute(
-                _t("""
-                INSERT INTO luma_progress
-                    (user_id, content_id, completed, time_spent_seconds, notes, bookmarked, last_visited_at)
-                VALUES
-                    (:user_id, :content_id, :completed, :time_spent, :notes, :bookmarked, NOW())
-                ON CONFLICT (user_id, content_id) DO UPDATE SET
-                    completed = EXCLUDED.completed,
-                    time_spent_seconds = luma_progress.time_spent_seconds + EXCLUDED.time_spent_seconds,
-                    notes = COALESCE(EXCLUDED.notes, luma_progress.notes),
-                    bookmarked = EXCLUDED.bookmarked,
-                    last_visited_at = NOW()
-                """),
-                {
-                    "user_id": int(user_id),
-                    "content_id": content_id,
-                    "completed": bool(completed),
-                    "time_spent": int(time_spent_seconds),
-                    "notes": notes,
-                    "bookmarked": bool(bookmarked),
-                }
-            )
-        return {"ok": True}
+        with e.begin() as c:
+            c.execute(_t("""INSERT INTO luma_progress(user_id,content_id,completed,time_spent_seconds,notes,bookmarked,last_visited_at)
+                VALUES(:u,:c,:co,:t,:n,:b,NOW())
+                ON CONFLICT(user_id,content_id)DO UPDATE SET 
+                completed=EXCLUDED.completed,
+                time_spent_seconds=luma_progress.time_spent_seconds+EXCLUDED.time_spent_seconds,
+                notes=COALESCE(EXCLUDED.notes,luma_progress.notes),
+                bookmarked=EXCLUDED.bookmarked,
+                last_visited_at=NOW()"""),{"u":uid,"c":cid,"co":comp,"t":tsec,"n":notes,"b":bm})
+        return {"ok":True}
+    except Exception as ex:
+        logger.error(f"save_progress: {ex}")
+        return {"ok":False,"error":"SAVE_FAILED"}
 
-    except Exception as e:
-        logger.exception(f"luma_store: save_progress failed: {e}")
-        return {"ok": False, "error": str(e)}
-
-
-def get_progress(user_id: int, content_id: str) -> Optional[Dict[str, Any]]:
-    engine = get_engine_safe()
-    if not engine:
-        return None
-
+def get_progress(uid,cid):
+    e=get_engine_safe()
+    if not e: return None
     try:
-        with engine.connect() as conn:
-            r = conn.execute(
-                _t("""
-                SELECT completed, time_spent_seconds, notes, bookmarked, last_visited_at
-                FROM luma_progress
-                WHERE user_id = :user_id AND content_id = :content_id
-                """),
-                {"user_id": int(user_id), "content_id": content_id}
-            ).fetchone()
+        with e.connect() as c:
+            r=c.execute(_t("SELECT completed,time_spent_seconds,notes,bookmarked FROM luma_progress WHERE user_id=:u AND content_id=:c"),{"u":uid,"c":cid}).fetchone()
+        if not r: return None
+        return {"content_id":cid,"completed":r[0],"time_spent_seconds":r[1],"notes":r[2],"bookmarked":r[3]}
+    except: return None
 
-            if not r:
-                return None
-
-            return {
-                "completed": bool(r[0]),
-                "time_spent_seconds": int(r[1] or 0),
-                "notes": r[2],
-                "bookmarked": bool(r[3]),
-                "last_visited_at": r[4].isoformat() if r[4] else None,
-            }
-
-    except Exception as e:
-        logger.exception(f"luma_store: get_progress failed: {e}")
-        return None
-
-
-# ============================================================================
-# ANALYTICS OPERATIONS
-# ============================================================================
-
-def log_event(
-    user_id: int,
-    event_type: str,
-    content_id: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None
-) -> None:
-    engine = get_engine_safe()
-    if not engine:
-        return
-
+def list_catalog(uid,lim=50,off=0):
+    e=get_engine_safe()
+    if not e: return []
     try:
-        with engine.begin() as conn:
-            conn.execute(
-                _t("""
-                INSERT INTO luma_analytics (user_id, event_type, content_id, metadata_json)
-                VALUES (:user_id, :event_type, :content_id, :metadata)
-                """),
-                {
-                    "user_id": int(user_id),
-                    "event_type": event_type,
-                    "content_id": content_id,
-                    "metadata": _to_json_str(metadata) if metadata else None,
-                }
-            )
-    except Exception as e:
-        logger.warning(f"luma_store: analytics logging failed: {e}")
+        with e.connect() as c:
+            rs=c.execute(_t("SELECT id,title,doc_type,file_url FROM user_catalog WHERE user_id=:u ORDER BY created_at DESC LIMIT :l OFFSET :o"),{"u":uid,"l":lim,"o":off}).fetchall()
+        return [{"id":r[0],"title":r[1],"doc_type":r[2],"file_url":r[3]}for r in rs]
+    except: return []
 
-
-# ============================================================================
-# CATALOG OPERATIONS (User Library)
-# ============================================================================
-
-def create_catalog_item(
-    *,
-    user_id: int,
-    title: str,
-    doc_type: str,
-    source: str,
-    file_url: str,
-    file_key: str = "",
-    metadata: Any = None,
-) -> Optional[Dict[str, Any]]:
-    """Create a catalog row for a user's saved resource.
-
-    Best-effort: returns created row dict, or None.
-    """
-    ensure_tables()
-    engine = get_engine_safe()
-    if not engine:
-        return None
-
-    title = (title or "Untitled").strip()[:200] or "Untitled"
-    doc_type = (doc_type or "link").strip().lower()[:40] or "link"
-    source = (source or "user").strip().lower()[:40] or "user"
-    file_url = (file_url or "").strip()
-    file_key = (file_key or "").strip()[:240]
-
-    if not file_url:
-        return None
-
-    meta_json = _to_json_str(metadata or {}, require_object=True)
-
+def create_catalog_item(it):
+    e=get_engine_safe()
+    if not e: return False
     try:
-        with engine.begin() as conn:
-            row = conn.execute(
-                _t("""
-                    INSERT INTO luma_catalog (user_id, title, doc_type, source, file_url, file_key, metadata_json)
-                    VALUES (:user_id, :title, :doc_type, :source, :file_url, :file_key, :metadata_json)
-                    ON CONFLICT (user_id, file_key) WHERE (file_key IS NOT NULL AND file_key <> '')
-                    DO UPDATE SET title=EXCLUDED.title, doc_type=EXCLUDED.doc_type, source=EXCLUDED.source, file_url=EXCLUDED.file_url, metadata_json=EXCLUDED.metadata_json
-                    RETURNING id, user_id, title, doc_type, source, file_url, file_key, metadata_json, created_at
-                """),
-                {
-                    "user_id": int(user_id),
-                    "title": title,
-                    "doc_type": doc_type,
-                    "source": source,
-                    "file_url": file_url,
-                    "file_key": file_key,
-                    "metadata_json": meta_json,
-                },
-            ).mappings().first()
+        with e.begin() as c:
+            c.execute(_t("INSERT INTO user_catalog(user_id,title,doc_type,source,file_url,file_key,metadata_json)VALUES(:u,:t,:d,:s,:f,:k,:m)"),it)
+        return True
+    except: return False
 
-            if not row:
-                return None
-
-            return {
-                "id": row.get("id"),
-                "user_id": row.get("user_id"),
-                "title": row.get("title"),
-                "doc_type": row.get("doc_type"),
-                "source": row.get("source"),
-                "file_url": row.get("file_url"),
-                "file_key": row.get("file_key") or "",
-                "metadata": _from_json(row.get("metadata_json"), {}),
-                "created_at": str(row.get("created_at")) if row.get("created_at") is not None else None,
-            }
-    except Exception:
-        logger.exception("luma_store: create_catalog_item failed")
-        return None
-
-
-def list_catalog(
-    *,
-    user_id: int,
-    limit: int = 50,
-    offset: int = 0,
-) -> List[Dict[str, Any]]:
-    """List a user's catalog items (newest first)."""
-    ensure_tables()
-    engine = get_engine_safe()
-    if not engine:
-        return []
+def delete_catalog_item(uid,iid):
+    e=get_engine_safe()
+    if not e: return False
     try:
-        limit = max(1, min(int(limit or 50), 200))
-        offset = max(0, int(offset or 0))
-    except Exception:
-        limit, offset = 50, 0
-
-    try:
-        with engine.begin() as conn:
-            rows = conn.execute(
-                _t("""
-                    SELECT id, user_id, title, doc_type, source, file_url, file_key, metadata_json, created_at
-                    FROM luma_catalog
-                    WHERE user_id = :user_id
-                    ORDER BY created_at DESC
-                    LIMIT :limit OFFSET :offset
-                """),
-                {"user_id": int(user_id), "limit": limit, "offset": offset},
-            ).mappings().all()
-
-            out = []
-            for r in rows or []:
-                out.append(
-                    {
-                        "id": r.get("id"),
-                        "user_id": r.get("user_id"),
-                        "title": r.get("title"),
-                        "doc_type": r.get("doc_type"),
-                        "source": r.get("source"),
-                        "file_url": r.get("file_url"),
-                        "file_key": r.get("file_key") or "",
-                        "metadata": _from_json(r.get("metadata_json"), {}),
-                        "created_at": str(r.get("created_at")) if r.get("created_at") is not None else None,
-                    }
-                )
-            # Apply board filtering after collecting candidates
-        if board:
-            if fallback:
-                if has_board_match:
-                    out = [x for x in out if x.get("_board_match")]
-            else:
-                out = [x for x in out if x.get("_board_match")]
-
-        # Remove internal flags before returning
-        for x in out:
-            x.pop("_board_match", None)
-
-        return out
-    except Exception:
-        logger.exception("luma_store: list_catalog failed")
-        return []
-
-
-def delete_catalog_item(*, user_id: int, item_id: int) -> bool:
-    """Delete one catalog item owned by user."""
-    ensure_tables()
-    engine = get_engine_safe()
-    if not engine:
-        return False
-    try:
-        with engine.begin() as conn:
-            res = conn.execute(
-                _t("""
-                    DELETE FROM luma_catalog
-                    WHERE id = :id AND user_id = :user_id
-                """),
-                {"id": int(item_id), "user_id": int(user_id)},
-            )
-            return (res.rowcount or 0) > 0
-    except Exception:
-        logger.exception("luma_store: delete_catalog_item failed")
-        return False
-
-
-def list_published_contents(limit: int = 500):
-    """Return lightweight rows for published content (id,title,metadata_json)."""
-    with engine.begin() as conn:
-        rows = conn.execute(text("""
-            SELECT id, title, metadata_json
-            FROM luma_content
-            WHERE status = 'published'
-            ORDER BY created_at DESC
-            LIMIT :limit
-        """), {"limit": limit}).fetchall()
-    return [{"id": r[0], "title": r[1] or "", "metadata_json": r[2] or "{}"} for r in rows]
-
-
-def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower())).strip()
-
-
-def find_best_content_id(request_title: str, request_meta: dict) -> str | None:
-    """Best-effort matching when explicit mapping doesn't exist."""
-    req_title = _norm(request_title)
-    req_subject = _norm(request_meta.get("subject", ""))
-    req_board = _norm(request_meta.get("board", ""))
-    req_exam = _norm(request_meta.get("exam", ""))
-    req_class = str(request_meta.get("class_level") or request_meta.get("class") or "")
-    req_chapter = _norm(request_meta.get("chapter", ""))
-
-    candidates = list_published_contents(limit=800)
-    best = None
-    best_score = -1
-
-    for c in candidates:
-        cid = c["id"]
-        title = _norm(c.get("title", ""))
-        try:
-            meta = json.loads(c.get("metadata_json") or "{}")
-        except Exception:
-            meta = {}
-        c_subject = _norm(meta.get("subject", ""))
-        c_board = _norm(meta.get("board", ""))
-        c_exam = _norm(meta.get("exam", ""))
-        c_class = str(meta.get("class_level") or meta.get("class") or "")
-        c_chapter = _norm(meta.get("chapter", ""))
-
-        score = 0
-        # strong signals
-        if req_subject and c_subject and req_subject == c_subject:
-            score += 4
-        if req_board and c_board and req_board == c_board:
-            score += 5
-        if req_exam and c_exam and req_exam == c_exam:
-            score += 5
-        if req_class and c_class and req_class == c_class:
-            score += 3
-
-        # title / chapter similarity
-        if req_chapter and c_chapter and req_chapter == c_chapter:
-            score += 4
-        if req_title and title and req_title == title:
-            score += 4
-
-        # partial overlap bonus
-        if req_title and title:
-            overlap = len(set(req_title.split()) & set(title.split()))
-            score += min(3, overlap)
-
-        if req_chapter and c_chapter:
-            overlap2 = len(set(req_chapter.split()) & set(c_chapter.split()))
-            score += min(3, overlap2)
-
-        # small penalty if board/exam mismatched explicitly
-        if req_board and c_board and req_board != c_board:
-            score -= 2
-        if req_exam and c_exam and req_exam != c_exam:
-            score -= 2
-
-        if score > best_score:
-            best_score = score
-            best = cid
-
-    # require minimum confidence
-    if best_score >= 6:
-        return best
-    return None
+        with e.begin() as c:
+            c.execute(_t("DELETE FROM user_catalog WHERE id=:i AND user_id=:u"),{"i":iid,"u":uid})
+        return True
+    except: return False
