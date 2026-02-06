@@ -23,27 +23,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("knoweasy-engine-api")
 
-def _table_exists(conn, table_name: str) -> bool:
-    """Lightweight table existence check (Postgres)."""
-    try:
-        r = conn.execute(_t("""
-            SELECT EXISTS (
-                SELECT 1 FROM information_schema.tables
-                WHERE table_schema='public' AND table_name=:t
-            ) AS exists;
-        """), {"t": table_name}).scalar()
-        return bool(r)
-    except Exception:
-        return False
-
-
 
 # Optional: read from new Luma content system (canonical)
 try:
-    from luma_store import get_content as luma_get_content, list_content as luma_list_content
+    from luma_store import get_content as luma_get_content, list_content as luma_list_content, resolve_content_id as luma_resolve_content_id
 except Exception:
     luma_get_content = None
     luma_list_content = None
+    luma_resolve_content_id = None
 
 try:
     from db import get_engine_safe
@@ -424,106 +411,53 @@ def resolve_asset(
     }
 
 
-# === CEO LOCK (Phase 1/2 schema) resolver ===
-# If the newer canonical tables exist (syllabus_map + content_items),
-# resolve chapter -> content_id deterministically without relying on legacy chapter_assets.
-try:
-    with engine.connect() as conn:
-        if _table_exists(conn, "syllabus_map"):
-            # Canonical normalize: subject_code + chapter_slug are lowercase, underscore slugs
-            subj_norm = _slugify(subject_slug_in).replace("-", "_")
-            chap_norm = _slugify(chapter_id_in).replace("-", "_")
-
-            def _v2_variants(s: str) -> "List[str]":
-                s = (s or "").strip().lower()
-                if not s:
-                    return []
-                base = _slugify(s).replace("-", "_")
-                cand = [
-                    s, s.replace("-", "_"), s.replace("_", "-"),
-                    base, base.replace("_", "-"), base.replace("-", "_"),
-                ]
-                seen=set(); out=[]
-                for x in cand:
-                    x=(x or "").strip().lower()
-                    if x and x not in seen:
-                        seen.add(x); out.append(x)
-                return out
-
-            subj_v = _v2_variants(subj_norm) or [subj_norm]
-            chap_v = _v2_variants(chap_norm) or [chap_norm]
-
-            row = conn.execute(_t("""
-                SELECT track, class_level, subject_code, chapter_slug, chapter_title,
-                       content_id, availability
-                FROM syllabus_map
-                WHERE track=:track AND class_level=:cls
-                  AND subject_code = ANY(:subjects)
-                  AND chapter_slug = ANY(:chapters)
-                LIMIT 1
-            """), {
-                "track": track,
-                "cls": int(class_num),
-                "subjects": subj_v,
-                "chapters": chap_v,
-            }).mappings().first()
-
-            debug_info["v2"] = {
-                "used": True,
-                "subjects": subj_v,
-                "chapters": chap_v,
-                "row_found": bool(row),
-            }
-
-            if not row:
-                return {"ok": False, "status": "chapter_not_found", "debug": debug_info}
-
-            content_id = (row.get("content_id") or "").strip()
-            chapter_title_res = row.get("chapter_title") or chapter_title_in or chapter_id_in
-
-            # If syllabus says coming soon or content_id missing, return gracefully.
-            availability = (row.get("availability") or "").strip().lower()
-            if not content_id or availability in ("coming_soon", "coming-soon", "soon"):
-                return {
-                    "ok": False,
-                    "status": "coming_soon",
-                    "chapter_title": chapter_title_res,
+    # CEO LOCK path: prefer syllabus_map/content_items via luma_store resolver (if available).
+    # This avoids legacy tables causing false "chapter_not_found" when DB is already normalized.
+    try:
+        if callable(luma_resolve_content_id):
+            r = luma_resolve_content_id(
+                board=track or program,
+                class_level=int(class_num),
+                subject=subject_slug_in,
+                chapter=chapter_title_in or chapter_id_in,
+            ) or {}
+            cid = r.get("content_id")
+            if cid:
+                # Synthetic asset row: treat as published DB content
+                row = {
+                    "asset_type": asset_type,
+                    "status": "published",
+                    "ref_kind": "db",
+                    "ref_value": cid,
+                    "meta_json": "{}",
+                    "updated_at": None,
+                }
+                chapter_title_final = chapter_title_in or chapter_id_in.replace("-", " ").replace("_", " ").title()
+                payload: "Dict[str, Any]" = {
+                    "ok": True,
+                    "status": "ok",
+                    "track": track,
+                    "program": program,
+                    "class_num": int(class_num),
+                    "subject_slug": subject_slug_in,
+                    "chapter_id": chapter_id_in,
+                    "chapter_title": chapter_title_final,
+                    "asset": dict(row),
                     "debug": debug_info,
                 }
-
-            content = None
-            try:
-                if callable(luma_get_content):
-                    content = luma_get_content(content_id)
-            except Exception:
-                content = None
-
-            if not content:
-                return {
-                    "ok": False,
-                    "status": "content_not_found",
-                    "content_id": content_id,
-                    "chapter_title": chapter_title_res,
-                    "debug": debug_info,
-                }
-
-            asset = {
-                "asset_type": asset_type,
-                "status": "published",
-                "ref_kind": "db",
-                "ref_value": content_id,
-                "meta_json": {},
-            }
-            return {
-                "ok": True,
-                "status": "resolved",
-                "chapter_title": chapter_title_res,
-                "asset": asset,
-                "luma_content": content,
-                "debug": debug_info,
-            }
-except Exception as ex:
-    debug_info["v2_error"] = str(ex)
+                if asset_type == "luma":
+                    try:
+                        c = get_luma_content_by_id(str(cid))
+                        if c.get("ok"):
+                            payload["luma_content"] = c.get("content") or c.get("luma_content")
+                    except Exception:
+                        pass
+                return payload
+            # Coming soon is a first-class status if syllabus_map exists but is not published.
+            if r.get("status") == "coming_soon":
+                return {"ok": False, "status": "coming_soon", "debug": debug_info}
+    except Exception as ex:
+        logger.warning(f"study_store: CEO resolver path failed: {ex}")
 
     # 1) best-effort chapter metadata
     chapter_row = None
