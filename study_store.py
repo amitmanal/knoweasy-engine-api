@@ -453,6 +453,9 @@ def resolve_asset(
             return {
                 "ok": True,
                 "status": "resolved",
+                # Provide stable top-level fields consumed by study_router.py
+                "chapter_title": row.get("chapter_title") or chapter_title,
+                "luma_content": content_obj,
                 "asset": {
                     "ref_kind": "db",
                     "ref_value": content_id,
