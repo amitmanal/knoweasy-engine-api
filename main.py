@@ -21,6 +21,7 @@ from admin_router import router as admin_router
 from learning_router import router as learning_router
 from luma_router import router as luma_router
 from study_router import router as study_router
+from assets_router import router as assets_router
 from syllabus_router import router as syllabus_router
 import phase1_store
 from redis_store import redis_health
@@ -132,6 +133,7 @@ app.include_router(admin_router)
 app.include_router(learning_router)
 app.include_router(luma_router)
 app.include_router(study_router)
+app.include_router(assets_router)
 app.include_router(syllabus_router)
 
 # -----------------------------

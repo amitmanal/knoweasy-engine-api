@@ -64,9 +64,14 @@ ASSET_TYPES = {
     "formula",
     "pyq",
     "practice_mcq",
+    "pdf",
+    "image",
+    "audio",
+    "video",
+    "misc",
 }
 
-REF_KINDS = {"db", "url", "file"}
+REF_KINDS = {"db", "url", "file", "r2"}
 STATUS_VALUES = {"published", "coming_soon", "draft"}
 
 
@@ -128,6 +133,11 @@ def ensure_tables() -> None:
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
             """))
+            conn.execute(_t("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_chapter_assets_key
+                ON chapter_assets (class_num, track, program, subject_slug, chapter_id, asset_type);
+            """))
+
             conn.execute(_t("""
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_chapter_asset_key
                 ON chapter_assets (class_num, track, program, subject_slug, chapter_id, asset_type);
@@ -746,6 +756,98 @@ def upsert_luma_asset_mapping(
     except Exception as e:
         logger.warning(f"study_store: upsert_luma_asset_mapping failed: {e}")
         return {"ok": False, "status": "error", "error": f"{e.__class__.__name__}: {str(e)}"}
+
+
+
+
+def upsert_asset_mapping(
+    *,
+    class_num: int,
+    track: str,
+    program: str,
+    subject_slug: str,
+    chapter_id: str,
+    asset_type: str = "luma",
+    status: str = "published",
+    ref_kind: str = "db",
+    ref_value: Optional[str] = None,
+    meta_json: Any = None,
+) -> Dict[str, Any]:
+    """Upsert a chapter -> asset mapping row (generic).
+
+    This is the canonical writer for chapter_assets. It supports heavy assets stored
+    in R2 by using ref_kind='r2' and ref_value='<object_key>'.
+    """
+    ensure_tables()
+    engine = get_engine_safe()
+    if not engine:
+        return {"ok": False, "status": "db_unavailable"}
+
+    track = (track or "").strip().lower()
+    program = (program or "").strip().lower()
+    subject_slug = (subject_slug or "").strip().lower()
+    chapter_id = (chapter_id or "").strip().lower()
+    asset_type = (asset_type or "luma").strip().lower()
+    status = (status or "published").strip().lower()
+    ref_kind = (ref_kind or "db").strip().lower()
+    ref_value = (ref_value or "").strip()
+
+    if track not in TRACKS:
+        return {"ok": False, "status": "invalid_track", "track": track}
+    if program not in PROGRAMS and program not in ENTRANCE_PROGRAMS:
+        return {"ok": False, "status": "invalid_program", "program": program}
+    if asset_type not in ASSET_TYPES:
+        # allow forward-compatible asset types without breaking
+        ASSET_TYPES.add(asset_type)
+    if ref_kind not in REF_KINDS:
+        return {"ok": False, "status": "invalid_ref_kind", "ref_kind": ref_kind}
+    if status not in STATUS_VALUES:
+        return {"ok": False, "status": "invalid_status", "value": status}
+
+    meta_s = "{}"
+    try:
+        if isinstance(meta_json, str):
+            # allow already-json strings
+            meta_s = meta_json
+        else:
+            meta_s = json.dumps(meta_json or {}, ensure_ascii=False)
+    except Exception:
+        meta_s = "{}"
+
+    # Upsert: one row per unique (class, track, program, subject, chapter_id, asset_type)
+    q = """
+    INSERT INTO chapter_assets
+      (class_num, track, program, subject_slug, chapter_id, asset_type, status, ref_kind, ref_value, meta_json)
+    VALUES
+      (:class_num, :track, :program, :subject_slug, :chapter_id, :asset_type, :status, :ref_kind, :ref_value, :meta_json)
+    ON CONFLICT (class_num, track, program, subject_slug, chapter_id, asset_type)
+    DO UPDATE SET
+      status=EXCLUDED.status,
+      ref_kind=EXCLUDED.ref_kind,
+      ref_value=EXCLUDED.ref_value,
+      meta_json=EXCLUDED.meta_json,
+      updated_at=NOW()
+    RETURNING id;
+    """
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(_t(q), dict(
+                class_num=class_num,
+                track=track,
+                program=program,
+                subject_slug=subject_slug,
+                chapter_id=chapter_id,
+                asset_type=asset_type,
+                status=status,
+                ref_kind=ref_kind,
+                ref_value=ref_value,
+                meta_json=meta_s,
+            )).first()
+        return {"ok": True, "id": int(row[0]) if row else None}
+    except Exception as e:
+        logger.warning(f"upsert_asset_mapping failed: {e}")
+        return {"ok": False, "status": "db_error", "error": str(e)}
+
 
 
 def seed_luma_mappings_from_luma_content() -> Dict[str, Any]:

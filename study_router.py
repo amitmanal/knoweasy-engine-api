@@ -147,8 +147,6 @@ async def asset_set(
     if not (track and program and class_num and subject_slug and chapter_id and ref_value):
         raise HTTPException(status_code=400, detail="Missing required fields")
 
-    if asset_type != "luma":
-        raise HTTPException(status_code=400, detail="Only asset_type=luma is supported")
 
     # Normalize: store both underscore and hyphen variants so either resolves
     chapter_id_u = chapter_id.replace("-", "_")
@@ -156,12 +154,13 @@ async def asset_set(
 
     results = []
     for cid in [chapter_id_u, chapter_id_h]:
-        out = study_store.upsert_luma_asset_mapping(
+        out = study_store.upsert_asset_mapping(
             track=track,
             program=program,
             class_num=class_num,
             subject_slug=subject_slug,
             chapter_id=cid,
+            asset_type=asset_type,
             status=status,
             ref_kind=ref_kind,
             ref_value=ref_value,
