@@ -15,9 +15,11 @@ Queries ai_usage_logs directly.
 from __future__ import annotations
 
 import os
+import traceback
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
-from fastapi import APIRouter, Header, Query, Body, HTTPException
+from fastapi import APIRouter, Header, Query
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -204,90 +206,26 @@ def cost_top_users(
         )
 
 
-# ---------------------------------------------------------------------
-# Syllabus admin
-# ---------------------------------------------------------------------
-
 @router.post("/syllabus/seed")
-async def admin_seed_syllabus():
-    """(Admin) Seed/refresh syllabus from packaged seed/syllabus/*.js files.
-    Safe to call multiple times; uses upsert semantics.
+def admin_seed_syllabus(
+    x_admin_key: str = Header(..., alias="x-admin-key"),
+    reset: int = Query(0),
+):
+    """Seed syllabus_map and syllabus_chapters from packaged seed/syllabus/*.js files.
+
+    Usage:
+      POST /admin/syllabus/seed (no body)
+      Optional: ?reset=1 to wipe syllabus tables before seeding.
     """
+    _require_admin(x_admin_key)
+
     try:
-        import study_store
-        engine = study_store._get_engine()
-        study_store.ensure_tables(engine)
-        inserted = study_store.seed_syllabus_from_packaged_files(engine)
-        return {"ok": True, "inserted": inserted}
+        seed_dir = Path(__file__).resolve().parent / "seed" / "syllabus"
+        result = study_store.seed_syllabus_from_packaged_files(seed_dir, reset=bool(reset))
+        return JSONResponse({"ok": True, "result": result, "seed_dir": str(seed_dir)})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"seed_failed: {e}")
-
-@router.post("/syllabus/upsert")
-async def admin_upsert_syllabus(payload: dict = Body(...)):
-    """(Admin) Upsert syllabus chapters via JSON.
-    Expected payload:
-      {
-        "track": "cbse|icse|maharashtra|entrance",
-        "program": "neet|jee|cet_pcm|cet_pcb|...",   (optional; default "")
-        "class_num": 5..12,
-        "subject_slug": "bio|phy|chem|math|...",
-        "chapters": [{"chapter_id":"...", "chapter_title":"...", "content_id":"...", "availability":"available|coming_soon"}]
-      }
-    """
-    try:
-        track = str(payload.get("track") or "").strip()
-        program = str(payload.get("program") or "").strip()
-        class_num = int(payload.get("class_num"))
-        subject_slug = str(payload.get("subject_slug") or "").strip()
-        chapters = payload.get("chapters") or []
-
-        if not track or not subject_slug:
-            raise HTTPException(status_code=400, detail="track and subject_slug are required")
-        if not isinstance(chapters, list) or len(chapters) == 0:
-            raise HTTPException(status_code=400, detail="chapters[] is required")
-
-        import study_store
-        engine = study_store._get_engine()
-        study_store.ensure_tables(engine)
-
-        from sqlalchemy import text
-
-        upsert_sql = text("""
-            INSERT INTO syllabus_chapters
-              (class_num, track, program, subject_slug, chapter_id, chapter_title, content_id, availability, updated_at)
-            VALUES
-              (:class_num, :track, :program, :subject_slug, :chapter_id, :chapter_title, :content_id, :availability, NOW())
-            ON CONFLICT (class_num, track, program, subject_slug, chapter_id)
-            DO UPDATE SET
-              chapter_title = EXCLUDED.chapter_title,
-              content_id = EXCLUDED.content_id,
-              availability = EXCLUDED.availability,
-              updated_at = NOW()
-        """)
-
-        rows = 0
-        with engine.begin() as conn:
-            for ch in chapters:
-                chapter_id = str(ch.get("chapter_id") or ch.get("id") or "").strip()
-                chapter_title = str(ch.get("chapter_title") or ch.get("title") or "").strip()
-                content_id = str(ch.get("content_id") or "").strip()
-                availability = str(ch.get("availability") or "coming_soon").strip()
-                if not chapter_id or not chapter_title:
-                    continue
-                conn.execute(upsert_sql, {
-                    "class_num": class_num,
-                    "track": track,
-                    "program": program,
-                    "subject_slug": subject_slug,
-                    "chapter_id": chapter_id,
-                    "chapter_title": chapter_title,
-                    "content_id": content_id,
-                    "availability": availability
-                })
-                rows += 1
-
-        return {"ok": True, "upserted": rows}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"upsert_failed: {e}")
+        # Internal-only endpoint: return error details to help debugging
+        return JSONResponse(
+            {"ok": False, "error": str(e), "trace": traceback.format_exc()},
+            status_code=500,
+        )
