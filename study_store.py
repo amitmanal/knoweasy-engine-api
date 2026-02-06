@@ -26,11 +26,10 @@ logger = logging.getLogger("knoweasy-engine-api")
 
 # Optional: read from new Luma content system (canonical)
 try:
-    from luma_store import get_content as luma_get_content, list_content as luma_list_content, resolve_content_id as luma_resolve_content_id
+    from luma_store import get_content as luma_get_content, list_content as luma_list_content
 except Exception:
     luma_get_content = None
     luma_list_content = None
-    luma_resolve_content_id = None
 
 try:
     from db import get_engine_safe
@@ -410,85 +409,61 @@ def resolve_asset(
         },
     }
 
-
-    # CEO LOCK path: resolve via syllabus_map -> content_id -> content_items (preferred)
-    # This MUST take priority over legacy tables to avoid false "chapter_not_found"/"coming_soon".
+    # === Phase 2 canonical resolver (syllabus_map -> content_id -> content_items) ===
+    # If syllabus_map exists, it is the source of truth for chapter -> content_id.
     try:
-        with engine.connect() as conn:
-            # 1) Direct syllabus_map hit (content_id present)
-            try:
-                r = conn.execute(_t("""
-                    SELECT content_id, availability
-                    FROM syllabus_map
-                    WHERE track = :track
-                      AND class_level = :cls
-                      AND subject_code = ANY(:subjects)
-                      AND chapter_slug = ANY(:chapters)
-                    LIMIT 1
-                """), {
-                    "track": track,
-                    "cls": int(class_num),
-                    "subjects": subject_variants,
-                    "chapters": chapter_variants,
-                }).fetchone()
-            except Exception:
-                r = None
+        with engine.begin() as conn:
+            row = conn.execute(_t("""
+                SELECT content_id, chapter_title, availability
+                FROM syllabus_map
+                WHERE track = :track
+                  AND class_level = :class_level
+                  AND subject_code = ANY(:subjects)
+                  AND chapter_slug = ANY(:chapters)
+                LIMIT 1;
+            """), {
+                "track": track,
+                "class_level": int(class_num),
+                "subjects": subject_variants,
+                "chapters": chapter_variants,
+            }).mappings().first()
 
-            if r and r[0]:
-                cid = r[0]
-                row = {
-                    "asset_type": asset_type,
-                    "status": "published",
-                    "ref_kind": "db",
-                    "ref_value": cid,
-                    "meta_json": "{}",
-                    "updated_at": None,
-                }
-                chapter_title_final = chapter_title_in or chapter_id_in.replace("-", " ").replace("_", " ").title()
-                payload: "Dict[str, Any]" = {
-                    "ok": True,
-                    "status": "ok",
-                    "track": track,
-                    "program": program,
-                    "class_num": int(class_num),
-                    "subject_slug": subject_slug_in,
-                    "chapter_id": chapter_id_in,
-                    "chapter_title": chapter_title_final,
-                    "asset": dict(row),
-                    "debug": debug_info,
-                }
-                if asset_type == "luma":
-                    try:
-                        c = get_luma_content_by_id(str(cid))
-                        if c.get("ok"):
-                            payload["luma_content"] = c.get("content") or c.get("luma_content")
-                    except Exception:
-                        pass
-                return payload
+        if row and row.get("content_id"):
+            content_id = (row.get("content_id") or "").strip()
+            availability = (row.get("availability") or "available").strip().lower()
+            debug_info["syllabus_map_match"] = {
+                "content_id": content_id,
+                "availability": availability,
+                "chapter_title": row.get("chapter_title"),
+            }
 
-            # 2) If syllabus_map says coming soon (even without content_id), return coming_soon
-            try:
-                r2 = conn.execute(_t("""
-                    SELECT 1
-                    FROM syllabus_map
-                    WHERE track = :track
-                      AND class_level = :cls
-                      AND subject_code = ANY(:subjects)
-                      AND chapter_slug = ANY(:chapters)
-                      AND availability = 'coming_soon'
-                    LIMIT 1
-                """), {
-                    "track": track,
-                    "cls": int(class_num),
-                    "subjects": subject_variants,
-                    "chapters": chapter_variants,
-                }).fetchone()
-            except Exception:
-                r2 = None
-            if r2:
+            if availability not in ("available", "published"):
                 return {"ok": False, "status": "coming_soon", "debug": debug_info}
-    except Exception as ex:
-        logger.warning(f"study_store: CEO syllabus_map resolver failed: {ex}")
+
+            if not luma_get_content:
+                debug_info["error"] = "luma_store_unavailable"
+                return {"ok": False, "status": "luma_store_unavailable", "debug": debug_info}
+
+            content_obj = luma_get_content(content_id)
+            if not content_obj:
+                debug_info["error"] = "content_not_found_for_content_id"
+                return {"ok": False, "status": "content_not_found", "debug": debug_info}
+
+            # Return in the same shape as /api/study/asset/get expects.
+            return {
+                "ok": True,
+                "status": "resolved",
+                "asset": {
+                    "ref_kind": "db",
+                    "ref_value": content_id,
+                    "asset_type": asset_type,
+                    "content": content_obj,
+                },
+                "debug": debug_info,
+            }
+    except Exception as e:
+        # Never crash resolve due to canonical lookup; fall through to legacy resolver
+        debug_info["syllabus_map_error"] = str(e)
 
 
     # 1) best-effort chapter metadata
