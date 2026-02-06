@@ -138,38 +138,32 @@ def ensure_tables() -> None:
                 ON chapter_assets (class_num, track, program, subject_slug, chapter_id, asset_type);
             """))
 
+            # Phase 2 canonical syllabus table used by /api/syllabus
+            # track examples: cbse/icse/maharashtra/jee/neet/cet_pcm/cet_pcb
             conn.execute(_t("""
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_chapter_asset_key
-                ON chapter_assets (class_num, track, program, subject_slug, chapter_id, asset_type);
+                CREATE TABLE IF NOT EXISTS syllabus_map (
+                    track TEXT NOT NULL,
+                    class_level INT NOT NULL,
+                    subject_code TEXT NOT NULL,
+                    chapter_slug TEXT NOT NULL,
+                    chapter_title TEXT NOT NULL,
+                    content_id TEXT,
+                    availability TEXT,
+                    sort_order INT NOT NULL DEFAULT 0,
+                    meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (track, class_level, subject_code, chapter_slug)
+                );
+            """))
+            conn.execute(_t("""
+                CREATE INDEX IF NOT EXISTS ix_syllabus_map_lookup
+                ON syllabus_map (track, class_level, subject_code);
             """))
 
-
-# Phase 2 canonical syllabus table used by /api/syllabus
-# track: cbse/icse/maharashtra/jee/neet/cet_pcm/cet_pcb (program-like)
-conn.execute(_t("""
-    CREATE TABLE IF NOT EXISTS syllabus_map (
-        track TEXT NOT NULL,
-        class_level INT NOT NULL,
-        subject_code TEXT NOT NULL,
-        chapter_slug TEXT NOT NULL,
-        chapter_title TEXT NOT NULL,
-        content_id TEXT,
-        availability TEXT,
-        sort_order INT NOT NULL DEFAULT 0,
-        meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (track, class_level, subject_code, chapter_slug)
-    );
-"""))
-conn.execute(_t("""
-    CREATE INDEX IF NOT EXISTS ix_syllabus_map_lookup
-    ON syllabus_map (track, class_level, subject_code);
-"""))
             # Non-breaking migrations (add columns if missing)
             conn.execute(_t("""ALTER TABLE syllabus_chapters ADD COLUMN IF NOT EXISTS meta_json TEXT NOT NULL DEFAULT '{}';"""))
             conn.execute(_t("""ALTER TABLE chapter_assets ADD COLUMN IF NOT EXISTS meta_json TEXT NOT NULL DEFAULT '{}';"""))
-
     except Exception as e:
         logger.warning(f"study_store: ensure_tables failed: {e}")
 
