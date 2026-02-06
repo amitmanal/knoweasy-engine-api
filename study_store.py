@@ -153,29 +153,43 @@ def ensure_tables() -> None:
 
 def _read_json_from_syllabus_js(fp: Path) -> Optional[Dict[str, Any]]:
     """
-    Syllabus JS format:
-    window.KnowEasySyllabus["11_cbse"] = { ... };
-    Extract the { ... } as JSON and parse.
+    Syllabus JS formats we support:
+
+    1) window.KnowEasySyllabus = window.KnowEasySyllabus || {};
+       window.KnowEasySyllabus["11_cbse"] = { ... };
+
+    2) export default { ... };
+
+    Extract the { ... } payload and parse as JSON.
     """
     try:
-        txt = fp.read_text(encoding="utf-8", errors="ignore")
-        # Find first '{' after '='
-        eq = txt.find("=")
+        txt = fp.read_text(encoding="utf-8", errors="ignore").strip()
+
+        # Preferred: assignment to window.KnowEasySyllabus["..."] = { ... };
+        m = re.search(r'\]\s*=\s*({.*})\s*;?\s*$', txt, flags=re.DOTALL)
+        if m:
+            return json.loads(m.group(1).strip())
+
+        # Alternate: export default { ... };
+        m = re.search(r'export\s+default\s+({.*})\s*;?\s*$', txt, flags=re.DOTALL)
+        if m:
+            return json.loads(m.group(1).strip())
+
+        # Fallback: find last '=' then first '{' after it (avoid the initial "{};" bootstrap)
+        eq = txt.rfind("=")
         if eq < 0:
             return None
         brace = txt.find("{", eq)
         if brace < 0:
             return None
-        # Remove trailing ';'
         data_str = txt[brace:].strip()
         if data_str.endswith(";"):
             data_str = data_str[:-1].strip()
-        # Some files may end with "};" already handled
         return json.loads(data_str)
+
     except Exception as e:
         logger.warning(f"study_store: parse syllabus js failed for {fp.name}: {e}")
         return None
-
 
 def _normalize_program(track: str, program: str) -> str:
     p = (program or "").strip().lower()
