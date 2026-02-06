@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from db import _get_engine
+import study_store
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
