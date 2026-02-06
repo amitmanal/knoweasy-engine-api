@@ -411,19 +411,31 @@ def resolve_asset(
     }
 
 
-    # CEO LOCK path: prefer syllabus_map/content_items via luma_store resolver (if available).
-    # This avoids legacy tables causing false "chapter_not_found" when DB is already normalized.
+    # CEO LOCK path: resolve via syllabus_map -> content_id -> content_items (preferred)
+    # This MUST take priority over legacy tables to avoid false "chapter_not_found"/"coming_soon".
     try:
-        if callable(luma_resolve_content_id):
-            r = luma_resolve_content_id(
-                board=track or program,
-                class_level=int(class_num),
-                subject=subject_slug_in,
-                chapter=chapter_title_in or chapter_id_in,
-            ) or {}
-            cid = r.get("content_id")
-            if cid:
-                # Synthetic asset row: treat as published DB content
+        with engine.connect() as conn:
+            # 1) Direct syllabus_map hit (content_id present)
+            try:
+                r = conn.execute(_t("""
+                    SELECT content_id, availability
+                    FROM syllabus_map
+                    WHERE track = :track
+                      AND class_level = :cls
+                      AND subject_code = ANY(:subjects)
+                      AND chapter_slug = ANY(:chapters)
+                    LIMIT 1
+                """), {
+                    "track": track,
+                    "cls": int(class_num),
+                    "subjects": subject_variants,
+                    "chapters": chapter_variants,
+                }).fetchone()
+            except Exception:
+                r = None
+
+            if r and r[0]:
+                cid = r[0]
                 row = {
                     "asset_type": asset_type,
                     "status": "published",
@@ -453,11 +465,31 @@ def resolve_asset(
                     except Exception:
                         pass
                 return payload
-            # Coming soon is a first-class status if syllabus_map exists but is not published.
-            if r.get("status") == "coming_soon":
+
+            # 2) If syllabus_map says coming soon (even without content_id), return coming_soon
+            try:
+                r2 = conn.execute(_t("""
+                    SELECT 1
+                    FROM syllabus_map
+                    WHERE track = :track
+                      AND class_level = :cls
+                      AND subject_code = ANY(:subjects)
+                      AND chapter_slug = ANY(:chapters)
+                      AND availability = 'coming_soon'
+                    LIMIT 1
+                """), {
+                    "track": track,
+                    "cls": int(class_num),
+                    "subjects": subject_variants,
+                    "chapters": chapter_variants,
+                }).fetchone()
+            except Exception:
+                r2 = None
+            if r2:
                 return {"ok": False, "status": "coming_soon", "debug": debug_info}
     except Exception as ex:
-        logger.warning(f"study_store: CEO resolver path failed: {ex}")
+        logger.warning(f"study_store: CEO syllabus_map resolver failed: {ex}")
+
 
     # 1) best-effort chapter metadata
     chapter_row = None
