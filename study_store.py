@@ -138,32 +138,34 @@ def ensure_tables() -> None:
                 ON chapter_assets (class_num, track, program, subject_slug, chapter_id, asset_type);
             """))
 
-            # Phase 2 canonical syllabus table used by /api/syllabus
-            # track examples: cbse/icse/maharashtra/jee/neet/cet_pcm/cet_pcb
+            conn.execute(_t("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_chapter_asset_key
+                ON chapter_assets (class_num, track, program, subject_slug, chapter_id, asset_type);
+            """))
+
+            # Canonical syllabus map (used by /api/syllabus)
             conn.execute(_t("""
                 CREATE TABLE IF NOT EXISTS syllabus_map (
+                    id BIGSERIAL PRIMARY KEY,
                     track TEXT NOT NULL,
                     class_level INT NOT NULL,
                     subject_code TEXT NOT NULL,
                     chapter_slug TEXT NOT NULL,
                     chapter_title TEXT NOT NULL,
-                    content_id TEXT,
-                    availability TEXT,
-                    sort_order INT NOT NULL DEFAULT 0,
-                    meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    PRIMARY KEY (track, class_level, subject_code, chapter_slug)
+                    content_id TEXT NOT NULL DEFAULT '',
+                    availability TEXT NOT NULL DEFAULT 'coming_soon',
+                    sort_order INT NOT NULL DEFAULT 0
                 );
             """))
             conn.execute(_t("""
-                CREATE INDEX IF NOT EXISTS ix_syllabus_map_lookup
-                ON syllabus_map (track, class_level, subject_code);
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_syllabus_map_key
+                ON syllabus_map (track, class_level, subject_code, chapter_slug);
             """))
 
             # Non-breaking migrations (add columns if missing)
             conn.execute(_t("""ALTER TABLE syllabus_chapters ADD COLUMN IF NOT EXISTS meta_json TEXT NOT NULL DEFAULT '{}';"""))
             conn.execute(_t("""ALTER TABLE chapter_assets ADD COLUMN IF NOT EXISTS meta_json TEXT NOT NULL DEFAULT '{}';"""))
+
     except Exception as e:
         logger.warning(f"study_store: ensure_tables failed: {e}")
 
@@ -236,49 +238,17 @@ def count_syllabus_rows() -> int:
         return 0
 
 
-def _subject_code_from_name(name: str) -> str:
-    """Map human subject names to stable subject codes used by the API."""
-    s = _slugify(name).replace("_", " ")
-    s = " ".join(s.split())
-    # Common mappings
-    if "physics" in s:
-        return "phy"
-    if "chem" in s:
-        return "chem"
-    if "bio" in s:
-        return "bio"
-    if "math" in s:
-        return "math"
-    if s in ("science",):
-        return "sci"
-    if "english" in s:
-        return "eng"
-    if "history" in s:
-        return "hist"
-    if "geography" in s:
-        return "geo"
-    if "civics" in s:
-        return "civ"
-    if "econom" in s:
-        return "econ"
-    if "social" in s or "sst" in s:
-        return "sst"
-    # fallback: first token
-    return (s.split(" ")[0] if s else "subj").strip()[:12]
-
-
 def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Dict[str, Any]:
-    """Seed canonical syllabus_map from packaged board syllabus JS files.
+    """
+    Seed syllabus from packaged JS files in seed_dir.
 
-    - Source files: seed/syllabus/*.js in this repo (board-only).
-    - DB target: syllabus_map (used by /api/syllabus).
-    - Derives entrance syllabi (11/12) as overlays:
-        * JEE/NEET from CBSE anchors
-        * CET_PCM/CET_PCB from Maharashtra anchors
+    Writes to BOTH:
+      - syllabus_map  (canonical, used by /api/syllabus)
+      - syllabus_chapters (legacy, used by older study resolvers)
 
-    Args:
-      seed_dir: directory containing seed JS files.
-      reset: if True, truncates syllabus_map before seeding.
+    Also derives entrance syllabi for class 11/12 from board anchors:
+      - JEE/NEET from CBSE (default anchor)
+      - CET_PCM/CET_PCB from Maharashtra (default anchor)
 
     Returns counts for logging.
     """
@@ -294,121 +264,188 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
     inserted = 0
     skipped = 0
 
+    # Optional full reset (safe for idempotent reseeds)
+    if reset:
+        try:
+            with engine.begin() as conn:
+                conn.execute(_t("TRUNCATE TABLE syllabus_map RESTART IDENTITY;"))
+                conn.execute(_t("TRUNCATE TABLE syllabus_chapters RESTART IDENTITY;"))
+        except Exception as e:
+            # Don't crash seeding if TRUNCATE fails (permissions / missing table etc.)
+            logger.warning(f"study_store: reset truncate failed: {e}")
+
+    _subject_map = {
+        "mathematics": "math",
+        "maths": "math",
+        "math": "math",
+        "physics": "phy",
+        "phy": "phy",
+        "chemistry": "chem",
+        "chem": "chem",
+        "biology": "bio",
+        "bio": "bio",
+        "science": "sci",
+        "english": "eng",
+        "history": "hist",
+        "geography": "geo",
+        "civics": "civ",
+        "economics": "eco",
+    }
+
+    def _subject_code(name: str) -> str:
+        s = (name or "").strip().lower()
+        s_slug = _slugify(s)
+        return _subject_map.get(s_slug, _subject_map.get(s, s_slug or "misc"))
+
     def upsert_many(rows: List[Dict[str, Any]]):
+        """
+        rows keys:
+          class_level, track, subject_code, chapter_slug, chapter_title, sort_order, meta_json
+          plus legacy keys: program, subject_slug, chapter_id
+        """
         nonlocal inserted, skipped
         with engine.begin() as conn:
-
-            for row in rows:
+            for r in rows:
                 try:
+                    # Canonical syllabus_map (used by /api/syllabus)
                     conn.execute(_t("""
                         INSERT INTO syllabus_map
-                            (track, class_level, subject_code, chapter_slug, chapter_title,
-                             content_id, availability, sort_order, meta_json)
+                            (track, class_level, subject_code, chapter_slug, chapter_title, content_id, availability, sort_order)
                         VALUES
-                            (:track, :class_level, :subject_code, :chapter_slug, :chapter_title,
-                             :content_id, :availability, :sort_order, CAST(:meta_json AS JSONB))
+                            (:track, :class_level, :subject_code, :chapter_slug, :chapter_title, '', 'coming_soon', :sort_order)
                         ON CONFLICT (track, class_level, subject_code, chapter_slug)
                         DO UPDATE SET
                             chapter_title = EXCLUDED.chapter_title,
-                            content_id = COALESCE(EXCLUDED.content_id, syllabus_map.content_id),
-                            availability = COALESCE(EXCLUDED.availability, syllabus_map.availability),
-                            sort_order = EXCLUDED.sort_order,
+                            sort_order = EXCLUDED.sort_order;
+                    """), {
+                        "track": r["track"],
+                        "class_level": r["class_level"],
+                        "subject_code": r["subject_code"],
+                        "chapter_slug": r["chapter_slug"],
+                        "chapter_title": r["chapter_title"],
+                        "sort_order": r["sort_order"],
+                    })
+
+                    # Legacy syllabus_chapters (still used elsewhere in backend)
+                    conn.execute(_t("""
+                        INSERT INTO syllabus_chapters
+                            (class_num, track, program, subject_slug, chapter_id, chapter_title, order_index, meta_json)
+                        VALUES
+                            (:class_num, :l_track, :program, :subject_slug, :chapter_id, :chapter_title, :order_index, :meta_json)
+                        ON CONFLICT (class_num, track, program, subject_slug, chapter_id)
+                        DO UPDATE SET
+                            chapter_title = EXCLUDED.chapter_title,
+                            order_index = EXCLUDED.order_index,
                             meta_json = EXCLUDED.meta_json,
                             updated_at = NOW();
                     """), {
-                        **row,
-                        "meta_json": json.dumps(row.get("meta_json") or {}, ensure_ascii=False),
+                        "class_num": r["class_level"],
+                        "l_track": r["legacy_track"],
+                        "program": r["legacy_program"],
+                        "subject_slug": r["legacy_subject_slug"],
+                        "chapter_id": r["legacy_chapter_id"],
+                        "chapter_title": r["chapter_title"],
+                        "order_index": r["sort_order"],
+                        "meta_json": r["meta_json"],
                     })
+
                     inserted += 1
                 except Exception:
                     skipped += 1
 
-
-    # Build rows (reset should happen once; implement by truncating before loops)
-    if reset:
-        with engine.begin() as conn:
-            conn.execute(_t("TRUNCATE TABLE syllabus_map;"))
-
+    # First seed boards from JS
     boards_index: Dict[Tuple[int, str], Dict[str, List[Dict[str, Any]]]] = {}
-    # key: (class_num, board_program) -> subject_code -> list chapters with slug/title/order
-    all_rows: List[Dict[str, Any]] = []
-
+    # key: (class_num, program) -> subject_slug -> list chapters with id/title/order
     for fp in files:
         data = _read_json_from_syllabus_js(fp)
         if not data:
             continue
-
         meta = data.get("meta") or {}
         class_num = int(str(meta.get("class") or "0") or "0")
-        board = _normalize_program(TRACK_BOARDS, str(meta.get("board") or ""))
+        program = _normalize_program(TRACK_BOARDS, str(meta.get("board") or ""))
         subjects = data.get("subjects") or []
-
         if class_num < 5 or class_num > 12:
             continue
-        if board not in BOARD_PROGRAMS:
+        if program not in BOARD_PROGRAMS:
             continue
 
-        boards_index[(class_num, board)] = {}
+        boards_index[(class_num, program)] = {}
+        rows: List[Dict[str, Any]] = []
+
         for subj in subjects:
-            name = str(subj.get("name") or "").strip()
-            subject_code = _subject_code_from_name(name)
+            subj_name = str(subj.get("name") or "").strip()
+            subject_slug = _slugify(subj_name)
+            subject_code = _subject_code(subj_name)
             chapters = subj.get("chapters") or []
-            boards_index[(class_num, board)][subject_code] = []
+            boards_index[(class_num, program)][subject_slug] = []
 
             for i, ch in enumerate(chapters):
-                ch_slug = str(ch.get("id") or "").strip()
+                ch_id = str(ch.get("id") or "").strip()
                 ch_title = str(ch.get("title") or "").strip()
-                if not ch_slug or not ch_title:
+                if not ch_id or not ch_title:
                     continue
 
-                # Store for entrance derivation
-                boards_index[(class_num, board)][subject_code].append({
-                    "chapter_slug": ch_slug,
+                # Canonical chapter slug uses chapter_id as-is (frontend uses this)
+                chapter_slug = ch_id
+
+                boards_index[(class_num, program)][subject_slug].append({
+                    "chapter_id": ch_id,
+                    "chapter_title": ch_title,
+                    "order_index": i,
+                    "subject_code": subject_code,
+                })
+
+                rows.append({
+                    "track": program,  # canonical track = board/program (cbse/icse/maharashtra)
+                    "class_level": class_num,
+                    "subject_code": subject_code,
+                    "chapter_slug": chapter_slug,
                     "chapter_title": ch_title,
                     "sort_order": i,
+                    "meta_json": json.dumps({"source": fp.name, "meta": meta}, ensure_ascii=False),
+
+                    # legacy
+                    "legacy_track": TRACK_BOARDS,
+                    "legacy_program": program,
+                    "legacy_subject_slug": subject_slug,
+                    "legacy_chapter_id": ch_id,
                 })
 
-                all_rows.append({
-                    "track": board,
-                    "class_level": int(class_num),
-                    "subject_code": subject_code,
-                    "chapter_slug": ch_slug,
-                    "chapter_title": ch_title,
-                    "content_id": ch.get("content_id") if isinstance(ch, dict) else None,
-                    "availability": (ch.get("availability") if isinstance(ch, dict) else None) or None,
-                    "sort_order": int(i),
-                    "meta_json": {"source": fp.name, "seed_meta": meta},
-                })
+        upsert_many(rows)
 
-    # Derive entrance programs (11/12) from anchor boards
-    def derive_from_board(anchor_board: str, entrance_program: str, class_num: int):
-        src = boards_index.get((class_num, anchor_board))
+    # Derive entrance for 11/12
+    def derive_from_board(anchor_program: str, entrance_program: str, class_num: int):
+        src = boards_index.get((class_num, anchor_program))
         if not src:
             return
-
-        # Allowed subject codes per entrance
-        if entrance_program in ("jee", "cet_pcm"):
-            allowed = {"phy", "chem", "math"}
-        elif entrance_program in ("neet", "cet_pcb"):
-            allowed = {"phy", "chem", "bio"}
-        else:
+        rows: List[Dict[str, Any]] = []
+        for subject_slug, chlist in src.items():
+            # Entrance subject filtering:
             allowed = None
-
-        for subject_code, chlist in (src or {}).items():
-            if allowed and subject_code not in allowed:
+            if entrance_program in ("jee", "cet_pcm"):
+                allowed = {"physics", "chemistry", "mathematics", "math"}
+            elif entrance_program in ("neet", "cet_pcb"):
+                allowed = {"physics", "chemistry", "biology"}
+            if allowed and subject_slug not in allowed:
                 continue
+
             for item in chlist:
-                all_rows.append({
-                    "track": entrance_program,
-                    "class_level": int(class_num),
-                    "subject_code": subject_code,
-                    "chapter_slug": item["chapter_slug"],
+                rows.append({
+                    "track": entrance_program,  # canonical track = entrance program
+                    "class_level": class_num,
+                    "subject_code": item.get("subject_code") or _subject_code(subject_slug),
+                    "chapter_slug": item["chapter_id"],
                     "chapter_title": item["chapter_title"],
-                    "content_id": None,
-                    "availability": "coming_soon",
-                    "sort_order": int(item["sort_order"]),
-                    "meta_json": {"derived_from": anchor_board},
+                    "sort_order": int(item["order_index"]),
+                    "meta_json": json.dumps({"derived_from": anchor_program}, ensure_ascii=False),
+
+                    # legacy
+                    "legacy_track": TRACK_ENTRANCE,
+                    "legacy_program": entrance_program,
+                    "legacy_subject_slug": subject_slug,
+                    "legacy_chapter_id": item["chapter_id"],
                 })
+        upsert_many(rows)
 
     for cls in (11, 12):
         derive_from_board("cbse", "jee", cls)
@@ -416,10 +453,8 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
         derive_from_board("maharashtra", "cet_pcm", cls)
         derive_from_board("maharashtra", "cet_pcb", cls)
 
-    # Bulk upsert (looped)
-    upsert_many(all_rows)
+    return {"ok": True, "inserted": inserted, "skipped": skipped, "seed_files": len(files), "rows": (inserted + skipped)}
 
-    return {"ok": True, "inserted": inserted, "skipped": skipped, "seed_files": len(files), "rows": len(all_rows)}
 
 
 def resolve_asset(
