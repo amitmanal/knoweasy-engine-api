@@ -109,12 +109,16 @@ def get_syllabus(
         raise HTTPException(503, {"ok": False, "error": "DB_UNAVAILABLE"})
 
     track_n, program_n = _norm_track_program(track, program)
+    # IMPORTANT: DB uses track='boards' (plural) for board syllabus rows, while our public API is canonical
+    # and returns track='board'. Always query the DB with the correct stored track.
+    track_db = "boards" if track_n == "board" else track_n
     subj = (subject_code or "").strip().lower() or None
 
     dbg = {
         "track_in": track,
         "program_in": program,
         "track": track_n,
+        "track_db": track_db,
         "program": program_n,
         "class_level": int(class_level),
         "subject_code": subj,
@@ -138,7 +142,7 @@ def get_syllabus(
                         WHERE track=:track AND program=:program AND class_num=:cls
                           AND subject_slug=:subj AND is_active=TRUE
                         ORDER BY order_index ASC, chapter_title ASC
-                    """), {"track": track_n, "program": program_n, "cls": int(class_level), "subj": subj}).fetchall()
+                    """), {"track": track_db, "program": program_n, "cls": int(class_level), "subj": subj}).fetchall()
                     items = []
                     for r in rs or []:
                         items.append({
@@ -159,7 +163,7 @@ def get_syllabus(
                     FROM syllabus_chapters
                     WHERE track=:track AND program=:program AND class_num=:cls AND is_active=TRUE
                     ORDER BY subject_slug ASC, order_index ASC, chapter_title ASC
-                """), {"track": track_n, "program": program_n, "cls": int(class_level)}).fetchall()
+                """), {"track": track_db, "program": program_n, "cls": int(class_level)}).fetchall()
 
                 subj_to_ch = defaultdict(list)
                 for r in rs or []:
