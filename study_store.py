@@ -162,7 +162,33 @@ def ensure_tables() -> None:
                 ON syllabus_map (track, class_level, subject_code, chapter_slug);
             """))
 
-            # Non-breaking migrations (add columns if missing)
+            
+            # --- Syllabus map safety migrations ---
+            # Some earlier DB versions may have a foreign-key constraint on syllabus_map.content_id
+            # (pointing to content_items). That prevents seeding "coming soon" rows where content_id is empty.
+            # For a production syllabus system, syllabus rows must exist even without uploaded content.
+            # So we: (1) drop any FK on content_id, (2) allow NULLs, (3) remove default ''.
+            conn.execute(_t("ALTER TABLE syllabus_map ALTER COLUMN content_id DROP NOT NULL;"))
+            conn.execute(_t("ALTER TABLE syllabus_map ALTER COLUMN content_id DROP DEFAULT;"))
+            conn.execute(_t("""
+                DO $$
+                DECLARE r record;
+                BEGIN
+                  FOR r IN
+                    SELECT c.conname
+                    FROM pg_constraint c
+                    JOIN pg_class t ON c.conrelid = t.oid
+                    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+                    WHERE t.relname = 'syllabus_map'
+                      AND c.contype = 'f'
+                      AND a.attname = 'content_id'
+                  LOOP
+                    EXECUTE format('ALTER TABLE syllabus_map DROP CONSTRAINT %I', r.conname);
+                  END LOOP;
+                END $$;
+            """))
+
+# Non-breaking migrations (add columns if missing)
             conn.execute(_t("""ALTER TABLE syllabus_chapters ADD COLUMN IF NOT EXISTS meta_json TEXT NOT NULL DEFAULT '{}';"""))
             conn.execute(_t("""ALTER TABLE chapter_assets ADD COLUMN IF NOT EXISTS meta_json TEXT NOT NULL DEFAULT '{}';"""))
 
@@ -263,20 +289,13 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
 
     inserted = 0
     skipped = 0
-    # capture the first error so operator can fix DB/schema issues quickly
-    first_error: Optional[str] = None
 
     # Optional full reset (safe for idempotent reseeds)
     if reset:
         try:
             with engine.begin() as conn:
-                # Canonical table is always safe to wipe.
                 conn.execute(_t("TRUNCATE TABLE syllabus_map RESTART IDENTITY;"))
-                # Legacy table may have older FK constraints in some DBs. Try, but never block canonical seeding.
-                try:
-                    conn.execute(_t("TRUNCATE TABLE syllabus_chapters RESTART IDENTITY CASCADE;"))
-                except Exception as _e:
-                    logger.warning(f"study_store: reset truncate legacy syllabus_chapters failed: {_e}")
+                conn.execute(_t("TRUNCATE TABLE syllabus_chapters RESTART IDENTITY;"))
         except Exception as e:
             # Don't crash seeding if TRUNCATE fails (permissions / missing table etc.)
             logger.warning(f"study_store: reset truncate failed: {e}")
@@ -310,72 +329,62 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
           class_level, track, subject_code, chapter_slug, chapter_title, sort_order, meta_json
           plus legacy keys: program, subject_slug, chapter_id
         """
-        nonlocal inserted, skipped, first_error
-
-        # 1) Canonical write path: ALWAYS succeed or surface the error.
+        nonlocal inserted, skipped
         with engine.begin() as conn:
             for r in rows:
                 try:
+                    # Canonical syllabus_map (used by /api/syllabus)
+
+                    # Ensure content_id is nullable for coming-soon rows
+
+                    if 'content_id' not in r:
+
+                        r['content_id'] = None
+
                     conn.execute(_t("""
                         INSERT INTO syllabus_map
                             (track, class_level, subject_code, chapter_slug, chapter_title, content_id, availability, sort_order)
                         VALUES
-                            (:track, :class_level, :subject_code, :chapter_slug, :chapter_title, '', 'coming_soon', :sort_order)
+                            (:track, :class_level, :subject_code, :chapter_slug, :chapter_title, :content_id, 'coming_soon', :sort_order)
                         ON CONFLICT (track, class_level, subject_code, chapter_slug)
                         DO UPDATE SET
                             chapter_title = EXCLUDED.chapter_title,
                             sort_order = EXCLUDED.sort_order;
                     """), {
-                        "track": (r.get("track") or "").strip().lower(),
-                        "class_level": int(r["class_level"]),
-                        "subject_code": (r.get("subject_code") or "").strip().lower(),
-                        "chapter_slug": (r.get("chapter_slug") or "").strip(),
-                        "chapter_title": (r.get("chapter_title") or "").strip(),
-                        "sort_order": int(r.get("sort_order") or 0),
+                        "track": r["track"],
+                        "class_level": r["class_level"],
+                        "subject_code": r["subject_code"],
+                        "chapter_slug": r["chapter_slug"],
+                        "chapter_title": r["chapter_title"],
+                        "sort_order": r["sort_order"],
                     })
-                    inserted += 1
-                except Exception as e:
-                    skipped += 1
-                    if first_error is None:
-                        first_error = str(e)
 
-        # 2) Legacy write path: best-effort only.
-        # Some DBs have old FK constraints on syllabus_chapters. Never let that break canonical seeding.
-        try:
-            with engine.begin() as conn:
-                for r in rows:
-                    try:
-                        # SAVEPOINT so a single legacy failure doesn't abort the whole legacy batch.
-                        with conn.begin_nested():
-                            conn.execute(_t("""
-                                INSERT INTO syllabus_chapters
-                                    (class_num, track, program, subject_slug, chapter_id, chapter_title, order_index, meta_json)
-                                VALUES
-                                    (:class_num, :l_track, :program, :subject_slug, :chapter_id, :chapter_title, :order_index, :meta_json)
-                                ON CONFLICT (class_num, track, program, subject_slug, chapter_id)
-                                DO UPDATE SET
-                                    chapter_title = EXCLUDED.chapter_title,
-                                    order_index = EXCLUDED.order_index,
-                                    meta_json = EXCLUDED.meta_json,
-                                    updated_at = NOW();
-                            """), {
-                                "class_num": int(r["class_level"]),
-                                "l_track": r.get("legacy_track") or TRACK_BOARDS,
-                                "program": r.get("legacy_program") or "",
-                                "subject_slug": r.get("legacy_subject_slug") or "",
-                                "chapter_id": r.get("legacy_chapter_id") or "",
-                                "chapter_title": (r.get("chapter_title") or "").strip(),
-                                "order_index": int(r.get("sort_order") or 0),
-                                "meta_json": r.get("meta_json") or "{}",
-                            })
-                    except Exception as _e:
-                        # ignore legacy errors; canonical already seeded.
-                        if first_error is None:
-                            first_error = str(_e)
-                        continue
-        except Exception as _e:
-            if first_error is None:
-                first_error = str(_e)
+                    # Legacy syllabus_chapters (still used elsewhere in backend)
+                    conn.execute(_t("""
+                        INSERT INTO syllabus_chapters
+                            (class_num, track, program, subject_slug, chapter_id, chapter_title, order_index, meta_json)
+                        VALUES
+                            (:class_num, :l_track, :program, :subject_slug, :chapter_id, :chapter_title, :order_index, :meta_json)
+                        ON CONFLICT (class_num, track, program, subject_slug, chapter_id)
+                        DO UPDATE SET
+                            chapter_title = EXCLUDED.chapter_title,
+                            order_index = EXCLUDED.order_index,
+                            meta_json = EXCLUDED.meta_json,
+                            updated_at = NOW();
+                    """), {
+                        "class_num": r["class_level"],
+                        "l_track": r["legacy_track"],
+                        "program": r["legacy_program"],
+                        "subject_slug": r["legacy_subject_slug"],
+                        "chapter_id": r["legacy_chapter_id"],
+                        "chapter_title": r["chapter_title"],
+                        "order_index": r["sort_order"],
+                        "meta_json": r["meta_json"],
+                    })
+
+                    inserted += 1
+                except Exception:
+                    skipped += 1
 
     # First seed boards from JS
     boards_index: Dict[Tuple[int, str], Dict[str, List[Dict[str, Any]]]] = {}
@@ -477,10 +486,7 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
         derive_from_board("maharashtra", "cet_pcm", cls)
         derive_from_board("maharashtra", "cet_pcb", cls)
 
-    out: Dict[str, Any] = {"ok": True, "inserted": inserted, "skipped": skipped, "seed_files": len(files), "rows": (inserted + skipped)}
-    if first_error:
-        out["first_error"] = first_error
-    return out
+    return {"ok": True, "inserted": inserted, "skipped": skipped, "seed_files": len(files), "rows": (inserted + skipped)}
 
 
 
