@@ -209,6 +209,7 @@ def cost_top_users(
 
 @router.post("/syllabus/seed")
 def admin_seed_syllabus(
+    # Canonical header name (case-insensitive on HTTP, but we enforce a stable alias)
     x_admin_key: str = Header(..., alias="X-Admin-Key"),
     reset: int = Query(0),
 ):
