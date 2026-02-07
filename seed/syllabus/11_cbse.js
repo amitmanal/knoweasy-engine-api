@@ -7,7 +7,7 @@ window.KnowEasySyllabus["11_cbse"] = {
     "board": "cbse",
     "class": "11",
     "academic_year": "2025-26",
-    "source": "CBSE Academic Curriculum 2025-26 (Chemistry 043) + existing file baseline"
+    "source": "user_provided_cbse_11_12_txt + ncert_chapter_lists"
   },
   "subjects": [
     {
@@ -95,6 +95,10 @@ window.KnowEasySyllabus["11_cbse"] = {
           "title": "Chemical Bonding and Molecular Structure"
         },
         {
+          "id": "states_of_matter_gases_and_liquids",
+          "title": "States of Matter: Gases and Liquids"
+        },
+        {
           "id": "thermodynamics",
           "title": "Thermodynamics"
         },
@@ -105,6 +109,18 @@ window.KnowEasySyllabus["11_cbse"] = {
         {
           "id": "redox_reactions",
           "title": "Redox Reactions"
+        },
+        {
+          "id": "hydrogen",
+          "title": "Hydrogen"
+        },
+        {
+          "id": "the_s_block_elements",
+          "title": "The s-Block Elements"
+        },
+        {
+          "id": "the_p_block_elements",
+          "title": "The p-Block Elements"
         },
         {
           "id": "organic_chemistry_some_basic_principles_and_techniques",

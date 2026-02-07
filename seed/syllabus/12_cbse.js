@@ -7,7 +7,7 @@ window.KnowEasySyllabus["12_cbse"] = {
     "board": "cbse",
     "class": "12",
     "academic_year": "2025-26",
-    "source": "CBSE Academic Curriculum 2025-26 (Chemistry 043) + existing file baseline"
+    "source": "user_provided_cbse_11_12_txt + ncert_chapter_lists"
   },
   "subjects": [
     {
@@ -75,6 +75,10 @@ window.KnowEasySyllabus["12_cbse"] = {
       "name": "Chemistry",
       "chapters": [
         {
+          "id": "solid_state",
+          "title": "The Solid State"
+        },
+        {
           "id": "solutions",
           "title": "Solutions"
         },
@@ -85,6 +89,18 @@ window.KnowEasySyllabus["12_cbse"] = {
         {
           "id": "chemical_kinetics",
           "title": "Chemical Kinetics"
+        },
+        {
+          "id": "surface_chemistry",
+          "title": "Surface Chemistry"
+        },
+        {
+          "id": "general_principles_and_processes_of_isolation_of_elements",
+          "title": "General Principles and Processes of Isolation of Elements"
+        },
+        {
+          "id": "the_p_block_elements",
+          "title": "The p-Block Elements"
         },
         {
           "id": "the_d_and_f_block_elements",
@@ -113,6 +129,14 @@ window.KnowEasySyllabus["12_cbse"] = {
         {
           "id": "biomolecules",
           "title": "Biomolecules"
+        },
+        {
+          "id": "polymers",
+          "title": "Polymers"
+        },
+        {
+          "id": "chemistry_in_everyday_life",
+          "title": "Chemistry in Everyday Life"
         }
       ]
     },
