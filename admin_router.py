@@ -27,7 +27,9 @@ from sqlalchemy import text
 from db import _get_engine
 import study_store
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+# Admin endpoints are intentionally namespaced under /api/admin
+# so they are consistent with the rest of the public API surface.
+router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
 def _admin_key() -> str:
