@@ -88,13 +88,6 @@ def _slugify(s: str) -> str:
 
 
 def ensure_tables() -> None:
-    """Create tables used by study/syllabus systems (best-effort).
-
-    Production behavior:
-    - Never crash the app if DB is unavailable.
-    - Self-heal known legacy schema drift for syllabus_map by rebuilding it to the
-      canonical column set used by /api/syllabus.
-    """
     engine = get_engine_safe()
     if not engine:
         logger.warning("study_store: DB unavailable, tables not created")
@@ -102,7 +95,6 @@ def ensure_tables() -> None:
 
     try:
         with engine.begin() as conn:
-            # Legacy syllabus registry (still used by resolve_asset / older study flows)
             conn.execute(_t("""
                 CREATE TABLE IF NOT EXISTS syllabus_chapters (
                     id BIGSERIAL PRIMARY KEY,
@@ -146,103 +138,37 @@ def ensure_tables() -> None:
                 ON chapter_assets (class_num, track, program, subject_slug, chapter_id, asset_type);
             """))
 
-            # --- Canonical syllabus map (used by /api/syllabus) ---
-            required_cols = {
-                "track",
-                "class_level",
-                "subject_code",
-                "chapter_slug",
-                "chapter_title",
-                "content_id",
-                "availability",
-                "sort_order",
-            }
+            conn.execute(_t("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_chapter_asset_key
+                ON chapter_assets (class_num, track, program, subject_slug, chapter_id, asset_type);
+            """))
 
-            exists = conn.execute(_t("SELECT to_regclass('public.syllabus_map');")).scalar()
-            if not exists:
-                conn.execute(_t("""
-                    CREATE TABLE syllabus_map (
-                        id BIGSERIAL PRIMARY KEY,
-                        track TEXT NOT NULL,
-                        class_level INT NOT NULL,
-                        subject_code TEXT NOT NULL,
-                        chapter_slug TEXT NOT NULL,
-                        chapter_title TEXT NOT NULL,
-                        content_id TEXT NOT NULL DEFAULT '',
-                        availability TEXT NOT NULL DEFAULT 'coming_soon',
-                        sort_order INT NOT NULL DEFAULT 0
-                    );
-                """))
-                conn.execute(_t("""
-                    CREATE UNIQUE INDEX IF NOT EXISTS ux_syllabus_map_key
-                    ON syllabus_map (track, class_level, subject_code, chapter_slug);
-                """))
-            else:
-                cols = conn.execute(_t("""
-                    SELECT column_name
-                    FROM information_schema.columns
-                    WHERE table_schema='public' AND table_name='syllabus_map'
-                """)).fetchall()
-                current_cols = {r[0] for r in (cols or [])}
-                if not required_cols.issubset(current_cols):
-                    logger.warning(
-                        "study_store: syllabus_map schema drift detected (have=%s, need=%s). Rebuilding.",
-                        sorted(current_cols), sorted(required_cols)
-                    )
-
-                    conn.execute(_t("""
-                        CREATE TABLE IF NOT EXISTS syllabus_map__v2 (
-                            id BIGSERIAL PRIMARY KEY,
-                            track TEXT NOT NULL,
-                            class_level INT NOT NULL,
-                            subject_code TEXT NOT NULL,
-                            chapter_slug TEXT NOT NULL,
-                            chapter_title TEXT NOT NULL,
-                            content_id TEXT NOT NULL DEFAULT '',
-                            availability TEXT NOT NULL DEFAULT 'coming_soon',
-                            sort_order INT NOT NULL DEFAULT 0
-                        );
-                    """))
-
-                    def _has(col: str) -> bool:
-                        return col in current_cols
-
-                    select_sql = "SELECT "
-                    select_sql += ("track" if _has("track") else "''") + " AS track, "
-                    select_sql += ("class_level" if _has("class_level") else ("class_num" if _has("class_num") else "0")) + " AS class_level, "
-                    select_sql += ("subject_code" if _has("subject_code") else ("subject_slug" if _has("subject_slug") else "'misc'")) + " AS subject_code, "
-                    select_sql += ("chapter_slug" if _has("chapter_slug") else ("chapter_id" if _has("chapter_id") else "''")) + " AS chapter_slug, "
-                    select_sql += ("chapter_title" if _has("chapter_title") else "''") + " AS chapter_title, "
-                    select_sql += ("content_id" if _has("content_id") else "''") + " AS content_id, "
-                    select_sql += ("availability" if _has("availability") else "'coming_soon'") + " AS availability, "
-                    select_sql += ("sort_order" if _has("sort_order") else ("order_index" if _has("order_index") else "0")) + " AS sort_order "
-                    select_sql += "FROM syllabus_map"
-
-                    conn.execute(_t(f"""
-                        INSERT INTO syllabus_map__v2
-                            (track, class_level, subject_code, chapter_slug, chapter_title, content_id, availability, sort_order)
-                        {select_sql}
-                        WHERE COALESCE(chapter_slug, chapter_id, '') <> ''
-                        ON CONFLICT (track, class_level, subject_code, chapter_slug)
-                        DO UPDATE SET
-                            chapter_title = EXCLUDED.chapter_title,
-                            content_id = EXCLUDED.content_id,
-                            availability = EXCLUDED.availability,
-                            sort_order = EXCLUDED.sort_order;
-                    """))
-
-                    conn.execute(_t("DROP TABLE syllabus_map;"))
-                    conn.execute(_t("ALTER TABLE syllabus_map__v2 RENAME TO syllabus_map;"))
-                    conn.execute(_t("""
-                        CREATE UNIQUE INDEX IF NOT EXISTS ux_syllabus_map_key
-                        ON syllabus_map (track, class_level, subject_code, chapter_slug);
-                    """))
+            # Canonical syllabus map (used by /api/syllabus)
+            conn.execute(_t("""
+                CREATE TABLE IF NOT EXISTS syllabus_map (
+                    id BIGSERIAL PRIMARY KEY,
+                    track TEXT NOT NULL,
+                    class_level INT NOT NULL,
+                    subject_code TEXT NOT NULL,
+                    chapter_slug TEXT NOT NULL,
+                    chapter_title TEXT NOT NULL,
+                    content_id TEXT NOT NULL DEFAULT '',
+                    availability TEXT NOT NULL DEFAULT 'coming_soon',
+                    sort_order INT NOT NULL DEFAULT 0
+                );
+            """))
+            conn.execute(_t("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_syllabus_map_key
+                ON syllabus_map (track, class_level, subject_code, chapter_slug);
+            """))
 
             # Non-breaking migrations (add columns if missing)
             conn.execute(_t("""ALTER TABLE syllabus_chapters ADD COLUMN IF NOT EXISTS meta_json TEXT NOT NULL DEFAULT '{}';"""))
             conn.execute(_t("""ALTER TABLE chapter_assets ADD COLUMN IF NOT EXISTS meta_json TEXT NOT NULL DEFAULT '{}';"""))
+
     except Exception as e:
         logger.warning(f"study_store: ensure_tables failed: {e}")
+
 
 def _read_json_from_syllabus_js(fp: Path) -> Optional[Dict[str, Any]]:
     """
@@ -337,14 +263,14 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
 
     inserted = 0
     skipped = 0
-    first_error: Optional[str] = None
+    first_error = None
 
     # Optional full reset (safe for idempotent reseeds)
     if reset:
         try:
             with engine.begin() as conn:
-                conn.execute(_t("TRUNCATE TABLE syllabus_map RESTART IDENTITY CASCADE;"))
-                conn.execute(_t("TRUNCATE TABLE syllabus_chapters RESTART IDENTITY CASCADE;"))
+                conn.execute(_t("TRUNCATE TABLE syllabus_map RESTART IDENTITY;"))
+                conn.execute(_t("TRUNCATE TABLE syllabus_chapters RESTART IDENTITY;"))
         except Exception as e:
             # Don't crash seeding if TRUNCATE fails (permissions / missing table etc.)
             logger.warning(f"study_store: reset truncate failed: {e}")
@@ -425,10 +351,10 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
                     })
 
                     inserted += 1
-                except Exception as ex:
+                except Exception as e:
                     skipped += 1
                     if first_error is None:
-                        first_error = str(ex)
+                        first_error = str(e)
 
     # First seed boards from JS
     boards_index: Dict[Tuple[int, str], Dict[str, List[Dict[str, Any]]]] = {}
@@ -530,10 +456,7 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
         derive_from_board("maharashtra", "cet_pcm", cls)
         derive_from_board("maharashtra", "cet_pcb", cls)
 
-    out = {"ok": True, "inserted": inserted, "skipped": skipped, "seed_files": len(files), "rows": (inserted + skipped)}
-    if first_error and skipped:
-        out["first_error"] = first_error
-    return out
+    return {"ok": True, "inserted": inserted, "skipped": skipped, "first_error": first_error, "seed_files": len(files), "rows": (inserted + skipped)}
 
 
 
@@ -1134,4 +1057,4 @@ def seed_luma_mappings_from_luma_content() -> Dict[str, Any]:
         else:
             skipped += 1
 
-    return {"ok": True, "inserted": inserted, "skipped": skipped}
+    return {"ok": True, "inserted": inserted, "skipped": skipped, "first_error": first_error, "seed_files": len(files)}

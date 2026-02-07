@@ -6,7 +6,6 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import text as _t
 
 from db import get_engine_safe
-import study_store
 
 logger = logging.getLogger("knoweasy-engine-api")
 
@@ -37,12 +36,6 @@ def get_syllabus(
     If subject_code is omitted -> returns board-style syllabus object compatible with frontend scripts:
       { meta: {...}, subjects: [{name, chapters:[{id,title,availability,content_id}]}] }
     """
-    # Ensure syllabus tables exist (and self-heal known schema drift)
-    try:
-        study_store.ensure_tables()
-    except Exception:
-        pass
-
     e = get_engine_safe()
     if not e:
         raise HTTPException(503, {"ok": False, "error": "DB_UNAVAILABLE"})
