@@ -263,20 +263,15 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
 
     inserted = 0
     skipped = 0
-    # capture the first error so operator can fix DB/schema issues quickly
-    first_error: Optional[str] = None
+    first_error: str | None = None
 
     # Optional full reset (safe for idempotent reseeds)
     if reset:
         try:
             with engine.begin() as conn:
-                # Canonical table is always safe to wipe.
                 conn.execute(_t("TRUNCATE TABLE syllabus_map RESTART IDENTITY;"))
-                # Legacy table may have older FK constraints in some DBs. Try, but never block canonical seeding.
-                try:
-                    conn.execute(_t("TRUNCATE TABLE syllabus_chapters RESTART IDENTITY CASCADE;"))
-                except Exception as _e:
-                    logger.warning(f"study_store: reset truncate legacy syllabus_chapters failed: {_e}")
+                # legacy truncate removed: syllabus_chapters may have FK constraints
+                # conn.execute(_t("TRUNCATE TABLE syllabus_chapters RESTART IDENTITY;"))
         except Exception as e:
             # Don't crash seeding if TRUNCATE fails (permissions / missing table etc.)
             logger.warning(f"study_store: reset truncate failed: {e}")
@@ -304,18 +299,23 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
         s_slug = _slugify(s)
         return _subject_map.get(s_slug, _subject_map.get(s, s_slug or "misc"))
 
+    
     def upsert_many(rows: List[Dict[str, Any]]):
         """
-        rows keys:
-          class_level, track, subject_code, chapter_slug, chapter_title, sort_order, meta_json
-          plus legacy keys: program, subject_slug, chapter_id
+        Production-safe seeding.
+
+        ✅ Canonical table used by /api/syllabus: syllabus_map
+        ❌ Legacy table syllabus_chapters is NOT written during seeding because older schemas
+           may contain foreign-key constraints that can abort transactions.
+
+        This function is intentionally idempotent.
         """
         nonlocal inserted, skipped, first_error
 
-        # 1) Canonical write path: ALWAYS succeed or surface the error.
-        with engine.begin() as conn:
-            for r in rows:
-                try:
+        # Use per-row transactions so one bad row never aborts the whole seed run.
+        for r in rows:
+            try:
+                with engine.begin() as conn:
                     conn.execute(_t("""
                         INSERT INTO syllabus_map
                             (track, class_level, subject_code, chapter_slug, chapter_title, content_id, availability, sort_order)
@@ -326,118 +326,19 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
                             chapter_title = EXCLUDED.chapter_title,
                             sort_order = EXCLUDED.sort_order;
                     """), {
-                        "track": (r.get("track") or "").strip().lower(),
-                        "class_level": int(r["class_level"]),
-                        "subject_code": (r.get("subject_code") or "").strip().lower(),
-                        "chapter_slug": (r.get("chapter_slug") or "").strip(),
-                        "chapter_title": (r.get("chapter_title") or "").strip(),
-                        "sort_order": int(r.get("sort_order") or 0),
+                        "track": r["track"],
+                        "class_level": r["class_level"],
+                        "subject_code": r["subject_code"],
+                        "chapter_slug": r["chapter_slug"],
+                        "chapter_title": r["chapter_title"],
+                        "sort_order": r["sort_order"],
                     })
-                    inserted += 1
-                except Exception as e:
-                    skipped += 1
-                    if first_error is None:
-                        first_error = str(e)
+                inserted += 1
+            except Exception as e:
+                skipped += 1
+                if not first_error:
+                    first_error = str(e)
 
-        # 2) Legacy write path: best-effort only.
-        # Some DBs have old FK constraints on syllabus_chapters. Never let that break canonical seeding.
-        try:
-            with engine.begin() as conn:
-                for r in rows:
-                    try:
-                        # SAVEPOINT so a single legacy failure doesn't abort the whole legacy batch.
-                        with conn.begin_nested():
-                            conn.execute(_t("""
-                                INSERT INTO syllabus_chapters
-                                    (class_num, track, program, subject_slug, chapter_id, chapter_title, order_index, meta_json)
-                                VALUES
-                                    (:class_num, :l_track, :program, :subject_slug, :chapter_id, :chapter_title, :order_index, :meta_json)
-                                ON CONFLICT (class_num, track, program, subject_slug, chapter_id)
-                                DO UPDATE SET
-                                    chapter_title = EXCLUDED.chapter_title,
-                                    order_index = EXCLUDED.order_index,
-                                    meta_json = EXCLUDED.meta_json,
-                                    updated_at = NOW();
-                            """), {
-                                "class_num": int(r["class_level"]),
-                                "l_track": r.get("legacy_track") or TRACK_BOARDS,
-                                "program": r.get("legacy_program") or "",
-                                "subject_slug": r.get("legacy_subject_slug") or "",
-                                "chapter_id": r.get("legacy_chapter_id") or "",
-                                "chapter_title": (r.get("chapter_title") or "").strip(),
-                                "order_index": int(r.get("sort_order") or 0),
-                                "meta_json": r.get("meta_json") or "{}",
-                            })
-                    except Exception as _e:
-                        # ignore legacy errors; canonical already seeded.
-                        if first_error is None:
-                            first_error = str(_e)
-                        continue
-        except Exception as _e:
-            if first_error is None:
-                first_error = str(_e)
-
-    # First seed boards from JS
-    boards_index: Dict[Tuple[int, str], Dict[str, List[Dict[str, Any]]]] = {}
-    # key: (class_num, program) -> subject_slug -> list chapters with id/title/order
-    for fp in files:
-        data = _read_json_from_syllabus_js(fp)
-        if not data:
-            continue
-        meta = data.get("meta") or {}
-        class_num = int(str(meta.get("class") or "0") or "0")
-        program = _normalize_program(TRACK_BOARDS, str(meta.get("board") or ""))
-        subjects = data.get("subjects") or []
-        if class_num < 5 or class_num > 12:
-            continue
-        if program not in BOARD_PROGRAMS:
-            continue
-
-        boards_index[(class_num, program)] = {}
-        rows: List[Dict[str, Any]] = []
-
-        for subj in subjects:
-            subj_name = str(subj.get("name") or "").strip()
-            subject_slug = _slugify(subj_name)
-            subject_code = _subject_code(subj_name)
-            chapters = subj.get("chapters") or []
-            boards_index[(class_num, program)][subject_slug] = []
-
-            for i, ch in enumerate(chapters):
-                ch_id = str(ch.get("id") or "").strip()
-                ch_title = str(ch.get("title") or "").strip()
-                if not ch_id or not ch_title:
-                    continue
-
-                # Canonical chapter slug uses chapter_id as-is (frontend uses this)
-                chapter_slug = ch_id
-
-                boards_index[(class_num, program)][subject_slug].append({
-                    "chapter_id": ch_id,
-                    "chapter_title": ch_title,
-                    "order_index": i,
-                    "subject_code": subject_code,
-                })
-
-                rows.append({
-                    "track": program,  # canonical track = board/program (cbse/icse/maharashtra)
-                    "class_level": class_num,
-                    "subject_code": subject_code,
-                    "chapter_slug": chapter_slug,
-                    "chapter_title": ch_title,
-                    "sort_order": i,
-                    "meta_json": json.dumps({"source": fp.name, "meta": meta}, ensure_ascii=False),
-
-                    # legacy
-                    "legacy_track": TRACK_BOARDS,
-                    "legacy_program": program,
-                    "legacy_subject_slug": subject_slug,
-                    "legacy_chapter_id": ch_id,
-                })
-
-        upsert_many(rows)
-
-    # Derive entrance for 11/12
     def derive_from_board(anchor_program: str, entrance_program: str, class_num: int):
         src = boards_index.get((class_num, anchor_program))
         if not src:
@@ -477,10 +378,7 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
         derive_from_board("maharashtra", "cet_pcm", cls)
         derive_from_board("maharashtra", "cet_pcb", cls)
 
-    out: Dict[str, Any] = {"ok": True, "inserted": inserted, "skipped": skipped, "seed_files": len(files), "rows": (inserted + skipped)}
-    if first_error:
-        out["first_error"] = first_error
-    return out
+    return {"ok": True, "inserted": inserted, "skipped": skipped, "seed_files": len(files), "rows": (inserted + skipped), "first_error": first_error}
 
 
 
@@ -1081,4 +979,4 @@ def seed_luma_mappings_from_luma_content() -> Dict[str, Any]:
         else:
             skipped += 1
 
-    return {"ok": True, "inserted": inserted, "skipped": skipped}
+    return {"ok": True, "inserted": inserted, "skipped": skipped, "first_error": first_error}
