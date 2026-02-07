@@ -304,11 +304,23 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
           class_level, track, subject_code, chapter_slug, chapter_title, sort_order, meta_json
           plus legacy keys: program, subject_slug, chapter_id
         """
+        """Upsert canonical syllabus_map first (must succeed).
+
+        Important production nuance:
+        - Many older DBs may have legacy foreign keys on syllabus_chapters.
+        - If we write canonical + legacy in the same transaction, a legacy FK error
+          will abort the transaction and can roll back the canonical insert.
+
+        So we:
+        1) Upsert syllabus_map in its own transaction (authoritative).
+        2) Best-effort upsert syllabus_chapters in a separate transaction.
+           If it fails, we do NOT block syllabus_map.
+        """
         nonlocal inserted, skipped, first_error
-        with engine.begin() as conn:
-            for r in rows:
-                try:
-                    # Canonical syllabus_map (used by /api/syllabus)
+        for r in rows:
+            # 1) Canonical syllabus_map (used by /api/syllabus)
+            try:
+                with engine.begin() as conn:
                     conn.execute(_t("""
                         INSERT INTO syllabus_map
                             (track, class_level, subject_code, chapter_slug, chapter_title, content_id, availability, sort_order)
@@ -326,8 +338,16 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
                         "chapter_title": r["chapter_title"],
                         "sort_order": r["sort_order"],
                     })
+                inserted += 1
+            except Exception as e:
+                skipped += 1
+                if first_error is None:
+                    first_error = str(e)
+                continue
 
-                    # Legacy syllabus_chapters (still used elsewhere in backend)
+            # 2) Legacy syllabus_chapters (best-effort; do not block canonical)
+            try:
+                with engine.begin() as conn:
                     conn.execute(_t("""
                         INSERT INTO syllabus_chapters
                             (class_num, track, program, subject_slug, chapter_id, chapter_title, order_index, meta_json)
@@ -349,12 +369,10 @@ def seed_syllabus_from_packaged_files(seed_dir: Path, reset: bool = False) -> Di
                         "order_index": r["sort_order"],
                         "meta_json": r["meta_json"],
                     })
-
-                    inserted += 1
-                except Exception as e:
-                    skipped += 1
-                    if first_error is None:
-                        first_error = str(e)
+            except Exception as e:
+                # Do not count as skipped (canonical already succeeded)
+                if first_error is None:
+                    first_error = str(e)
 
     # First seed boards from JS
     boards_index: Dict[Tuple[int, str], Dict[str, List[Dict[str, Any]]]] = {}
