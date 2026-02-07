@@ -230,3 +230,35 @@ def admin_seed_syllabus(
             {"ok": False, "error": str(e), "trace": traceback.format_exc()},
             status_code=500,
         )
+
+
+
+@router.get("/syllabus/seed_files")
+def admin_list_seed_files(
+    x_admin_key: str = Header(..., alias="X-Admin-Key"),
+):
+    """List packaged syllabus seed files present on the server.
+
+    This helps verify whether CBSE/ICSE/Maharashtra/Entrance seed packs are actually deployed.
+    """
+    _require_admin(x_admin_key)
+    seed_dir = Path(__file__).resolve().parent / "seed" / "syllabus"
+    try:
+        files = []
+        if seed_dir.exists():
+            for p in sorted(seed_dir.glob("*.js")):
+                files.append({
+                    "name": p.name,
+                    "bytes": p.stat().st_size,
+                })
+        return JSONResponse({
+            "ok": True,
+            "seed_dir": str(seed_dir),
+            "count": len(files),
+            "files": files,
+        })
+    except Exception as e:
+        return JSONResponse(
+            {"ok": False, "error": str(e), "trace": traceback.format_exc()},
+            status_code=500,
+        )
