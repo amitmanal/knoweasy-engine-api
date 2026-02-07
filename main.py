@@ -19,6 +19,11 @@ from payments_router import router as payments_router
 from billing_router import router as billing_router
 from admin_router import router as admin_router
 from learning_router import router as learning_router
+from luma_router import router as luma_router
+from study_router import router as study_router
+from assets_router import router as assets_router
+from syllabus_router import router as syllabus_router
+from teacher_admin_router import router as teacher_admin_router
 import phase1_store
 from redis_store import redis_health
 from db import db_health, db_init
@@ -127,6 +132,11 @@ app.include_router(payments_router)
 app.include_router(billing_router)
 app.include_router(admin_router)
 app.include_router(learning_router)
+app.include_router(luma_router)
+app.include_router(study_router)
+app.include_router(assets_router)
+app.include_router(syllabus_router)
+app.include_router(teacher_admin_router)
 
 # -----------------------------
 # Razorpay webhook (optional)
@@ -232,6 +242,13 @@ def _startup() -> None:
 
         payments_store.ensure_tables()
         billing_store.ensure_tables()
+    except Exception:
+        pass
+
+    # Luma tables (best-effort)
+    try:
+        import luma_store
+        luma_store.ensure_tables()
     except Exception:
         pass
 
