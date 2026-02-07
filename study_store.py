@@ -566,6 +566,9 @@ def resolve_asset(
 
     asset_type = (asset_type or "").strip().lower()
     track = (track or "").strip().lower()
+    # DB stores "boards" while public API uses "board"
+    if track == "board":
+        track = "boards"
     program = (program or "").strip().lower()
     subject_slug_in = (subject_slug or "").strip().lower()
     chapter_id_in = (chapter_id or "").strip().lower()
@@ -614,6 +617,34 @@ def resolve_asset(
             "chapter_variants": chapter_variants,
         },
     }
+
+    chapter_exists = False
+
+
+# === Existence check against syllabus_chapters (DB truth) ===
+# If the chapter exists in syllabus_chapters but no assets are published yet,
+# return a clean coming_soon instead of chapter_not_found.
+try:
+    with engine.begin() as conn:
+        ch_row = conn.execute(_t(
+            "SELECT chapter_title "
+            "FROM syllabus_chapters "
+            "WHERE track = :track AND program = :program AND class_num = :class_num "
+            "AND subject_slug = ANY(:subjects) AND chapter_id = ANY(:chapters) "
+            "AND is_active = true "
+            "LIMIT 1"
+        ), {
+            "track": track,
+            "program": program,
+            "class_num": int(class_num),
+            "subjects": subject_variants,
+            "chapters": chapter_variants,
+        }).mappings().first()
+    if ch_row:
+        chapter_exists = True
+        debug_info["syllabus_chapters_match"] = {"chapter_title": ch_row.get("chapter_title")}
+except Exception as e:
+    debug_info["syllabus_chapters_error"] = str(e)
 
     # === Phase 2 canonical resolver (syllabus_map -> content_id -> content_items) ===
     # If syllabus_map exists, it is the source of truth for chapter -> content_id.
@@ -787,8 +818,10 @@ def resolve_asset(
                     pass
 
                 if not row:
-                    if not chapter_row:
+                    if (not chapter_row) and (not chapter_exists):
                         return {"ok": False, "status": "chapter_not_found", "debug": debug_info}
+                    if chapter_exists and (not chapter_row):
+                        return {"ok": False, "status": "coming_soon", "debug": debug_info}
                     return {"ok": False, "status": "asset_not_found", "debug": debug_info}
 
             if chapter_row and chapter_row.get("chapter_title"):
