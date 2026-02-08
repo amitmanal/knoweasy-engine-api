@@ -646,219 +646,219 @@ def resolve_asset(
     except Exception as e:
         debug_info["syllabus_chapters_error"] = str(e)
 
-        # === Phase 2 canonical resolver (syllabus_map -> content_id -> content_items) ===
-        # If syllabus_map exists, it is the source of truth for chapter -> content_id.
-        try:
-            with engine.begin() as conn:
-                row = conn.execute(_t("""
-                    SELECT content_id, chapter_title, availability
-                    FROM syllabus_map
-                    WHERE track = :track
-                      AND class_level = :class_level
-                      AND subject_code = ANY(:subjects)
-                      AND chapter_slug = ANY(:chapters)
-                    LIMIT 1;
-                """), {
-                    "track": track,
-                    "class_level": int(class_num),
-                    "subjects": subject_variants,
-                    "chapters": chapter_variants,
-                }).mappings().first()
+    # === Phase 2 canonical resolver (syllabus_map -> content_id -> content_items) ===
+    # If syllabus_map exists, it is the source of truth for chapter -> content_id.
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(_t("""
+                SELECT content_id, chapter_title, availability
+                FROM syllabus_map
+                WHERE track = :track
+                  AND class_level = :class_level
+                  AND subject_code = ANY(:subjects)
+                  AND chapter_slug = ANY(:chapters)
+                LIMIT 1;
+            """), {
+                "track": track,
+                "class_level": int(class_num),
+                "subjects": subject_variants,
+                "chapters": chapter_variants,
+            }).mappings().first()
 
-            if row and row.get("content_id"):
-                content_id = (row.get("content_id") or "").strip()
-                availability = (row.get("availability") or "available").strip().lower()
-                debug_info["syllabus_map_match"] = {
-                    "content_id": content_id,
-                    "availability": availability,
-                    "chapter_title": row.get("chapter_title"),
-                }
+        if row and row.get("content_id"):
+            content_id = (row.get("content_id") or "").strip()
+            availability = (row.get("availability") or "available").strip().lower()
+            debug_info["syllabus_map_match"] = {
+                "content_id": content_id,
+                "availability": availability,
+                "chapter_title": row.get("chapter_title"),
+            }
 
-                if availability not in ("available", "published"):
-                    return {"ok": False, "status": "coming_soon", "debug": debug_info}
+            if availability not in ("available", "published"):
+                return {"ok": False, "status": "coming_soon", "debug": debug_info}
 
-                if not luma_get_content:
-                    debug_info["error"] = "luma_store_unavailable"
-                    return {"ok": False, "status": "luma_store_unavailable", "debug": debug_info}
+            if not luma_get_content:
+                debug_info["error"] = "luma_store_unavailable"
+                return {"ok": False, "status": "luma_store_unavailable", "debug": debug_info}
 
-                content_obj = luma_get_content(content_id)
-                if not content_obj:
-                    debug_info["error"] = "content_not_found_for_content_id"
-                    return {"ok": False, "status": "content_not_found", "debug": debug_info}
+            content_obj = luma_get_content(content_id)
+            if not content_obj:
+                debug_info["error"] = "content_not_found_for_content_id"
+                return {"ok": False, "status": "content_not_found", "debug": debug_info}
 
-                # Return in the same shape as /api/study/asset/get expects.
-                return {
-                    "ok": True,
-                    "status": "resolved",
-                    # Provide stable top-level fields consumed by study_router.py
-                    "chapter_title": row.get("chapter_title") or chapter_title,
-                    "luma_content": content_obj,
-                    "asset": {
-                        "ref_kind": "db",
-                        "ref_value": content_id,
-                        "asset_type": asset_type,
-                        "content": content_obj,
-                    },
-                    "debug": debug_info,
-                }
-        except Exception as e:
-            # Never crash resolve due to canonical lookup; fall through to legacy resolver
-            debug_info["syllabus_map_error"] = str(e)
+            # Return in the same shape as /api/study/asset/get expects.
+            return {
+                "ok": True,
+                "status": "resolved",
+                # Provide stable top-level fields consumed by study_router.py
+                "chapter_title": row.get("chapter_title") or chapter_title,
+                "luma_content": content_obj,
+                "asset": {
+                    "ref_kind": "db",
+                    "ref_value": content_id,
+                    "asset_type": asset_type,
+                    "content": content_obj,
+                },
+                "debug": debug_info,
+            }
+    except Exception as e:
+        # Never crash resolve due to canonical lookup; fall through to legacy resolver
+        debug_info["syllabus_map_error"] = str(e)
 
 
-        # 1) best-effort chapter metadata
-        chapter_row = None
-        try:
-            with engine.begin() as conn:
-                chapter_row = conn.execute(_t("""
-                    SELECT class_num, track, program, subject_slug, chapter_id, chapter_title, chapter_order
-                    FROM syllabus_chapters
-                    WHERE class_num = :class_num
-                      AND track = :track
-                      AND program = :program
-                      AND subject_slug = ANY(:subjects)
-                      AND chapter_id = ANY(:chapters)
-                    LIMIT 1;
-                """), {
-                    "class_num": int(class_num),
-                    "track": track,
-                    "program": program,
-                    "subjects": subject_variants,
-                    "chapters": chapter_variants,
-                }).mappings().first()
-        except Exception:
-            chapter_row = None
-
-        if not chapter_row and chapter_title_in:
-            chapter_row = {
+    # 1) best-effort chapter metadata
+    chapter_row = None
+    try:
+        with engine.begin() as conn:
+            chapter_row = conn.execute(_t("""
+                SELECT class_num, track, program, subject_slug, chapter_id, chapter_title, chapter_order
+                FROM syllabus_chapters
+                WHERE class_num = :class_num
+                  AND track = :track
+                  AND program = :program
+                  AND subject_slug = ANY(:subjects)
+                  AND chapter_id = ANY(:chapters)
+                LIMIT 1;
+            """), {
                 "class_num": int(class_num),
                 "track": track,
                 "program": program,
+                "subjects": subject_variants,
+                "chapters": chapter_variants,
+            }).mappings().first()
+    except Exception:
+        chapter_row = None
+
+    if not chapter_row and chapter_title_in:
+        chapter_row = {
+            "class_num": int(class_num),
+            "track": track,
+            "program": program,
+            "subject_slug": subject_slug_in,
+            "chapter_id": chapter_id_in,
+            "chapter_title": chapter_title_in,
+            "chapter_order": None,
+        }
+
+    if asset_type not in ("luma", "notes", "diagrams", "mindmap", "pyqs", "mcq"):
+        return {"ok": False, "status": "invalid_asset_type"}
+
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(_t("""
+                SELECT asset_type, status, ref_kind, ref_value, meta_json, updated_at
+                FROM chapter_assets
+                WHERE class_num = :class_num
+                  AND track = :track
+                  AND program = :program
+                  AND subject_slug = ANY(:subjects)
+                  AND chapter_id = ANY(:chapters)
+                  AND asset_type = :asset_type
+                LIMIT 1;
+            """), {
+                "class_num": int(class_num),
+                "track": track,
+                "program": program,
+                "subjects": subject_variants,
+                "chapters": chapter_variants,
+                "asset_type": asset_type,
+            }).mappings().first()
+            if not row:
+                # Fallback (no explicit chapter_assets mapping):
+                # Try to locate a published Luma content item using its metadata (class/board/subject + chapter match).
+                # This prevents "Coming Soon" when content exists but mapping hasn't been seeded yet.
+                try:
+                    if callable(luma_list_content):
+                        # Canonicalize board/program
+                        prog = program
+                        b = (prog or "").strip().lower()
+                        if track == TRACK_BOARDS:
+                            canonical_board = "CBSE" if b == "cbse" else ("ICSE" if b == "icse" else ("Maharashtra" if b in ("mh","msb","maharashtra") else (prog or "").upper()))
+                        else:
+                            canonical_board = "NEET" if b == "neet" else ("JEE" if b.startswith("jee") else ("CET" if b.startswith("cet") else (prog or "").upper()))
+
+                        s = (subject_slug_in or "").strip().lower()
+                        canonical_subject = "Physics" if s == "physics" else ("Chemistry" if s == "chemistry" else ("Biology" if s in ("biology","bio") else ("Math" if s in ("math","mathematics") else subject_slug)))
+
+                        candidates = luma_list_content(
+                            class_level=int(class_num),
+                            board=str(canonical_board),
+                            subject=str(canonical_subject),
+                            limit=100,
+                        ) or []
+
+                        want_slug = _slugify(chapter_title_in or chapter_id_in).replace("_", "-")
+                        want_slug2 = _slugify(chapter_id_in).replace("_", "-")
+
+                        def _cand_slug(c: Dict[str, Any]) -> str:
+                            md = c.get("metadata") or {}
+                            bp = c.get("blueprint") or {}
+                            # prefer explicit chapter id/title in metadata
+                            base = (md.get("chapter_id") or md.get("chapter") or bp.get("chapter") or bp.get("title") or c.get("title") or c.get("id") or "")
+                            return _slugify(str(base)).replace("_", "-")
+
+                        hit = None
+                        for c in candidates:
+                            cs = _cand_slug(c)
+                            if cs == want_slug or cs == want_slug2:
+                                hit = c
+                                break
+
+                        if hit and hit.get("id"):
+                            # synthetic asset row
+                            row = {
+                                "asset_type": asset_type,
+                                "status": "published",
+                                "ref_kind": "db",
+                                "ref_value": hit.get("id"),
+                                "meta_json": "{}",
+                                "updated_at": None,
+                            }
+                except Exception:
+                    pass
+
+                if not row:
+                    if (not chapter_row) and (not chapter_exists):
+                        return {"ok": False, "status": "chapter_not_found", "debug": debug_info}
+                    if chapter_exists and (not chapter_row):
+                        return {"ok": False, "status": "coming_soon", "debug": debug_info}
+                    return {"ok": False, "status": "asset_not_found", "debug": debug_info}
+
+            if chapter_row and chapter_row.get("chapter_title"):
+                chapter_title_final = chapter_row["chapter_title"]
+            elif chapter_title_in:
+                chapter_title_final = chapter_title_in
+            else:
+                chapter_title_final = chapter_id_in.replace("-", " ").replace("_", " ").title()
+
+            payload: "Dict[str, Any]" = {
+                "ok": True,
+                "status": "ok",
+                "track": track,
+                "program": program,
+                "class_num": int(class_num),
                 "subject_slug": subject_slug_in,
                 "chapter_id": chapter_id_in,
-                "chapter_title": chapter_title_in,
-                "chapter_order": None,
+                "chapter_title": chapter_title_final,
+                "asset": dict(row),
+                "debug": debug_info,
             }
 
-        if asset_type not in ("luma", "notes", "diagrams", "mindmap", "pyqs", "mcq"):
-            return {"ok": False, "status": "invalid_asset_type"}
+            if asset_type == "luma" and row.get("ref_kind") == "db":
+                content_id = row.get("ref_value")
+                # Attach canonical content (best-effort). Do NOT fail resolution if content is missing;
+                # frontend can still use content_id to attempt /api/luma/content/{id}.
+                try:
+                    c = get_luma_content_by_id(str(content_id or ""))
+                    if c.get("ok"):
+                        payload["luma_content"] = c.get("content") or c.get("luma_content")
+                except Exception:
+                    pass
 
-        try:
-            with engine.begin() as conn:
-                row = conn.execute(_t("""
-                    SELECT asset_type, status, ref_kind, ref_value, meta_json, updated_at
-                    FROM chapter_assets
-                    WHERE class_num = :class_num
-                      AND track = :track
-                      AND program = :program
-                      AND subject_slug = ANY(:subjects)
-                      AND chapter_id = ANY(:chapters)
-                      AND asset_type = :asset_type
-                    LIMIT 1;
-                """), {
-                    "class_num": int(class_num),
-                    "track": track,
-                    "program": program,
-                    "subjects": subject_variants,
-                    "chapters": chapter_variants,
-                    "asset_type": asset_type,
-                }).mappings().first()
-                if not row:
-                    # Fallback (no explicit chapter_assets mapping):
-                    # Try to locate a published Luma content item using its metadata (class/board/subject + chapter match).
-                    # This prevents "Coming Soon" when content exists but mapping hasn't been seeded yet.
-                    try:
-                        if callable(luma_list_content):
-                            # Canonicalize board/program
-                            prog = program
-                            b = (prog or "").strip().lower()
-                            if track == TRACK_BOARDS:
-                                canonical_board = "CBSE" if b == "cbse" else ("ICSE" if b == "icse" else ("Maharashtra" if b in ("mh","msb","maharashtra") else (prog or "").upper()))
-                            else:
-                                canonical_board = "NEET" if b == "neet" else ("JEE" if b.startswith("jee") else ("CET" if b.startswith("cet") else (prog or "").upper()))
-
-                            s = (subject_slug_in or "").strip().lower()
-                            canonical_subject = "Physics" if s == "physics" else ("Chemistry" if s == "chemistry" else ("Biology" if s in ("biology","bio") else ("Math" if s in ("math","mathematics") else subject_slug)))
-
-                            candidates = luma_list_content(
-                                class_level=int(class_num),
-                                board=str(canonical_board),
-                                subject=str(canonical_subject),
-                                limit=100,
-                            ) or []
-
-                            want_slug = _slugify(chapter_title_in or chapter_id_in).replace("_", "-")
-                            want_slug2 = _slugify(chapter_id_in).replace("_", "-")
-
-                            def _cand_slug(c: Dict[str, Any]) -> str:
-                                md = c.get("metadata") or {}
-                                bp = c.get("blueprint") or {}
-                                # prefer explicit chapter id/title in metadata
-                                base = (md.get("chapter_id") or md.get("chapter") or bp.get("chapter") or bp.get("title") or c.get("title") or c.get("id") or "")
-                                return _slugify(str(base)).replace("_", "-")
-
-                            hit = None
-                            for c in candidates:
-                                cs = _cand_slug(c)
-                                if cs == want_slug or cs == want_slug2:
-                                    hit = c
-                                    break
-
-                            if hit and hit.get("id"):
-                                # synthetic asset row
-                                row = {
-                                    "asset_type": asset_type,
-                                    "status": "published",
-                                    "ref_kind": "db",
-                                    "ref_value": hit.get("id"),
-                                    "meta_json": "{}",
-                                    "updated_at": None,
-                                }
-                    except Exception:
-                        pass
-
-                    if not row:
-                        if (not chapter_row) and (not chapter_exists):
-                            return {"ok": False, "status": "chapter_not_found", "debug": debug_info}
-                        if chapter_exists and (not chapter_row):
-                            return {"ok": False, "status": "coming_soon", "debug": debug_info}
-                        return {"ok": False, "status": "asset_not_found", "debug": debug_info}
-
-                if chapter_row and chapter_row.get("chapter_title"):
-                    chapter_title_final = chapter_row["chapter_title"]
-                elif chapter_title_in:
-                    chapter_title_final = chapter_title_in
-                else:
-                    chapter_title_final = chapter_id_in.replace("-", " ").replace("_", " ").title()
-
-                payload: "Dict[str, Any]" = {
-                    "ok": True,
-                    "status": "ok",
-                    "track": track,
-                    "program": program,
-                    "class_num": int(class_num),
-                    "subject_slug": subject_slug_in,
-                    "chapter_id": chapter_id_in,
-                    "chapter_title": chapter_title_final,
-                    "asset": dict(row),
-                    "debug": debug_info,
-                }
-
-                if asset_type == "luma" and row.get("ref_kind") == "db":
-                    content_id = row.get("ref_value")
-                    # Attach canonical content (best-effort). Do NOT fail resolution if content is missing;
-                    # frontend can still use content_id to attempt /api/luma/content/{id}.
-                    try:
-                        c = get_luma_content_by_id(str(content_id or ""))
-                        if c.get("ok"):
-                            payload["luma_content"] = c.get("content") or c.get("luma_content")
-                    except Exception:
-                        pass
-
-                return payload
-        except Exception as e:
-            logger.warning(f"study_store: resolve_asset failed: {e}")
-            return {"ok": False, "status": "error"}
+            return payload
+    except Exception as e:
+        logger.warning(f"study_store: resolve_asset failed: {e}")
+        return {"ok": False, "status": "error"}
 
 
 def get_luma_content_by_id(content_id: str) -> Dict[str, Any]:
