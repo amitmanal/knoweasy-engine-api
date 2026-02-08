@@ -15,9 +15,7 @@ Queries ai_usage_logs directly.
 from __future__ import annotations
 
 import os
-import traceback
 from typing import Any, Dict, List, Optional
-from pathlib import Path
 
 from fastapi import APIRouter, Header, Query
 from fastapi.encoders import jsonable_encoder
@@ -25,11 +23,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from db import _get_engine
-import study_store
 
-# Admin endpoints are intentionally namespaced under /api/admin
-# so they are consistent with the rest of the public API surface.
-router = APIRouter(prefix="/api/admin", tags=["admin"])
+router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 def _admin_key() -> str:
@@ -206,61 +201,4 @@ def cost_top_users(
         return JSONResponse(
             status_code=200,
             content={"ok": False, "error": "QUERY_FAILED", "message": str(ex)},
-        )
-
-
-@router.post("/syllabus/seed")
-def admin_seed_syllabus(
-    x_admin_key: str = Header(..., alias="X-Admin-Key"),
-    reset: int = Query(0),
-):
-    """Seed syllabus_map and syllabus_chapters from packaged seed/syllabus/*.js files.
-
-    Usage:
-      POST /admin/syllabus/seed (no body)
-      Optional: ?reset=1 to wipe syllabus tables before seeding.
-    """
-    _require_admin(x_admin_key)
-
-    try:
-        seed_dir = Path(__file__).resolve().parent / "seed" / "syllabus"
-        result = study_store.seed_syllabus_from_packaged_files(seed_dir, reset=bool(reset))
-        return JSONResponse({"ok": True, "result": result, "seed_dir": str(seed_dir)})
-    except Exception as e:
-        # Internal-only endpoint: return error details to help debugging
-        return JSONResponse(
-            {"ok": False, "error": str(e), "trace": traceback.format_exc()},
-            status_code=500,
-        )
-
-
-
-@router.get("/syllabus/seed_files")
-def admin_list_seed_files(
-    x_admin_key: str = Header(..., alias="X-Admin-Key"),
-):
-    """List packaged syllabus seed files present on the server.
-
-    This helps verify whether CBSE/ICSE/Maharashtra/Entrance seed packs are actually deployed.
-    """
-    _require_admin(x_admin_key)
-    seed_dir = Path(__file__).resolve().parent / "seed" / "syllabus"
-    try:
-        files = []
-        if seed_dir.exists():
-            for p in sorted(seed_dir.glob("*.js")):
-                files.append({
-                    "name": p.name,
-                    "bytes": p.stat().st_size,
-                })
-        return JSONResponse({
-            "ok": True,
-            "seed_dir": str(seed_dir),
-            "count": len(files),
-            "files": files,
-        })
-    except Exception as e:
-        return JSONResponse(
-            {"ok": False, "error": str(e), "trace": traceback.format_exc()},
-            status_code=500,
         )

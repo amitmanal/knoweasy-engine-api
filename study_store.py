@@ -331,7 +331,7 @@ def resolve_asset(*, track: str, program: str, class_num: int, subject_slug: str
             ch = conn.execute(_t(
                 "SELECT chapter_title FROM syllabus_chapters "
                 "WHERE track=:t AND program=:p AND class_num=:c "
-                "AND subject_slug=ANY(:sv) AND chapter_id=ANY(:cv) AND is_active=true LIMIT 1"
+                "AND subject_slug = ANY(:sv::text[]) AND chapter_id = ANY(:cv::text[]) AND is_active=true LIMIT 1"
             ), {"t": track_db, "p": program_n, "c": int(class_num),
                 "sv": subject_variants, "cv": chapter_variants}).mappings().first()
         if ch:
@@ -346,7 +346,7 @@ def resolve_asset(*, track: str, program: str, class_num: int, subject_slug: str
             ci = conn.execute(_t(
                 "SELECT content_id, status FROM content_items "
                 "WHERE track=:t AND program=:p AND class_num=:c "
-                "AND subject_slug=ANY(:sv) AND chapter_id=ANY(:cv) LIMIT 1"
+                "AND subject_slug = ANY(:sv::text[]) AND chapter_id = ANY(:cv::text[]) LIMIT 1"
             ), {"t": track_db, "p": program_n, "c": int(class_num),
                 "sv": subject_variants, "cv": chapter_variants}).mappings().first()
         if ci:

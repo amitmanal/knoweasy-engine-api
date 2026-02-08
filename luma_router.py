@@ -34,12 +34,14 @@ async def _get_user_id(authorization: str = Header(None)) -> Optional[int]:
     if not authorization:
         return None
     try:
-        from auth_utils import decode_token
         if not authorization.startswith("Bearer "):
             return None
-        tok = authorization.split(" ", 1)[1]
-        payload = decode_token(tok)
-        return int(payload["sub"]) if payload and "sub" in payload else None
+        tok = authorization.split(" ", 1)[1].strip()
+        from auth_store import session_user
+        u = session_user(tok)
+        if u and u.get("id"):
+            return int(u["id"])
+        return None
     except Exception:
         return None
 
@@ -95,8 +97,21 @@ async def get_luma_content(
         }
 
     url = luma_asset.get("url") or ""
-    if not url and luma_asset.get("object_key"):
-        url = f"{R2_PUBLIC_BASE}/{luma_asset['object_key']}" if R2_PUBLIC_BASE else ""
+    obj_key = luma_asset.get("object_key") or ""
+    storage = (luma_asset.get("storage") or "").lower()
+
+    if not url and obj_key:
+        if R2_PUBLIC_BASE:
+            url = f"{R2_PUBLIC_BASE}/{obj_key}"
+        elif storage == "r2":
+            # Generate presigned URL for R2 objects
+            try:
+                from r2_client import presign_get_object
+                url = presign_get_object(object_key=obj_key)
+            except Exception:
+                url = ""
+        elif storage == "db":
+            url = f"/api/assets/blob?content_id={cid}&asset_type=luma_json"
 
     return {
         "ok": True,
@@ -126,7 +141,7 @@ async def save_luma_progress(req: dict, authorization: str = Header(None)):
         raise HTTPException(503, "Database unavailable")
 
     try:
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             conn.execute(text("""
                 INSERT INTO luma_progress (user_id, content_id, section_index, card_index, completed, time_spent_sec, bookmarks)
                 VALUES (:uid, :cid, :si, :ci, :done, :ts, :bm)
@@ -146,7 +161,6 @@ async def save_luma_progress(req: dict, authorization: str = Header(None)):
                 "ts": req.get("time_spent_sec", 0),
                 "bm": json.dumps(req.get("bookmarks", [])),
             })
-            conn.commit()
         return {"ok": True}
     except Exception as e:
         logger.error(f"Save luma progress error: {e}")
@@ -196,7 +210,7 @@ def ensure_tables():
     if not engine:
         return
     try:
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS luma_progress (
                     id SERIAL PRIMARY KEY,
@@ -212,7 +226,6 @@ def ensure_tables():
                     UNIQUE(user_id, content_id)
                 )
             """))
-            conn.commit()
         logger.info("luma_progress table ready")
     except Exception as e:
         logger.warning(f"luma_progress table setup: {e}")

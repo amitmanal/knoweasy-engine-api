@@ -66,9 +66,6 @@ logger = logging.getLogger("knoweasy-engine-api")
 ENV = _env("ENV", _env("APP_ENV", "production"))
 DEBUG = _env_bool("DEBUG", False)
 
-SERVICE_NAME = "knoweasy-engine-api"
-SERVICE_VERSION = "v2.0"
-
 HOST = _env("HOST", "0.0.0.0")
 PORT = _env_int("PORT", 10000)
 UVICORN_WORKERS = _env_int("UVICORN_WORKERS", 1)
@@ -151,3 +148,21 @@ if _origins_env is None or str(_origins_env).strip() == "":
         ALLOWED_ORIGINS = ["*"]
 else:
     ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", default=[])
+
+
+# -----------------------------
+# service identity
+# -----------------------------
+SERVICE_NAME = "knoweasy-engine-api"
+SERVICE_VERSION = "v2.1"
+
+
+# -----------------------------
+# R2 (Cloudflare) object storage
+# -----------------------------
+R2_ENDPOINT = _env("R2_ENDPOINT", "")
+R2_ACCESS_KEY_ID = _env("R2_ACCESS_KEY_ID", "")
+R2_SECRET_ACCESS_KEY = _env("R2_SECRET_ACCESS_KEY", "")
+R2_BUCKET_NAME = _env("R2_BUCKET_NAME", "knoweasy-prod")
+R2_SIGNED_URL_EXP_SECONDS = _env_int("R2_SIGNED_URL_EXP_SECONDS", 120)
+R2_REGION = _env("R2_REGION", "auto")

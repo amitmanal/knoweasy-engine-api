@@ -70,18 +70,6 @@ def _clean_sslmode(raw: Optional[str]) -> Optional[str]:
 _ENGINE: Optional[Engine] = None
 
 
-def get_engine_safe() -> Optional[Engine]:
-    """Best-effort public engine accessor for other modules.
-
-    Some modules (e.g., luma_store) import get_engine_safe from db.
-    Keep this as a thin, non-throwing wrapper.
-    """
-    try:
-        return _get_engine()
-    except Exception:
-        return None
-
-
 def _get_engine() -> Optional[Engine]:
     global _ENGINE
 
@@ -385,7 +373,15 @@ def db_log_ai_usage(event: dict) -> None:
         return
 
 
-__all__ = ["db_init", "db_health", "db_log_solve", "db_log_ai_usage"]
+__all__ = ["db_init", "db_health", "db_log_solve", "db_log_ai_usage", "get_engine_safe"]
+
+
+def get_engine_safe() -> Optional[Engine]:
+    """Best-effort public engine accessor for other modules. Never raises."""
+    try:
+        return _get_engine()
+    except Exception:
+        return None
 
 
 
