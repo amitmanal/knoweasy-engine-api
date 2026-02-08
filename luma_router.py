@@ -3,7 +3,7 @@ LUMA ROUTER v2 — Serves chapter learning JSONs
 Replaces: luma_router.py, luma_store.py, luma_schemas.py, luma_config.py
 
 Endpoints:
-  GET  /api/luma/content   — Fetch Luma JSON for a chapter (by content_id or chapter params)
+  GET  /api/luma/content   — Fetch Luma JSON for a chapter
   POST /api/luma/progress  — Save user progress (authenticated)
   GET  /api/luma/progress   — Get user progress (authenticated)
 """
@@ -11,20 +11,24 @@ from __future__ import annotations
 import json, logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Header, Query
+from sqlalchemy import text
+
+import os
+
+try:
+    from db import get_engine_safe
+except ImportError:
+    def get_engine_safe():
+        return None
+
 from study_store import resolve_asset, get_active_content_assets
-from db import get_pool
-from config import R2_PUBLIC_BASE
+
+R2_PUBLIC_BASE = os.getenv("R2_PUBLIC_BASE", "")
 
 logger = logging.getLogger("knoweasy-engine-api")
 router = APIRouter(prefix="/api/luma", tags=["luma"])
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
-
-def _track_api_to_db(track: str) -> str:
-    """Normalize API track to DB track."""
-    if track in ("board", "boards"):
-        return "boards"
-    return track  # entrance stays entrance
 
 async def _get_user_id(authorization: str = Header(None)) -> Optional[int]:
     if not authorization:
@@ -51,18 +55,11 @@ async def get_luma_content(
     chapter_id: Optional[str] = None,
 ):
     """
-    Returns Luma JSON for a chapter.
-    
-    Priority:
-      1. If content_id given → look up directly
-      2. If chapter params given → resolve content_id first
-    
-    Returns the luma_json asset URL or inline JSON if stored in DB.
+    Returns Luma JSON URL for a chapter.
+    Priority: content_id → resolve from chapter params.
     """
-    # Step 1: Resolve content_id
     cid = content_id
     if not cid and chapter_id:
-        # Use resolve_asset to find content
         result = resolve_asset(
             track=track or "board",
             program=program or "cbse",
@@ -72,7 +69,7 @@ async def get_luma_content(
         )
         if result and result.get("ok"):
             cid = result.get("content_id")
-    
+
     if not cid or cid == "coming-soon":
         return {
             "ok": False,
@@ -81,7 +78,7 @@ async def get_luma_content(
             "chapter_id": chapter_id,
         }
 
-    # Step 2: Get luma_json asset
+    # Find luma_json asset
     assets = get_active_content_assets(cid)
     luma_asset = None
     for a in assets:
@@ -97,7 +94,6 @@ async def get_luma_content(
             "message": "Luma learning content not yet available for this chapter.",
         }
 
-    # Step 3: Return URL to JSON
     url = luma_asset.get("url") or ""
     if not url and luma_asset.get("object_key"):
         url = f"{R2_PUBLIC_BASE}/{luma_asset['object_key']}" if R2_PUBLIC_BASE else ""
@@ -116,11 +112,7 @@ async def get_luma_content(
 # ─── POST /api/luma/progress ─────────────────────────────────────────────────
 
 @router.post("/progress")
-async def save_luma_progress(
-    req: dict,
-    authorization: str = Header(None),
-):
-    """Save user's Luma learning progress for a chapter."""
+async def save_luma_progress(req: dict, authorization: str = Header(None)):
     user_id = await _get_user_id(authorization)
     if not user_id:
         raise HTTPException(401, "Unauthorized")
@@ -129,34 +121,32 @@ async def save_luma_progress(
     if not content_id:
         raise HTTPException(400, "content_id required")
 
-    pool = get_pool()
-    if not pool:
+    engine = get_engine_safe()
+    if not engine:
         raise HTTPException(503, "Database unavailable")
 
     try:
-        with pool.getconn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO luma_progress (user_id, content_id, section_index, card_index, completed, time_spent_sec, bookmarks)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id, content_id) DO UPDATE SET
-                        section_index = EXCLUDED.section_index,
-                        card_index = EXCLUDED.card_index,
-                        completed = EXCLUDED.completed,
-                        time_spent_sec = luma_progress.time_spent_sec + EXCLUDED.time_spent_sec,
-                        bookmarks = EXCLUDED.bookmarks,
-                        updated_at = NOW()
-                """, (
-                    user_id,
-                    content_id,
-                    req.get("section_index", 0),
-                    req.get("card_index", 0),
-                    req.get("completed", False),
-                    req.get("time_spent_sec", 0),
-                    json.dumps(req.get("bookmarks", [])),
-                ))
+        with engine.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO luma_progress (user_id, content_id, section_index, card_index, completed, time_spent_sec, bookmarks)
+                VALUES (:uid, :cid, :si, :ci, :done, :ts, :bm)
+                ON CONFLICT (user_id, content_id) DO UPDATE SET
+                    section_index = EXCLUDED.section_index,
+                    card_index = EXCLUDED.card_index,
+                    completed = EXCLUDED.completed,
+                    time_spent_sec = luma_progress.time_spent_sec + EXCLUDED.time_spent_sec,
+                    bookmarks = EXCLUDED.bookmarks,
+                    updated_at = NOW()
+            """), {
+                "uid": user_id,
+                "cid": content_id,
+                "si": req.get("section_index", 0),
+                "ci": req.get("card_index", 0),
+                "done": req.get("completed", False),
+                "ts": req.get("time_spent_sec", 0),
+                "bm": json.dumps(req.get("bookmarks", [])),
+            })
             conn.commit()
-            pool.putconn(conn)
         return {"ok": True}
     except Exception as e:
         logger.error(f"Save luma progress error: {e}")
@@ -164,28 +154,21 @@ async def save_luma_progress(
 
 
 @router.get("/progress")
-async def get_luma_progress(
-    content_id: str = Query(...),
-    authorization: str = Header(None),
-):
-    """Get user's Luma learning progress."""
+async def get_luma_progress(content_id: str = Query(...), authorization: str = Header(None)):
     user_id = await _get_user_id(authorization)
     if not user_id:
         raise HTTPException(401, "Unauthorized")
 
-    pool = get_pool()
-    if not pool:
+    engine = get_engine_safe()
+    if not engine:
         return {"ok": False, "progress": None}
 
     try:
-        with pool.getconn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT section_index, card_index, completed, time_spent_sec, bookmarks, updated_at
-                    FROM luma_progress WHERE user_id = %s AND content_id = %s
-                """, (user_id, content_id))
-                row = cur.fetchone()
-            pool.putconn(conn)
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT section_index, card_index, completed, time_spent_sec, bookmarks, updated_at
+                FROM luma_progress WHERE user_id = :uid AND content_id = :cid
+            """), {"uid": user_id, "cid": content_id}).fetchone()
 
         if not row:
             return {"ok": True, "progress": None}
@@ -209,30 +192,27 @@ async def get_luma_progress(
 # ─── Table Setup ──────────────────────────────────────────────────────────────
 
 def ensure_tables():
-    """Create luma_progress table if not exists."""
-    pool = get_pool()
-    if not pool:
+    engine = get_engine_safe()
+    if not engine:
         return
     try:
-        with pool.getconn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS luma_progress (
-                        id SERIAL PRIMARY KEY,
-                        user_id INTEGER NOT NULL,
-                        content_id TEXT NOT NULL,
-                        section_index INTEGER DEFAULT 0,
-                        card_index INTEGER DEFAULT 0,
-                        completed BOOLEAN DEFAULT FALSE,
-                        time_spent_sec INTEGER DEFAULT 0,
-                        bookmarks JSONB DEFAULT '[]',
-                        created_at TIMESTAMPTZ DEFAULT NOW(),
-                        updated_at TIMESTAMPTZ DEFAULT NOW(),
-                        UNIQUE(user_id, content_id)
-                    )
-                """)
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS luma_progress (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    content_id TEXT NOT NULL,
+                    section_index INTEGER DEFAULT 0,
+                    card_index INTEGER DEFAULT 0,
+                    completed BOOLEAN DEFAULT FALSE,
+                    time_spent_sec INTEGER DEFAULT 0,
+                    bookmarks JSONB DEFAULT '[]',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, content_id)
+                )
+            """))
             conn.commit()
-            pool.putconn(conn)
         logger.info("luma_progress table ready")
     except Exception as e:
         logger.warning(f"luma_progress table setup: {e}")
