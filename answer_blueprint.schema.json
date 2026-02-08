@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KnowEasy Answer Blueprint v1.1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "meta",
+    "cards"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.1$"
+    },
+    "meta": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "mode",
+        "profile",
+        "difficulty",
+        "language"
+      ]
+    },
+    "cards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "title",
+          "content",
+          "reveal_min"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "title",
+              "why",
+              "assumptions",
+              "concept",
+              "diagram",
+              "graph",
+              "explanation",
+              "steps",
+              "alt_method",
+              "mistakes",
+              "practice",
+              "exam_footer",
+              "refusal",
+              "next_step",
+              "unknown"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "reveal_min": {
+            "type": "string",
+            "enum": [
+              "R0",
+              "R1",
+              "R2"
+            ]
+          },
+          "visual": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
